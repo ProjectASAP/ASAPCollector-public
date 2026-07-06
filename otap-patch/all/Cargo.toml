@@ -1,0 +1,62 @@
+# `asap_sketches_registry` — OTAP-side `linkme` distributed-slice
+# registration crate for the unified `asap_sketches` processor plugin.
+#
+# Phase 5 step D. Mirrors the role `telegraf-patch/plugins/processors/all/`
+# plays for the Telegraf side: a small overlay applied onto the OTAP
+# Dataflow workspace at build time that brings the
+# `OTAP_PROCESSOR_FACTORIES` registration for the ASAP precompute
+# plugin into the binary's link scope.
+#
+# The Cargo manifest is intentionally minimal. Heavy lifting (the
+# Tokio lifecycle, codec, 5-sketch dispatch) lives in
+# `asap-precompute-rs`; this crate is the linkme registration entry +
+# the thin OTAP `local::Processor<OtapPdata>` adapter that bridges
+# OTAP's `OtapPdata` shape onto `AsapSketchesPlugin`.
+#
+# Dependency notes:
+#
+# - `asap-precompute-rs` is path-deped from the staged location.
+#   `build_asap_otap.sh` copies this manifest to
+#   `<repo>/otel-arrow/rust/otap-dataflow/crates/asap-sketches-registry/Cargo.toml`
+#   at build time — five levels deep from the repo root, so the
+#   relative path back to `asap-precompute-rs/` is five `../` hops.
+# - `linkme` / `otap-df-engine` / `otap-df-otap` / `otap-df-config`
+#   are taken from the OTAP workspace via `workspace = true` so the
+#   versions track the upstream submodule's pin (avoids the
+#   "two distinct versions of linkme in the binary" failure mode
+#   called out in [otap design §10](../../docs/design-asap-otap-rust-integration.md#10-open-questions-and-risks)).
+
+[package]
+name = "asap_sketches_registry"
+version = "0.1.0"
+edition = "2024"
+description = "OTAP-Rust linkme distributed-slice registration for the ASAP unified `asap_sketches` processor"
+license = "MIT"
+publish = false
+
+# Single library file; named `mod.rs` rather than `lib.rs` to match the
+# `otap-patch/all/mod.rs` path the design doc §6 calls out.
+[lib]
+name = "asap_sketches_registry"
+path = "mod.rs"
+
+[dependencies]
+# Path-dep injected at staging time by `build_asap_otap.sh`. The
+# literal path here resolves once the crate is copied into
+# `<otap>/crates/asap-sketches-registry/` — five levels deep from
+# the repo root (`<repo>/otel-arrow/rust/otap-dataflow/crates/asap-sketches-registry`),
+# so five `../` hops land back at the repo root.
+asap-precompute-rs = { path = "../../../../../asap-precompute-rs", features = ["otap"] }
+
+# Pulled from the OTAP workspace so the linkme version matches the
+# binary's. Mismatched linkme versions cause silent registration
+# misses — see otap design §10 (Linkme + cross-crate registration).
+linkme = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+humantime-serde = { workspace = true }
+
+otap-df-engine = { workspace = true }
+otap-df-otap = { workspace = true }
+otap-df-config = { workspace = true }

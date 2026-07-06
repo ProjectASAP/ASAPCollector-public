@@ -1,0 +1,51 @@
+# ASAP `asap_sketches` plugin — canonical sample configuration.
+#
+# One [[pipelines.metrics.processors]] block per ASAP precompute. The
+# plugin is parameterized by `sketch_type`; multi-sketch deployments
+# declare multiple blocks with different `id` + `sketch_type` values.
+#
+# This file mirrors `docs/design-asap-otap-rust-integration.md` §8
+# verbatim. Phase C (asap-precompute-rs/src/otap/) implements the
+# lifecycle around this config block; Phase D will wire the TOML
+# loader once the OTAP submodule binding lands.
+
+[[pipelines.metrics.processors]]
+id     = "asap_ddsketch"
+plugin = "asap_sketches"
+
+  [pipelines.metrics.processors.config]
+  ## Sketch algorithm — one of:
+  ##   "ddsketch"         (quantiles, relative-error)
+  ##   "kll"              (quantiles, rank-error)
+  ##   "hll"              (cardinality)
+  ##   "countsketch"      (frequency / top-k)
+  ##   "countminsketch"   (frequency, biased upward)
+  sketch_type = "ddsketch"
+
+  ## Window size. Rust duration string parsed via OTAP's TOML
+  ## convention; passed verbatim into `PrecomputeConfig::window`.
+  window_size = "10s"
+
+  ## Output metric name stamped onto every emitted envelope. The
+  ## codec uses this as the stable `metric` column of every
+  ## emitted RecordBatch.
+  output_metric_name = "http_request_duration_ms"
+
+  ## Sketch-specific tuning knobs. Only the keys relevant to
+  ## `sketch_type` are read; others are ignored. Defaults match
+  ## the Telegraf sister plugin (Phase 4 step C).
+  [pipelines.metrics.processors.config.sketch_params]
+  relative_accuracy = 0.01   # ddsketch — relative error
+  # k = 200                  # kll — buffer size
+  # precision = 12           # hll — register count exponent (4-18)
+  # width = 2048             # countsketch / countminsketch — width
+  # depth = 4                # countsketch / countminsketch — depth
+
+  ## Bootstrap — controller for plan delivery via the
+  ## `ControlChannel` impl wired in Phase D.
+  ## Per ADR-0003 §3, sketch-runtime params (sketch_type, window,
+  ## sketch_params) above are also push-overridable from the
+  ## controller plan; the values here are bootstrap defaults
+  ## used until the first plan arrives.
+  controller_url = "http://controller:8080"
+  agent_id       = "otap-host-01"
