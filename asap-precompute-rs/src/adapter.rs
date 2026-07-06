@@ -1,11 +1,11 @@
-//! [`Adapter`] trait. Mirrors `asap-precompute-go/adapter.go`.
+//! [`Adapter`] trait.
 //!
 //! Adapters are the Layer-4 platform shims (OTel / Telegraf /
 //! Vector / OTAP) that translate their host's native event into
 //! [`crate::observation::Observation`], hand it to a
 //! [`crate::precompute::Precompute`], and translate the runtime's
 //! emitted [`crate::envelope::SketchEnvelope`] back to the host's
-//! native event. See ADR-0003.
+//! native event.
 
 use std::time::Duration;
 
@@ -21,8 +21,7 @@ use crate::precompute::{PrecomputeError, StatsSnapshot};
 /// etc.).
 pub type CancelTick = Box<dyn FnOnce() + Send>;
 
-/// Contract every Layer-4 platform shim implements. Mirrors Go
-/// `precompute.Adapter` (ADR-0003).
+/// Contract every Layer-4 platform shim implements.
 ///
 /// The associated `Event` type is the host's native event / data
 /// model:
@@ -31,10 +30,8 @@ pub type CancelTick = Box<dyn FnOnce() + Send>;
 ///   - Vector: `vector::Event`
 ///   - OTAP: `arrow::RecordBatch`
 ///
-/// In Go, lacking generic interface methods, the adapter erases
-/// `Event` as `any` and type-asserts internally. Rust uses an
-/// associated type instead, which keeps each adapter
-/// monomorphically typed without the runtime-erasure dance.
+/// Using an associated type keeps each adapter monomorphically typed
+/// without any runtime type-erasure dance.
 pub trait Adapter {
     /// Host's native event / data model.
     type Event;
@@ -44,7 +41,7 @@ pub trait Adapter {
     ///
     /// MUST recognize sketch-typed inputs and produce
     /// [`crate::observation::ObservationValueKind::Envelope`] rather
-    /// than expanding them to scalars (bandwidth invariant §5.2).
+    /// than expanding them to scalars (bandwidth invariant).
     fn decode(&self, ev: Self::Event) -> Result<Vec<Observation>, PrecomputeError>;
 
     /// Converts a slice of host-neutral [`SketchEnvelope`]s back

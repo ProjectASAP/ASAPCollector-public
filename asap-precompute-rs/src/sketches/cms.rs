@@ -1,7 +1,6 @@
 //! CountMinSketch wrapper over [`asap_sketchlib::CountMinSketch`].
 //!
-//! Mirrors `asap-precompute-go/sketches/cms.go`. Implements
-//! [`Sketch`] + [`FrequencySketch`].
+//! Implements [`Sketch`] + [`FrequencySketch`].
 
 use asap_sketchlib::proto::sketchlib::{
     sketch_envelope, CountMinState, CounterType, SketchEnvelope as ProtoEnvelope,
@@ -17,16 +16,14 @@ use crate::precompute::{
 /// Width, in bits, of the single 64-bit per-item hash that sketchlib's
 /// CMS / CountSketch bit-slice across rows. Each row consumes
 /// `ceil(log2(cols))` bits; once `rows * bitsPerRow > 64` the high rows
-/// read shifted-out (zero) bits and collapse onto column 0. Mirrors Go's
-/// `maxRowHashBits` (`asap-precompute-go/sketches/cms.go`).
+/// read shifted-out (zero) bits and collapse onto column 0.
 const MAX_ROW_HASH_BITS: usize = 64;
 
-/// Clamp `rows` so `rows * ceil(log2(cols)) <= 64`, mirroring Go's
-/// `clampRowsForHashBits`. `cols` is assumed already rounded to a power
-/// of two, so `cols.trailing_zeros()` == `log2(cols)` == the per-row bit
-/// width. When `bits_per_row == 0` (cols == 1) every row maps to column 0
-/// regardless, so the slicing never overflows and `rows` is left as-is.
-/// Returns at least 1.
+/// Clamp `rows` so `rows * ceil(log2(cols)) <= 64`. `cols` is assumed
+/// already rounded to a power of two, so `cols.trailing_zeros()` ==
+/// `log2(cols)` == the per-row bit width. When `bits_per_row == 0`
+/// (cols == 1) every row maps to column 0 regardless, so the slicing
+/// never overflows and `rows` is left as-is. Returns at least 1.
 fn clamp_rows_for_hash_bits(rows: usize, cols: usize) -> usize {
     let bits_per_row = cols.trailing_zeros() as usize;
     if bits_per_row == 0 {
@@ -36,11 +33,9 @@ fn clamp_rows_for_hash_bits(rows: usize, cols: usize) -> usize {
     rows.min(max_rows).max(1)
 }
 
-/// Fixed seed for CMS admission sampling, mirroring Go's `cmsSampleSeed`
-/// (`asap-precompute-go/sketches/cms.go`). A constant seed keeps the admitted
-/// subset reproducible; it need not match Go's RNG sequence byte-for-byte
-/// (producers sample independently — see `crate::sampling`), but we reuse the
-/// value for symmetry.
+/// Fixed seed for CMS admission sampling. A constant seed keeps the
+/// admitted subset reproducible; producers sample independently (see
+/// `crate::sampling`).
 const CMS_SAMPLE_SEED: u64 = 0x5A4D_5043; // "ZMPC"
 
 /// CountMinSketch wrapper.
@@ -56,19 +51,16 @@ pub struct CMSWrapper {
 impl CMSWrapper {
     /// Construct a CMS with the given dimensions.
     ///
-    /// Mirrors Go `NewCMSWrapper` (`asap-precompute-go/sketches/cms.go`)
-    /// for #243 byte-parity. The dimensions are normalized identically:
+    /// The dimensions are normalized as follows for byte-parity:
     ///
     /// - `cols` is rounded UP to the next power of two (after a floor of
     ///   1). sketchlib's CMS folds inserts with `% cols` but masks /
     ///   bit-slices the query hash assuming a power-of-two width, so a
     ///   non-pow2 cols mis-indexes. The canonical `cols = 2000` config
-    ///   must produce a sketch mergeable with the Go runtime's; both
-    ///   sides round to `2048`.
+    ///   rounds to `2048`.
     /// - `rows` is clamped so `rows * log2(cols) <= 64` (the single
     ///   64-bit per-item hash budget); beyond that the high rows read
-    ///   shifted-out (zero) bits and collapse onto column 0. See Go's
-    ///   `clampRowsForHashBits`.
+    ///   shifted-out (zero) bits and collapse onto column 0.
     ///
     /// The normalized `rows`/`cols` are stored on the struct AND used to
     /// build the underlying `CountMinSketch`, so `build_state` serializes
@@ -86,8 +78,7 @@ impl CMSWrapper {
     }
 
     /// Enable producer-side admission sampling at probability `p` (builder
-    /// form). `p >= 1` (or NaN/≤0) leaves the sketch exact. Mirrors Go's
-    /// `CMSWrapper.WithSampleP`.
+    /// form). `p >= 1` (or NaN/≤0) leaves the sketch exact.
     pub fn with_sample_p(mut self, p: f64) -> Self {
         self.set_sample_p(p);
         self
@@ -126,17 +117,15 @@ impl CMSWrapper {
     }
 
     fn build_state(&self) -> CountMinState {
-        // Mirror sketchlib-go::CountMinSketch.SerializePortableFO:
-        // emit packed sint64 `counts_int` (Opt-2: 4–8× smaller than
+        // Emit packed sint64 `counts_int` (Opt-2: 4–8× smaller than
         // f64 for typical small-integer counter values) and per-row
-        // L1/L2 norms (Go's InsertWithHash maintains
-        // `L1[r] += weight` and `L2[r] += curr*curr - prev*prev`,
-        // which collapse to `sum_c count[r][c]` and
-        // `sum_c count[r][c]^2` for the unweighted unit-step stream
-        // the parity harness drives — the only producer pattern this
-        // wire path serves today). Omit `sum_counts` / `sum2_counts`
-        // (Frequency-Only mode) to match Go's `SerializeProtoBytesFO`
-        // payload bit-for-bit.
+        // L1/L2 norms (the sketch maintains `L1[r] += weight` and
+        // `L2[r] += curr*curr - prev*prev`, which collapse to
+        // `sum_c count[r][c]` and `sum_c count[r][c]^2` for the
+        // unweighted unit-step stream the parity harness drives — the
+        // only producer pattern this wire path serves today). Omit
+        // `sum_counts` / `sum2_counts` (Frequency-Only mode) to match
+        // the portable serialization payload bit-for-bit.
         let matrix = self.sk.sketch();
         let mut counts_int = Vec::with_capacity(self.rows * self.cols);
         let mut l1 = Vec::with_capacity(self.rows);
@@ -236,11 +225,10 @@ impl Sketch for CMSWrapper {
         prev: &[u8],
         threshold: u64,
     ) -> Result<DeltaResult, PrecomputeError> {
-        // Mirror Go's `CMSWrapper.ComputeDeltaAgainst`: decode the prior
-        // snapshot envelope, then diff via `asap_sketchlib`'s
-        // `CountMinSketch::compute_delta`. On an empty / undecodable prior,
-        // or an empty current sketch, fall back to a full snapshot so the
-        // emit path always produces a valid payload.
+        // Decode the prior snapshot envelope, then diff via
+        // `asap_sketchlib`'s `CountMinSketch::compute_delta`. On an empty /
+        // undecodable prior, or an empty current sketch, fall back to a
+        // full snapshot so the emit path always produces a valid payload.
         //
         // Under per-window delta-against-empty (the snapshot cache resets
         // the cached base to the empty-sketch snapshot at each window
@@ -290,11 +278,10 @@ impl Sketch for CMSWrapper {
         if payload.is_empty() {
             return Ok(());
         }
-        // Mirror Go's `CMSWrapper.ApplyDelta`, dispatching on payload
-        // shape. A full-state envelope (the `SketchEnvelope{CountMinState}`
-        // wire format) takes the decode + merge path; otherwise the payload
-        // is a `CountMinDelta` proto and is applied additively via
-        // `apply_delta_bytes`.
+        // Dispatch on payload shape. A full-state envelope (the
+        // `SketchEnvelope{CountMinState}` wire format) takes the decode +
+        // merge path; otherwise the payload is a `CountMinDelta` proto and
+        // is applied additively via `apply_delta_bytes`.
         if let Ok(other) = Self::decode_envelope(payload) {
             return self
                 .sk
@@ -324,8 +311,8 @@ impl Sketch for CMSWrapper {
     }
 
     fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
-        // (delta-baseline-contract.md §3): CMS opts in to per-window
-        // deltas. After a window-close emit the snapshot cache caches THIS
+        // CMS opts in to per-window deltas. After a window-close emit the
+        // snapshot cache caches THIS
         // — the encoded envelope of an EMPTY CountMinSketch of the same
         // dimensions — so the next window's `compute_delta_against` diffs
         // against empty and emits that window's own per-cell matrix as a
@@ -368,7 +355,7 @@ impl FrequencySketch for CMSWrapper {
     fn top_k(&self, _k: usize) -> Vec<FrequencyEntry> {
         // CountMinSketch is a frequency estimator over a known key
         // set; it does not natively track top-k. Returning an empty
-        // slice matches the Go wrapper.
+        // slice is the expected behavior.
         Vec::new()
     }
 }
@@ -379,9 +366,8 @@ impl FrequencySketch for CMSWrapper {
 /// The key is the observation's `bytes` value when present (preserves
 /// pre-shaped callers / unit tests) or, for OTAP scalar observations
 /// (Float-kind, empty bytes), the full label set via
-/// [`crate::matchers::attributes_key`] — matching the Go edge's
-/// `AttributesKey(labels, nil)`. Each observation contributes weight
-/// `1.0`. We accept any value kind (including Float decoded from the
+/// [`crate::matchers::attributes_key`]. Each observation contributes
+/// weight `1.0`. We accept any value kind (including Float decoded from the
 /// OTAP `value` column) so CMS records the attribute-set on the OTAP
 /// edge instead of silently dropping every observation.
 pub struct CMSObserver;
@@ -438,7 +424,7 @@ mod tests {
         assert_eq!(decoded.sketch(), w.sk.sketch());
     }
 
-    // #30: coordinated sampling. WithSampleP(p<1) must (a) admit only ~p of
+    // Coordinated sampling. WithSampleP(p<1) must (a) admit only ~p of
     // updates so the raw sketch count is ~p× the input, and (b) stamp the wire
     // sample_p so the query side can rescale by 1/p. Exact (p>=1) stays byte-clean.
     #[test]

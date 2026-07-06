@@ -1,8 +1,6 @@
 //! `AsapSketchesPlugin` — Tokio-driven OTAP plugin lifecycle.
 //!
-//! Phase 5 step C exit criterion (per
-//! [otap design §11](../../../docs/design-asap-otap-rust-integration.md#11-phase-plan))
-//! reads:
+//! The full `asap_sketches` plugin provides:
 //!
 //! > Full `asap_sketches` plugin: all five sketch types via
 //! > `sketch_type` dispatch, control-channel Tokio task, `Wakeup`-driven
@@ -10,8 +8,7 @@
 //! > each `sketch_type`; round-trip raw input → envelope output
 //! > preserves expected sketch counts.
 //!
-//! The plugin owns three concurrent tasks, mirroring the contract in
-//! [otap design §5](../../../docs/design-asap-otap-rust-integration.md#5-plugin-lifecycle--otap-receiver--processor):
+//! The plugin owns three concurrent tasks:
 //!
 //! 1. **Input task** — consumes the OTAP `Stream<OtapMetricRecords>`
 //!    handed in by the host runtime. For each batch:
@@ -58,8 +55,8 @@ use super::config::{resolve, ConfigError, PluginConfig};
 use super::records::{flatten, lift, OtapMetricRecords, OtapRecordsError};
 use super::{decode_batch, encode_batch, OtapDecodeError, OtapEncodeError};
 
-/// Default poll cadence for the control-channel task. Mirrors the
-/// Telegraf side (Phase 4) — fast enough that operators see plan
+/// Default poll cadence for the control-channel task. Fast enough
+/// that operators see plan
 /// changes within a single window in practice, slow enough that the
 /// controller isn't hammered.
 pub const DEFAULT_CONTROL_CHANNEL_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -242,7 +239,7 @@ impl AsapSketchesPlugin {
 
 /// Tunables passed through [`AsapSketchesPlugin::start`].
 ///
-/// Defaults match the Phase 4 Telegraf side: fast enough that plan
+/// Defaults are fast enough that plan
 /// changes are visible within a single window, slow enough that the
 /// controller isn't polled hot.
 #[derive(Clone, Debug)]

@@ -1,9 +1,8 @@
 //! Per-series sketch payload cache for delta encoding (outbound) and
 //! inbound delta-apply against cached upstream snapshots.
 //!
-//! Mirrors `asap-precompute-go/snapshot_cache.go` and today's
-//! per-processor `snapshots map[string][]byte` (outbound) +
-//! `IngestState::sketch_snapshots` (inbound).
+//! Mirrors today's per-processor `snapshots map[string][]byte`
+//! (outbound) + `IngestState::sketch_snapshots` (inbound).
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -13,16 +12,13 @@ use crate::precompute::{DeltaResult, PrecomputeError, Sketch};
 /// Stores per-series sketch payloads for delta encoding (outbound)
 /// and inbound delta-apply against cached upstream snapshots.
 ///
-/// Mirrors Go `precompute.SnapshotCache`.
-///
 /// Two maps avoid cross-direction collisions: the same series key
 /// may be both produced (outbound) and consumed (inbound) by the
 /// same host when running as a forwarder, and the two byte streams
 /// are not interchangeable (a remote sender's snapshot is not what
 /// we'd emit locally).
 ///
-/// **Always-refresh policy** (mirrors the Go side / ADR-0002
-/// §"Behavior preservation"): every call to
+/// **Always-refresh policy**: every call to
 /// [`Self::compute_delta`] updates the cached previous snapshot to
 /// the current sketch state. Successive sub-threshold deltas are
 /// therefore each computed against the immediately preceding
@@ -49,7 +45,7 @@ impl Default for SnapshotCache {
 }
 
 impl SnapshotCache {
-    /// Constructs an empty cache. Mirrors Go `NewSnapshotCache`.
+    /// Constructs an empty cache.
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(SnapshotCacheInner {
@@ -65,8 +61,7 @@ impl SnapshotCache {
     /// on next emit).
     ///
     /// Stores a defensive copy of `payload` so a caller mutating its
-    /// slice after caching does not race the cache reader. Mirrors
-    /// Go `(*SnapshotCache).CacheOutbound`.
+    /// slice after caching does not race the cache reader.
     pub fn cache_outbound(&self, series_key: &str, payload: &[u8]) -> bool {
         let mut g = self.inner.write().expect("snapshot cache poisoned");
         let first_time = !g.outbound.contains_key(series_key);
@@ -74,8 +69,7 @@ impl SnapshotCache {
         first_time
     }
 
-    /// Returns the cached outbound payload, or `None`. Mirrors Go
-    /// `(*SnapshotCache).GetOutbound`.
+    /// Returns the cached outbound payload, or `None`.
     pub fn get_outbound(&self, series_key: &str) -> Option<Vec<u8>> {
         self.inner
             .read()
@@ -85,15 +79,13 @@ impl SnapshotCache {
             .cloned()
     }
 
-    /// Stores an upstream snapshot for delta apply. Mirrors Go
-    /// `(*SnapshotCache).CacheInbound`.
+    /// Stores an upstream snapshot for delta apply.
     pub fn cache_inbound(&self, series_key: &str, payload: &[u8]) {
         let mut g = self.inner.write().expect("snapshot cache poisoned");
         g.inbound.insert(series_key.to_string(), payload.to_vec());
     }
 
-    /// Returns the cached upstream snapshot or `None`. Mirrors Go
-    /// `(*SnapshotCache).GetInbound`.
+    /// Returns the cached upstream snapshot or `None`.
     pub fn get_inbound(&self, series_key: &str) -> Option<Vec<u8>> {
         self.inner
             .read()
@@ -108,8 +100,7 @@ impl SnapshotCache {
     ///
     /// Returns a [`DeltaResult`] where `is_full` means the runtime
     /// should emit `ProtoFull` (either no prior snapshot existed,
-    /// or the delta exceeded `threshold`). Mirrors Go
-    /// `(*SnapshotCache).ComputeDelta`.
+    /// or the delta exceeded `threshold`).
     ///
     /// Always-refresh: every call updates the cached previous
     /// snapshot to the current sketch state. When `is_full=true`
@@ -145,13 +136,13 @@ impl SnapshotCache {
 
         // Refresh the cached outbound base for the NEXT window's delta.
         //
-        // (delta-baseline-contract.md §3) — per-window deltas:
+        // Per-window deltas:
         // families that opt in via `Sketch::delta_against_empty_base`
         // (DDSketch / CMS / CountSketch / HLL) reset the cached base to the
         // EMPTY-sketch snapshot after each window-close emit, so the next
         // window diffs against empty and transmits its OWN per-window state
         // as a delta (no cross-window subtraction). This is what makes the
-        // backend's per-window base rotation correct.
+        // downstream per-window base rotation correct.
         //
         // Legacy always-refresh (KLL, and any family that returns the
         // `None` default):
@@ -176,15 +167,13 @@ impl SnapshotCache {
     }
 
     /// Clears all cached state. Used in tests and on shutdown.
-    /// Mirrors Go `(*SnapshotCache).Reset`.
     pub fn reset(&self) {
         let mut g = self.inner.write().expect("snapshot cache poisoned");
         g.outbound.clear();
         g.inbound.clear();
     }
 
-    /// Returns the number of cached outbound snapshots. Mirrors Go
-    /// `(*SnapshotCache).LenOutbound`.
+    /// Returns the number of cached outbound snapshots.
     pub fn len_outbound(&self) -> usize {
         self.inner
             .read()
@@ -193,8 +182,7 @@ impl SnapshotCache {
             .len()
     }
 
-    /// Returns the number of cached inbound snapshots. Mirrors Go
-    /// `(*SnapshotCache).LenInbound`.
+    /// Returns the number of cached inbound snapshots.
     pub fn len_inbound(&self) -> usize {
         self.inner
             .read()
@@ -527,8 +515,7 @@ mod tests {
     /// HLL consecutive windows each emit their OWN register state. Window
     /// 1 sees 5000 keys, window 2 a DISJOINT 200 keys. Reconstructing
     /// window 2 from EMPTY must yield ~200, NOT the ~5000-element union —
-    /// proving the empty-base reset defeats register-MAX leakage
-    /// (delta-baseline-contract.md §1.5 / §2.3).
+    /// proving the empty-base reset defeats register-MAX leakage.
     #[test]
     fn hll_consecutive_windows_no_cross_window_subtraction() {
         let c = SnapshotCache::new();

@@ -1,32 +1,25 @@
-//! OTAP-Rust codec (Layer-4 codec). Phase 5 step B —
-//! see [`docs/design-asap-otap-rust-integration.md`](../../../docs/design-asap-otap-rust-integration.md)
-//! §4 (data model mapping), §6 (plugin file layout), §11 (phase plan).
+//! OTAP-Rust codec (Layer-4 codec).
 //!
-//! This module is the OTAP-side mirror of `asap-precompute-go/telegraf/`
-//! (Phase 4 step B, PR #234). It does **pure data-shape translation**:
+//! This module does **pure data-shape translation**:
 //!
 //! - [`decode_batch`] turns a single [`arrow_array::RecordBatch`] into a
 //!   `Vec<Observation>` ready for [`crate::precompute::Precompute::observe`].
 //! - [`encode_batch`] turns a slice of [`crate::envelope::SketchEnvelope`]
 //!   back into a `RecordBatch` carrying the envelope payload as a
-//!   per-row Strategy-B field
-//!   (per [edge-framework §7.2](../../../docs/design-asap-edge-framework.md#72-two-encoding-strategies)).
+//!   per-row Strategy-B field.
 //!
 //! The codec **owns no Tokio tasks, no timers, no control-channel
 //! inbox**. The full plugin lifecycle (`Wakeup`-driven flush ticker,
 //! `NodeControlMsg` handling, control-channel poll task, graceful
 //! drain) is **Phase C** and lives in `otap-patch/plugins/asap_sketches/`
 //! once that arrives — kept deliberately separate from the codec to
-//! match the two-layer split in
-//! [otap design §2](../../../docs/design-asap-otap-rust-integration.md#2-architecture--the-two-layer-split).
+//! match the two-layer split.
 //!
 //! # Schema (v1)
 //!
-//! Per the design doc §4 ("Schema discovery — pin to OTel-Arrow's
-//! well-known schema in v1"), the codec discovers a small set of
+//! The codec discovers a small set of
 //! well-known columns by name. The well-known names match the
-//! Strategy-B carrier keys defined in
-//! [edge-framework §7.2](../../../docs/design-asap-edge-framework.md#72-two-encoding-strategies):
+//! Strategy-B carrier keys:
 //!
 //! | Column                  | Arrow type        | Required | Meaning                                                                  |
 //! |-------------------------|-------------------|----------|--------------------------------------------------------------------------|
@@ -53,8 +46,7 @@
 //! scope / per-row attribute child batches joined by integer ids).
 //! The plugin shell in Phase C is the layer that runs OTAP's native
 //! attribute join and projects an `OtapArrowRecords` down to a flat
-//! per-row RecordBatch the codec can consume — see the §6 plugin
-//! file layout in the design doc. Until the plugin shell exists, the
+//! per-row RecordBatch the codec can consume. Until the plugin shell exists, the
 //! codec's flat shape is also the easiest to round-trip in a unit
 //! test.
 //!
@@ -78,7 +70,7 @@
 //!
 //! The OTAP submodule wiring (linkme distributed-slice registration,
 //! `build_asap_otap.sh`, `otap-patch/all/mod.rs` patch) is **Phase D**
-//! per the §11 phase plan and is deliberately not touched here. The
+//! and is deliberately not touched here. The
 //! Phase C plugin lifecycle is exercised end-to-end via the
 //! `tests/otap_lifecycle.rs` harness.
 //!

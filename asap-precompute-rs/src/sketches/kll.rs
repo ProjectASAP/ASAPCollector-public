@@ -1,10 +1,8 @@
 //! KLL wrapper over [`asap_sketchlib::KLL`].
 //!
-//! Mirrors `asap-precompute-go/sketches/kll.go`. KLL uses random
-//! compaction so the wrapper takes an explicit (optional) seed for
-//! deterministic byte-identical replay (per `asap_sketchlib` PR #38 /
-//! `sketchlib-go` PR #54 — `init_with_seed` lands deterministic
-//! compaction RNG).
+//! KLL uses random compaction so the wrapper takes an explicit
+//! (optional) seed for deterministic byte-identical replay
+//! (`init_with_seed` lands a deterministic compaction RNG).
 
 use asap_sketchlib::sketches::KLL;
 use prost::Message;
@@ -32,9 +30,9 @@ pub struct KLLWrapper {
     /// [`Self::apply_delta`] can replay the peer's items into our
     /// compactor without poking at private state. The compactor
     /// itself drives [`Self::snapshot`] via the wire-format accessors
-    /// added in `asap_sketchlib` (PR #41 — wire_levels/wire_items/
-    /// wire_coin), so cross-language byte-parity with Go now lives
-    /// against the compactor's actual state, not this history vec.
+    /// added in `asap_sketchlib` (wire_levels/wire_items/wire_coin),
+    /// so cross-language byte-parity now lives against the compactor's
+    /// actual state, not this history vec.
     history: Vec<f64>,
 }
 
@@ -65,10 +63,9 @@ impl KLLWrapper {
 
     fn build_state(&self) -> KllState {
         // Wire-format-aligned: read directly from the compactor via
-        // the `wire_*` accessors added in asap_sketchlib PR #41 so the
-        // emitted `KllState.levels` / `items` / `coin` bytes match
-        // sketchlib-go's `SerializePortable` output. Closes part of
-        // ProjectASAP/ASAPCollector#243.
+        // the `wire_*` accessors added in asap_sketchlib so the
+        // emitted `KllState.levels` / `items` / `coin` bytes match the
+        // portable serialization output.
         let (state, bit_cache, remaining_bits) = self.sk.wire_coin();
         KllState {
             k: self.sk.wire_k(),
@@ -137,9 +134,7 @@ impl Sketch for KLLWrapper {
         _threshold: u64,
     ) -> Result<DeltaResult, PrecomputeError> {
         // KLL uses random compaction and is not additively mergeable
-        // in a delta sense — Go's `kll.ComputeDelta` does not exist.
-        // Always return the full snapshot, matching the Go wrapper
-        // (`KLLWrapper::ComputeDeltaAgainst` always returns isFull).
+        // in a delta sense. Always return the full snapshot.
         let full = self.snapshot()?;
         Ok(DeltaResult {
             payload: full,

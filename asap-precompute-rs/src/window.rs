@@ -1,5 +1,4 @@
-//! Per-[`crate::precompute::Precompute`] window manager. Mirrors
-//! `asap-precompute-go/window.go`.
+//! Per-[`crate::precompute::Precompute`] window manager.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -12,7 +11,7 @@ use crate::snapshot_cache::SnapshotCache;
 
 /// Per-series state held inside a window.
 ///
-/// Mirrors Go `seriesEntry`. Owns one [`Sketch`] instance and the
+/// Owns one [`Sketch`] instance and the
 /// labels needed to reconstruct the [`SketchEnvelope`] at flush
 /// time.
 pub struct SeriesEntry {
@@ -43,10 +42,8 @@ pub struct SeriesEntry {
     pub count: u64,
 }
 
-/// Per-Precompute window manager. Tumbling-only for Phase 3 step 2;
+/// Per-Precompute window manager. Tumbling-only for now;
 /// Sliding lands in a follow-up.
-///
-/// Mirrors Go `windowState`.
 ///
 /// Locking is owned by the enclosing [`std::sync::Mutex`] in
 /// [`crate::precompute::PrecomputeImpl`]; this struct itself is
@@ -73,7 +70,7 @@ impl Default for WindowState {
 }
 
 /// Returns the active window size in milliseconds, or zero for
-/// unsized (Batch) configs. Mirrors Go `windowSizeMs`.
+/// unsized (Batch) configs.
 pub(crate) fn window_size_ms(cfg: &PrecomputeConfig) -> u64 {
     if cfg.window.size == Duration::ZERO {
         return 0;
@@ -82,7 +79,7 @@ pub(crate) fn window_size_ms(cfg: &PrecomputeConfig) -> u64 {
 }
 
 impl WindowState {
-    /// Constructs an empty window. Mirrors Go `newWindowState`.
+    /// Constructs an empty window.
     pub fn new() -> Self {
         Self {
             series: HashMap::new(),
@@ -92,16 +89,13 @@ impl WindowState {
         }
     }
 
-    /// Returns the current series count. Mirrors Go
-    /// `(*windowState).activeSeriesCount`.
+    /// Returns the current series count.
     pub fn active_series_count(&self) -> usize {
         self.series.len()
     }
 
     /// Lazily computes the first window's bounds based on a
     /// reference timestamp.
-    ///
-    /// Mirrors Go `(*windowState).initWindow`.
     pub fn init_window(&mut self, ref_ms: u64, cfg: &PrecomputeConfig) {
         if self.initialized {
             return;
@@ -124,7 +118,7 @@ impl WindowState {
 
     /// Routes an observation into the window.
     ///
-    /// Mirrors Go `(*windowState).observe`. Creates a new series
+    /// Creates a new series
     /// entry if needed; honors `OnOverflow`. Returns
     /// [`PrecomputeError::SeriesCapExceeded`] or
     /// [`PrecomputeError::LateData`] where applicable.
@@ -214,8 +208,7 @@ impl WindowState {
     /// Applies an inbound envelope to the appropriate series via
     /// the sketch's `apply_delta` or `merge` depending on encoding.
     ///
-    /// Mirrors Go `(*windowState).observeEnvelope`. Strategy A
-    /// enforcement (design-doc §5.2): inbound envelopes are merged
+    /// Strategy A enforcement: inbound envelopes are merged
     /// into the local sketch as sketches, never expanded to scalar
     /// samples.
     pub fn observe_envelope(
@@ -302,7 +295,7 @@ impl WindowState {
     /// Atomically drains the active window and returns the
     /// closed-window series for emission.
     ///
-    /// Mirrors Go `(*windowState).rotate`. For tumbling, rotation
+    /// For tumbling, rotation
     /// triggers when `now_ms >= active_end_ms`. Returns
     /// `(closed_series, [start, end))`. If the active window isn't
     /// yet due, returns an empty `Vec`.
@@ -322,8 +315,7 @@ impl WindowState {
     /// wall-clock time. Used by `Precompute::drain` on shutdown
     /// paths.
     ///
-    /// Mirrors Go `(*windowState).drain`. When the active window
-    /// is already empty `drain` is a no-op.
+    /// When the active window is already empty `drain` is a no-op.
     pub fn drain(&mut self, cfg: &PrecomputeConfig) -> (Vec<SeriesEntry>, [u64; 2]) {
         if !self.initialized {
             return (Vec::new(), [0, 0]);

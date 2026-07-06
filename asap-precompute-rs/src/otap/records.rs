@@ -1,14 +1,11 @@
 //! `OtapArrowRecords` family modelling — sibling-batch projection
 //! and Strategy-B attribute-lift.
 //!
-//! Phase C exit criterion (per
-//! [otap design §11](../../../docs/design-asap-otap-rust-integration.md#11-phase-plan))
-//! lists `OtapArrowRecords` family → flat `RecordBatch` projection
-//! and Strategy-B attribute-lift on emit as deliverables that Phase B
+//! The `OtapArrowRecords` family → flat `RecordBatch` projection
+//! and Strategy-B attribute-lift on emit are deliverables that Phase B
 //! deferred. This module supplies both — without depending on the
 //! upstream OTAP submodule (which only mounts at Phase D's build
-//! time per [otap design §6](../../../docs/design-asap-otap-rust-integration.md#6-plugin-file-layout)
-//! and Phase C's scope boundary).
+//! time, per Phase C's scope boundary).
 //!
 //! # Why a local model
 //!
@@ -29,8 +26,7 @@
 //!    `RecordBatch` with `_asap_*` carrier columns. OTAP's strict
 //!    schema validator (`crates/pdata/src/schema/payloads.rs::check_match`)
 //!    rejects extension top-level columns on Logs/Metrics/Traces
-//!    record batches per
-//!    [edge-framework §7.2](../../../docs/design-asap-edge-framework.md#72-two-encoding-strategies).
+//!    record batches.
 //!    Phase C must lift the `_asap_*` columns onto the per-row
 //!    attribute child batch (`AttributeValueType::Bytes` keyed
 //!    entries) before passing the batch downstream.
@@ -52,8 +48,7 @@
 //!   `key` (`Utf8`), and one of `bytes` (`Binary`) / `str`
 //!   (`Utf8`) / `int` (`UInt64`) typed value columns. Multiple rows
 //!   per `parent_id` represent a multi-attribute set on one parent.
-//!   This mirrors the upstream OTAP attribute-child-batch shape
-//!   ([otap design §4](../../../docs/design-asap-otap-rust-integration.md#4-data-model-mapping--arrow-recordbatch--observation)).
+//!   This mirrors the upstream OTAP attribute-child-batch shape.
 //!
 //! Resource and scope child batches are deliberately omitted — Phase C's
 //! scope boundary calls out cross-host parity (Phase E) as the place
@@ -339,8 +334,7 @@ pub fn flatten(records: &OtapMetricRecords) -> Result<RecordBatch, OtapRecordsEr
 /// `lift` raises top-level Strategy-B columns into attribute rows so
 /// the resulting `RecordBatch` family passes OTAP's schema validator
 /// (`crates/pdata/src/schema/payloads.rs::check_match` rejects any
-/// extension column on Logs/Metrics/Traces RecordBatches per
-/// [edge-framework §7.2](../../../docs/design-asap-edge-framework.md#72-two-encoding-strategies)).
+/// extension column on Logs/Metrics/Traces RecordBatches).
 ///
 /// Behaviour:
 ///

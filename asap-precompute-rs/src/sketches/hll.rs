@@ -1,7 +1,7 @@
 //! HLL wrapper over [`asap_sketchlib::HllSketch`].
 //!
-//! Mirrors `asap-precompute-go/sketches/hll.go`. HLL is the canonical
-//! [`CardinalitySketch`] implementation in this crate.
+//! HLL is the canonical [`CardinalitySketch`] implementation in this
+//! crate.
 
 use asap_sketchlib::proto::sketchlib::{
     sketch_envelope, HllVariant, HyperLogLogState, SketchEnvelope as ProtoEnvelope,
@@ -29,8 +29,7 @@ impl HLLWrapper {
         }
     }
 
-    /// Insert a byte slice. Mirrors the Go wrapper's `UpdateValue`
-    /// (which the Go wrapper also routes to a hashed-bytes path).
+    /// Insert a byte slice, routed to a hashed-bytes path.
     pub fn update(&mut self, value: &[u8]) {
         self.sk.update(value);
     }
@@ -115,20 +114,19 @@ impl Sketch for HLLWrapper {
         prev: &[u8],
         threshold: u64,
     ) -> Result<DeltaResult, PrecomputeError> {
-        // Mirror Go's `HLLWrapper.ComputeDeltaAgainst`: decode the prior
-        // snapshot envelope, then diff via `asap_sketchlib`'s
-        // `HllSketch::compute_delta` (a register delta carrying every
-        // register where this window's value exceeds the prior's). On an
-        // empty / undecodable prior, or an empty current sketch, fall back
-        // to a full snapshot so the emit path always produces a valid
-        // payload.
+        // Decode the prior snapshot envelope, then diff via
+        // `asap_sketchlib`'s `HllSketch::compute_delta` (a register delta
+        // carrying every register where this window's value exceeds the
+        // prior's). On an empty / undecodable prior, or an empty current
+        // sketch, fall back to a full snapshot so the emit path always
+        // produces a valid payload.
         //
         // Under per-window delta-against-empty (the snapshot cache resets
         // the cached base to the empty-sketch snapshot at each window
         // close), `prev` decodes to an empty `HllSketch`, so the register
         // delta carries every non-zero register of THIS window — i.e. this
         // window's own register state, with no cross-window register-MAX
-        // leakage (delta-baseline-contract.md §1.5 / §2.3).
+        // leakage.
         if self.sk.registers.iter().all(|&r| r == 0) {
             let full = self.snapshot()?;
             return Ok(DeltaResult {
@@ -164,8 +162,7 @@ impl Sketch for HLLWrapper {
         if payload.is_empty() {
             return Ok(());
         }
-        // Mirror Go's `HLLWrapper.ApplyDelta`, dispatching on payload
-        // shape. A full-state envelope (the
+        // Dispatch on payload shape. A full-state envelope (the
         // `SketchEnvelope{HyperLogLogState}` wire format) takes the decode +
         // merge path; otherwise the payload is an `HllDelta` proto and is
         // applied via register max-merge through `apply_delta_bytes`.
@@ -196,15 +193,14 @@ impl Sketch for HLLWrapper {
     }
 
     fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
-        // (delta-baseline-contract.md §3): HLL opts in to per-window
-        // deltas. After a window-close emit the snapshot cache caches THIS
-        // — the encoded envelope of an EMPTY HLL of the same variant /
-        // precision — so the next window's `compute_delta_against` diffs
-        // against empty and emits that window's own register state as a
-        // delta. The empty-base reset is what makes window-scoped
-        // cardinality correct: HLL merges by register-wise MAX over a
-        // never-reset base, which would over-count without the reset
-        // (delta-baseline-contract.md §1.5 / §2.3).
+        // HLL opts in to per-window deltas. After a window-close emit the
+        // snapshot cache caches THIS — the encoded envelope of an EMPTY HLL
+        // of the same variant / precision — so the next window's
+        // `compute_delta_against` diffs against empty and emits that
+        // window's own register state as a delta. The empty-base reset is
+        // what makes window-scoped cardinality correct: HLL merges by
+        // register-wise MAX over a never-reset base, which would over-count
+        // without the reset.
         //
         // We encode the empty envelope rather than returning
         // `Sketch::snapshot()` of an empty sketch, because the latter
@@ -229,8 +225,7 @@ impl CardinalitySketch for HLLWrapper {
 /// Observer routing observations into an [`HLLWrapper`].
 ///
 /// Accepts both `Bytes` (preferred — opaque key) and `Float` (the
-/// float bytes are hashed). The Go reference accepts `Float` only;
-/// the Rust wrapper mirrors that for compatibility.
+/// float bytes are hashed).
 pub struct HLLObserver;
 
 impl SketchObserver for HLLObserver {

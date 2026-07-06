@@ -2,8 +2,7 @@
 
 This repository is a **standalone, buildable snapshot** of ASAP's
 [OTAP Dataflow](https://github.com/open-telemetry/otel-arrow/tree/main/rust/otap-dataflow)
-processor implementation, extracted from the private `ASAPCollector`
-monorepo so the OpenTelemetry / OTAP maintainers can read and build it.
+processor implementation.
 
 It ports ASAP's edge **precompute + sketching** runtime (windowed
 DDSketch / KLL / HLL / CountSketch / CountMin-Sketch aggregation) onto
@@ -48,8 +47,8 @@ The piece OTAP's runtime actually sees:
 | [`records.rs`](./asap-precompute-rs/src/otap/records.rs) | `OtapMetricRecords` + `flatten`/`lift` — projects OTAP's sibling-batch family (metrics + per-row attribute child batch joined by `parent_id`) ↔ flat `RecordBatch`, including the attribute-lift that keeps emitted batches passing OTAP's strict schema validator. |
 
 Both layers sit on the host-neutral runtime in the same crate
-(`precompute`, `window`, `snapshot_cache`, `sketches/*`), which is the
-Rust mirror of ASAP's `asap-precompute-go` edge runtime.
+(`precompute`, `window`, `snapshot_cache`, `sketches/*`) — ASAP's
+host-neutral edge precompute runtime.
 
 ## Build & test
 
@@ -67,11 +66,8 @@ plugin lifecycle.
 
 ## Dependency note
 
-The one external ASAP dependency, the sketch library
-[`asap_sketchlib`](https://github.com/ProjectASAP/asap_sketchlib), is
-**already public** (open on GitHub and published on crates.io).
-`asap-precompute-rs/Cargo.toml` pins it to a specific public commit so
-this crate builds against exactly the sketch API it was written for.
+[`asap_sketchlib`](https://github.com/ProjectASAP/asap_sketchlib) is a
+public dependency.
 
 ## Status
 
@@ -83,5 +79,4 @@ and cross-host byte-parity (Phase **E**) are the remaining work.
 
 ---
 
-This is a temporary public snapshot for review; the source of truth is
-the private `ASAPCollector` monorepo.
+This is a temporary public snapshot for review.

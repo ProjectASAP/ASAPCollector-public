@@ -3,8 +3,7 @@
 //! This module is the binary-level binding between the OTAP
 //! submodule's `linkme` distributed-slice registry and the
 //! `asap-precompute-rs` lifecycle code. **Phase C does not populate
-//! the registry call** — that work is Phase D per the design doc
-//! §11 phase plan.
+//! the registry call** — that work is Phase D.
 //!
 //! Phase C scope:
 //! - Plugin shell directory layout established (this file +
@@ -17,7 +16,7 @@
 //!   registers the plugin with the OTAP runtime.
 //! - Patches to `otap-patch/all/mod.rs` to bring the slice into
 //!   the host binary's link scope.
-//! - `build_asap_otap.sh` build script.
+//! - Build script for the overlay.
 //!
 //! See [`asap-precompute-rs/src/otap/lifecycle.rs`](../../../asap-precompute-rs/src/otap/lifecycle.rs)
 //! for the actual plugin runtime; the Phase D code here is just an
@@ -25,5 +24,4 @@
 //! onto `AsapSketchesPlugin::start()`.
 
 // Phase C placeholder — body populated in Phase D once the OTAP
-// submodule is wired in. See docs/design-asap-otap-rust-integration.md
-// §11 (Phase D row).
+// submodule is wired in.

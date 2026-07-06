@@ -1,12 +1,11 @@
-//! [`PrecomputeConfig`] and friends. Mirrors
-//! `asap-precompute-go/config.go`.
+//! [`PrecomputeConfig`] and friends.
 //!
-//! The bootstrap defines all type-level surface (config struct,
+//! Defines all type-level surface (config struct,
 //! aggregation mode, overflow policy, window spec, sketch params,
 //! plan-set wrapper) plus the trivial accessors. Series-key
 //! construction (`series_key_for`, `series_key_for_entry`) is
 //! type-only here — the actual canonical-key bytes are defined by
-//! [`crate::matchers`] and are wired up in Phase 3 step 2.
+//! [`crate::matchers`].
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -16,15 +15,13 @@ use crate::matchers::LabelMatcher;
 use crate::observation::{KeyValue, Observation};
 
 /// Controller-plan join key. One [`PrecomputeConfig`] per `AggId`; the
-/// controller's plan emits a flat list keyed by `AggId`. Mirrors Go
-/// `precompute.AggId`.
+/// controller's plan emits a flat list keyed by `AggId`.
 pub type AggId = u64;
 
 /// Picks the windowing strategy.
 ///
-/// Mirrors Go `precompute.AggregationMode`. Phase 3 step 2 implements
-/// only [`AggregationMode::Tumbling`]; [`AggregationMode::Sliding`] is
-/// deferred (see [`crate::window`]).
+/// Only [`AggregationMode::Tumbling`] is implemented;
+/// [`AggregationMode::Sliding`] is deferred (see [`crate::window`]).
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -36,15 +33,14 @@ pub enum AggregationMode {
     Tumbling,
     /// Rotates every [`WindowSpec::slide`]; observations land in
     /// every window whose `[start, end)` range covers their
-    /// timestamp. Phase 3 step 2 implements only Tumbling.
+    /// timestamp. Only Tumbling is implemented today.
     Sliding,
-    /// Processes one batch end-to-end with no windowing; used by the
-    /// original `ddsketchprocessor`'s `mode: batch` config.
+    /// Processes one batch end-to-end with no windowing (`mode: batch`).
     Batch,
 }
 
 impl AggregationMode {
-    /// Returns a debug name. Mirrors the Go `String()` method.
+    /// Returns a debug name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Tumbling => "Tumbling",
@@ -59,7 +55,7 @@ impl AggregationMode {
 ///
 /// `MaxSeries + OnOverflow` are new fields necessary because
 /// extracting the runtime out of the OTel pipeline removes the
-/// implicit channel-based backpressure (ADR-0002 §"Public API").
+/// implicit channel-based backpressure.
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -77,7 +73,7 @@ pub enum OnOverflow {
 }
 
 impl OnOverflow {
-    /// Returns a debug name. Mirrors the Go `String()` method.
+    /// Returns a debug name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Drop => "Drop",
@@ -87,8 +83,7 @@ impl OnOverflow {
     }
 }
 
-/// Configures the windowing parameters. Mirrors Go
-/// `precompute.WindowSpec`.
+/// Configures the windowing parameters.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WindowSpec {
     /// Window duration. For [`AggregationMode::Tumbling`], this is
@@ -127,7 +122,7 @@ mod duration_millis {
 
 /// Algorithm-specific tuning knobs.
 ///
-/// Mirrors Go `precompute.SketchParams`. Encoded as a flat map so
+/// Encoded as a flat map so
 /// adapters can stuff in algorithm-specific values without the
 /// runtime needing a typed schema for each.
 ///
@@ -140,15 +135,13 @@ mod duration_millis {
 /// - CountMin: `rows`, `columns` (uints)
 pub type SketchParams = HashMap<String, f64>;
 
-/// Returns the parameter value or `default` if not present. Mirrors
-/// Go `SketchParams.Get`.
+/// Returns the parameter value or `default` if not present.
 pub fn sketch_param_get(params: &SketchParams, key: &str, default: f64) -> f64 {
     params.get(key).copied().unwrap_or(default)
 }
 
 /// Host-neutral form of today's per-OTel-processor `Config` struct,
-/// plus `max_series` / `on_overflow`. Mirrors design-doc §6.3 and the
-/// Go `PrecomputeConfig`.
+/// plus `max_series` / `on_overflow`.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrecomputeConfig {
     /// Controller-plan join key. One config per `AggId`.
@@ -207,8 +200,7 @@ pub struct PrecomputeConfig {
     /// Metric name to stamp onto every [`crate::envelope::SketchEnvelope`]
     /// emitted by `tick`.
     ///
-    /// Mirrors today's per-processor `MetricName` config knob (see
-    /// e.g. `ddsketchprocessor.Config.MetricName`). The runtime
+    /// A per-processor `MetricName` config knob. The runtime
     /// copies it verbatim into [`crate::envelope::SketchEnvelope::metric_name`]
     /// so `Adapter::encode` can set `pmetric::Metric.Name()` without
     /// a side-channel label hack.
@@ -221,7 +213,7 @@ pub struct PrecomputeConfig {
     /// host-neutral. Today's processors emit delta sums, so adapters
     /// that don't set this explicitly will see the zero value
     /// (unspecified) and should default to 1 (delta) themselves; the
-    /// Phase-2 OTel shim sets it to 1.
+    /// OTel shim sets it to 1.
     pub temporality: i32,
     /// Whether resource-scope attributes participate in series-key
     /// construction (and whether they are carried through to the
@@ -267,9 +259,9 @@ pub struct PrecomputeConfig {
     ///   - `window_duration_seconds` (`window.size`, in whole
     ///     seconds)
     ///
-    /// Mirrors the legacy `countsketchprocessor`'s per-data-point
-    /// attributes; the backend ignores them for routing — they're
-    /// just observability hints. The runtime omits them by default
+    /// Per-data-point observability attributes; downstream ignores
+    /// them for routing — they're just hints. The runtime omits them
+    /// by default
     /// because the other 4 sketch processors (DDSketch / KLL / HLL /
     /// CMS) do not emit them.
     pub emit_window_stats: bool,
@@ -278,8 +270,7 @@ pub struct PrecomputeConfig {
 impl PrecomputeConfig {
     /// Returns whether the observation passes all configured matchers.
     ///
-    /// Mirrors Go `(*PrecomputeConfig).Matches`. Bootstrap: returns
-    /// `true` if matchers is empty, otherwise delegates to
+    /// Returns `true` if matchers is empty, otherwise delegates to
     /// [`crate::matchers::LabelMatcher::matches_all`].
     pub fn matches(&self, obs: &Observation) -> bool {
         if self.matchers.is_empty() {
@@ -292,12 +283,8 @@ impl PrecomputeConfig {
     /// the [`Self::omit_resource_attrs`] and
     /// [`Self::global_aggregation`] flags.
     ///
-    /// Mirrors Go `(*PrecomputeConfig).SeriesKeyFor`.
-    ///
-    /// **Phase 3 step 1:** thin wrapper over
-    /// [`crate::matchers::series_key`] — full canonical-byte
-    /// formatting matches the Go side and is locked in by tests in
-    /// Phase 3 step 2.
+    /// Thin wrapper over [`crate::matchers::series_key`], which owns
+    /// the full canonical-byte formatting.
     pub fn series_key_for(&self, obs: &Observation) -> String {
         if self.global_aggregation {
             return crate::matchers::series_key(self.agg_id, &[], &[], &[]);
@@ -315,8 +302,7 @@ impl PrecomputeConfig {
 
     /// Rebuilds the same key from a series entry's stored labels.
     ///
-    /// Mirrors Go `(*PrecomputeConfig).SeriesKeyForEntry`. The
-    /// invariant is: for a given config and an observation that
+    /// The invariant is: for a given config and an observation that
     /// produced an entry,
     /// `series_key_for(obs) == series_key_for_entry(resource_labels, labels)`.
     pub fn series_key_for_entry(
@@ -335,8 +321,7 @@ impl PrecomputeConfig {
 }
 
 /// Versioned bundle of configs delivered by
-/// [`crate::control_channel::ControlChannel`]. Mirrors Go
-/// `PrecomputeConfigSet` and design-doc §8.
+/// [`crate::control_channel::ControlChannel`].
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrecomputeConfigSet {
     /// Monotonically increasing across plans; ack with
@@ -347,8 +332,7 @@ pub struct PrecomputeConfigSet {
 }
 
 impl PrecomputeConfigSet {
-    /// Returns the config matching `agg_id`, or `None`. Mirrors Go
-    /// `PrecomputeConfigSet.FindByAggID`.
+    /// Returns the config matching `agg_id`, or `None`.
     pub fn find_by_agg_id(&self, agg_id: AggId) -> Option<&PrecomputeConfig> {
         self.configs.iter().find(|c| c.agg_id == agg_id)
     }

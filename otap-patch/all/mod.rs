@@ -4,11 +4,6 @@
 //! `asap_sketches_registry` — OTAP-Rust `linkme` distributed-slice
 //! registration for the unified ASAP `asap_sketches` processor.
 //!
-//! Phase 5 step D — see
-//! [`docs/design-asap-otap-rust-integration.md`](../../docs/design-asap-otap-rust-integration.md)
-//! §6 (plugin file layout), §7 (build pipeline), §10 (linkme +
-//! cross-crate registration) and §11 row D (phase plan exit criterion).
-//!
 //! ## What this file does
 //!
 //! Three things, all small.
@@ -23,20 +18,17 @@
 //! **(2)** Implements a minimal [`local::Processor<OtapPdata>`]
 //! adapter — [`AsapSketchesProcessor`] — that bridges OTAP's
 //! `OtapPdata` message shape onto Phase C's
-//! [`AsapSketchesPlugin`] runtime. Phase D's mandate (per §11 row D)
-//! is to ship the build pipeline + plugin registry entry; the
-//! adapter is intentionally a pass-through forward right now — the
-//! codec ↔ runtime wiring (Phase C's
-//! `OtapMetricRecords::flatten()` / `lift()`) lands as a follow-up
-//! because OTAP's `OtapPdata` ↔ `OtapMetricRecords`
-//! `From` / `Into` adapter was the §10 open-question Phase C
-//! deferred ("Phase D adds a thin `From`/`Into` adapter — no change
-//! to `flatten()`/`lift()` API needed."). For the §11 row D exit
-//! criterion ("a `asap-otap` binary that lists `asap_sketches` in
-//! its plugin registry") the URN entry is what the registry
-//! inspection sees; the adapter only needs to be wireable, not yet
-//! semantically complete. Functional end-to-end binding is Phase E
-//! (cross-host parity) territory.
+//! [`AsapSketchesPlugin`] runtime. Phase D's mandate is to ship the
+//! build pipeline + plugin registry entry; the adapter is
+//! intentionally a pass-through forward right now — the codec ↔
+//! runtime wiring (Phase C's `OtapMetricRecords::flatten()` /
+//! `lift()`) lands as a follow-up because the `OtapPdata` ↔
+//! `OtapMetricRecords` `From` / `Into` adapter was an open question
+//! Phase C deferred (a thin `From`/`Into` adapter is added without
+//! changing the `flatten()`/`lift()` API). The URN entry is what the
+//! registry inspection sees; the adapter only needs to be wireable,
+//! not yet semantically complete. Functional end-to-end binding is
+//! Phase E (cross-host parity) territory.
 //!
 //! **(3)** Validates the user-facing TOML config against
 //! [`asap_precompute_rs::otap::PluginConfig`]'s shape — the
@@ -52,11 +44,10 @@
 //!
 //! ## Cross-host parity guarantee
 //!
-//! The plugin URN, sketch_type strings, and TOML schema match
-//! Telegraf's `processors.allsketches` (Phase 4) and OTel's
-//! `asap_sketches` processor (Phase 3). A controller plan rendered
-//! for one host renders identically for the other two — no
-//! per-platform translation in the controller.
+//! The plugin URN, sketch_type strings, and TOML schema are stable
+//! across hosts. A controller plan rendered for one host renders
+//! identically for the others — no per-platform translation in the
+//! controller.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
@@ -84,8 +75,8 @@ use otap_df_otap::OTAP_PROCESSOR_FACTORIES;
 use asap_precompute_rs::otap::{AsapSketchesPlugin, PluginConfig};
 
 /// Public URN for the unified ASAP `asap_sketches` processor. Survives
-/// across the Telegraf and OTAP hosts unchanged so a controller plan
-/// addressed at this URN binds against either runtime.
+/// across hosts unchanged so a controller plan addressed at this URN
+/// binds against any runtime.
 pub const ASAP_SKETCHES_PROCESSOR_URN: &str = "urn:asap:processor:asap_sketches";
 
 /// User-facing TOML / YAML config for the OTAP `asap_sketches` plugin.
@@ -130,8 +121,7 @@ impl AsapSketchesUserConfig {
         let mut params = SketchParams::new();
         for (k, v) in self.sketch_params {
             // Only numeric tuning knobs survive — strings / bools are
-            // ignored. This mirrors the Telegraf side's `mapstructure`
-            // behavior and keeps the runtime free of stringly-typed
+            // ignored. This keeps the runtime free of stringly-typed
             // sketch knobs (`SketchParams` is `HashMap<String, f64>`).
             if let Some(n) = v.as_f64() {
                 let _ = params.insert(k, n);
@@ -226,14 +216,12 @@ pub fn create_asap_sketches_processor(
 ///
 /// **Phase D scope deliberate:** this adapter forwards `OtapPdata`
 /// messages downstream unchanged. The `OtapPdata` ↔
-/// `OtapMetricRecords` `From` / `Into` binding is the §10 open
-/// question Phase C deferred ("Phase D adds a thin `From`/`Into`
-/// adapter — no change to `flatten()`/`lift()` API needed.") and
-/// will land in a follow-up alongside the cross-host parity test
-/// (Phase E). What Phase D delivers here is the registration that
-/// brings `asap_sketches` into the binary's plugin registry —
-/// confirmed by the §11 row D exit ("a `asap-otap` binary that
-/// lists `asap_sketches` in its plugin registry").
+/// `OtapMetricRecords` `From` / `Into` binding is an open question
+/// Phase C deferred (a thin `From`/`Into` adapter that leaves the
+/// `flatten()`/`lift()` API unchanged) and will land in a follow-up
+/// alongside the cross-host parity test (Phase E). What Phase D
+/// delivers here is the registration that brings `asap_sketches`
+/// into the binary's plugin registry.
 ///
 /// The adapter holds the plugin instance so the `OtapPdata`
 /// translation can be hung off `process()` in the follow-up without
@@ -263,9 +251,9 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
         match msg {
             Message::PData(pdata) => {
                 // Phase D pass-through; codec wiring lands as a
-                // follow-up per the §10 From/Into adapter open
-                // question. The runtime is constructed and ready to
-                // observe — see `_plugin` field.
+                // follow-up via the From/Into adapter open question.
+                // The runtime is constructed and ready to observe —
+                // see `_plugin` field.
                 effect_handler.send_message_with_source_node(pdata).await?;
                 Ok(())
             }

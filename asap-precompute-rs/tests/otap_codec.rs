@@ -1,9 +1,9 @@
-//! Integration tests for the OTAP-Rust codec (Phase 5 step B).
+//! Integration tests for the OTAP-Rust codec.
 //!
 //! These exercise the codec end-to-end as a stable public surface,
 //! complementing the unit tests in `src/otap/{decode,encode,schema,plugin}.rs`.
 //!
-//! Coverage map (per the Phase B exit story):
+//! Coverage map:
 //!   - decode-then-encode round trip preserves payload bytes per row.
 //!   - encode-then-decode round trip preserves envelope bytes.
 //!   - per-sketch-type (DDSketch / KLL / HLL / CountSketch / CountMinSketch)
@@ -173,9 +173,9 @@ fn encode_then_decode_preserves_envelope_bytes() {
 #[test]
 fn per_sketch_type_round_trip_smoke() {
     // The codec is sketch-agnostic — it carries opaque envelope
-    // bytes — but the design doc explicitly calls out that all five
-    // sketch types must round-trip through encode/decode without
-    // payload corruption. Treat each as a smoke test.
+    // bytes — but all five sketch types must round-trip through
+    // encode/decode without payload corruption. Treat each as a
+    // smoke test.
     for (sketch_type, payload) in [
         (SketchType::DDSketch, vec![0xaa; 32]),
         (SketchType::KLLSketch, vec![0xbb; 64]),
@@ -201,12 +201,11 @@ fn per_sketch_type_round_trip_smoke() {
 #[test]
 fn scalar_then_back_round_trip_via_observation_does_not_corrupt_metric_name() {
     // Scalar (non-envelope) decode path: the codec emits a Float
-    // observation. Encode is envelope-direction only by design (the
-    // design doc §4 mapping table makes encode the egress path —
-    // ingest is decode-only). This test pins the asymmetry: encoding
-    // a Float observation back to OTAP is NOT in the codec's surface
-    // because the runtime never asks the codec to encode raw scalars
-    // — only `Precompute::tick` envelopes flow through encode.
+    // observation. Encode is envelope-direction only by design (encode
+    // is the egress path — ingest is decode-only). This test pins the
+    // asymmetry: encoding a Float observation back to OTAP is NOT in the
+    // codec's surface because the runtime never asks the codec to encode
+    // raw scalars — only `Precompute::tick` envelopes flow through encode.
     let schema = Arc::new(Schema::new(vec![
         Field::new(COLUMN_TIME_UNIX_NANO, DataType::UInt64, false),
         Field::new(COLUMN_METRIC, DataType::Utf8, false),
