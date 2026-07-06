@@ -1,15 +1,13 @@
-//! [`LabelMatcher`] and series-key helpers. Mirrors
-//! `asap-precompute-go/matchers.go`.
+//! [`LabelMatcher`] and series-key helpers.
 //!
-//! Bootstrap status: the type surface is final. The exact byte layout
-//! of [`series_key`] / [`attributes_key`] is locked to the Go side
-//! and lands in Phase 3 step 2 alongside the byte-parity tests.
+//! The type surface is final. The exact byte layout of
+//! [`series_key`] / [`attributes_key`] is locked by the byte-parity
+//! tests.
 
 use crate::config::AggId;
 use crate::observation::{KeyValue, Observation};
 
-/// Picks the comparison operator for a [`LabelMatcher`]. Mirrors Go
-/// `MatchOp`.
+/// Picks the comparison operator for a [`LabelMatcher`].
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -22,8 +20,7 @@ pub enum MatchOp {
 }
 
 impl MatchOp {
-    /// Returns the operator's debug name. Mirrors the Go `String()`
-    /// method.
+    /// Returns the operator's debug name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Equal => "=",
@@ -33,7 +30,7 @@ impl MatchOp {
 }
 
 /// Selects observations by metric name (`name == ""`) or label key
-/// (`name != ""`). Mirrors Go `LabelMatcher`.
+/// (`name != ""`).
 ///
 /// Today's per-processor `LabelMatchers` config uses `(key, value)`
 /// equality only; the `op` field is forward-compat for regex / glob.
@@ -63,16 +60,14 @@ impl LabelMatcher {
     ///
     /// Spelled out as a function (rather than only relying on
     /// `<MatchOp as Default>::default()`) so callers and tests can
-    /// reference the canonical default the same way the Go side
-    /// does in `matchers_test.go`.
+    /// reference the canonical default explicitly.
     pub fn default_op() -> MatchOp {
         MatchOp::Equal
     }
 
     /// Returns whether the observation satisfies all matchers.
     ///
-    /// Mirrors the body of Go `(*PrecomputeConfig).Matches`. Empty
-    /// matcher list returns `true`. For each matcher:
+    /// Empty matcher list returns `true`. For each matcher:
     ///   - For `Equal`: missing key fails the match. Mismatched value
     ///     fails. Match-equal-empty-string against missing key
     ///     behaves like the existing OTel processor: missing key
@@ -110,7 +105,7 @@ impl LabelMatcher {
 
 /// Returns the value for `key` in `labels`. Linear scan; label sets
 /// are small (typically < 10) so this beats building a map for
-/// ephemeral matching. Mirrors Go `lookupLabel`.
+/// ephemeral matching.
 pub(crate) fn lookup_label<'a>(labels: &'a [KeyValue], key: &str) -> Option<&'a str> {
     labels
         .iter()
@@ -121,14 +116,11 @@ pub(crate) fn lookup_label<'a>(labels: &'a [KeyValue], key: &str) -> Option<&'a 
 /// Produces a stable string identifying the `(agg_id, label_key)`
 /// series for storage and snapshot lookup.
 ///
-/// Mirrors Go `precompute.SeriesKey`. Output format MUST stay
-/// byte-identical to today's per-processor `seriesKey` /
-/// `attributesKey` output for the same input — that's how the
-/// snapshot cache survives the refactor (ADR-0002 §"Behavior
-/// preservation").
+/// Output format MUST stay byte-identical to today's per-processor
+/// `seriesKey` / `attributesKey` output for the same input — that's
+/// how the snapshot cache survives the refactor.
 ///
-/// Today's format (see `ddsketchprocessor.go::seriesKey` +
-/// `attributesKey`):
+/// Today's format:
 ///
 /// ```text
 /// with aggregateBy:    "k1=v1;k2=v2;"  for the listed keys, missing keys skipped
@@ -155,7 +147,7 @@ pub fn series_key(
 
 /// Returns just the per-label-set portion of [`series_key`].
 ///
-/// Mirrors Go `precompute.AttributesKey`. When `aggregate_by` is
+/// When `aggregate_by` is
 /// empty, all labels are included sorted by key; otherwise only the
 /// listed keys are included in their `aggregate_by` order. Missing
 /// keys are skipped (no `k=;` placeholder), matching today's
@@ -168,8 +160,7 @@ pub fn attributes_key(labels: &[KeyValue], aggregate_by: &[String]) -> String {
 
 fn write_attributes_key(buf: &mut String, labels: &[KeyValue], aggregate_by: &[String]) {
     if aggregate_by.is_empty() {
-        // Sort by key for stable output. Go's processor uses
-        // sort.Strings on the collected keys; we replicate that.
+        // Sort by key for stable output.
         let mut keys: Vec<&str> = labels.iter().map(|kv| kv.key.as_str()).collect();
         keys.sort();
         for k in keys {
@@ -182,10 +173,9 @@ fn write_attributes_key(buf: &mut String, labels: &[KeyValue], aggregate_by: &[S
         }
         return;
     }
-    // aggregate_by is already sorted by config validate (Go
-    // convention); we preserve the caller's order rather than
-    // re-sort, so legacy callers that sort upstream get bit-identical
-    // keys.
+    // aggregate_by is already sorted by config validation; we
+    // preserve the caller's order rather than re-sort, so legacy
+    // callers that sort upstream get bit-identical keys.
     for k in aggregate_by {
         if let Some(v) = lookup_label(labels, k) {
             buf.push_str(k);
@@ -199,7 +189,7 @@ fn write_attributes_key(buf: &mut String, labels: &[KeyValue], aggregate_by: &[S
 /// Filters `labels` to only those in `aggregate_by`, preserving
 /// `aggregate_by` order.
 ///
-/// Mirrors Go `precompute.SeriesAttrs`. When `aggregate_by` is
+/// When `aggregate_by` is
 /// empty, returns a copy of all labels; otherwise returns only the
 /// listed-and-present ones.
 pub fn series_attrs(labels: &[KeyValue], aggregate_by: &[String]) -> Vec<KeyValue> {

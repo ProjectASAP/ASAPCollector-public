@@ -1,8 +1,7 @@
 //! DDSketch wrapper over [`asap_sketchlib::DdSketch`].
 //!
-//! Mirrors `asap-precompute-go/sketches/ddsketch.go`. Adapts the
-//! wire-format-aligned `DdSketch` struct to the host-neutral
-//! [`Sketch`] + [`QuantileSketch`] interfaces.
+//! Adapts the wire-format-aligned `DdSketch` struct to the
+//! host-neutral [`Sketch`] + [`QuantileSketch`] interfaces.
 
 use asap_sketchlib::proto::sketchlib::{
     sketch_envelope, DdSketchState, SketchEnvelope as ProtoEnvelope,
@@ -21,8 +20,7 @@ use crate::precompute::{DeltaResult, PrecomputeError, QuantileSketch, Sketch, Sk
 /// # Snapshot format
 ///
 /// `Snapshot` produces a `prost`-encoded `SketchEnvelope` carrying the
-/// inner `DDSketchState` proto — the same shape Go's
-/// `ddsketch.SerializePortable + proto.Marshal` emits.
+/// inner `DDSketchState` proto.
 pub struct DDSketchWrapper {
     sk: DdSketch,
     alpha: f64,
@@ -34,7 +32,7 @@ pub struct DDSketchWrapper {
     sampler: crate::sampling::GeometricSampler,
 }
 
-/// Fixed seed for DDSketch admission sampling, mirroring Go's `ddSampleSeed`.
+/// Fixed seed for DDSketch admission sampling.
 const DD_SAMPLE_SEED: u64 = 0x4444_5350; // "DDSP"
 
 impl DDSketchWrapper {
@@ -50,7 +48,7 @@ impl DDSketchWrapper {
     }
 
     /// Enable NitroSketch geometric skip-sampling at probability `p` (builder
-    /// form). Mirrors Go's `DDSketchWrapper.WithSampleP`.
+    /// form).
     pub fn with_sample_p(mut self, p: f64) -> Self {
         self.set_sample_p(p);
         self
@@ -89,12 +87,10 @@ impl DDSketchWrapper {
     fn build_state(&self) -> DdSketchState {
         DdSketchState {
             // Use the gamma-roundtripped alpha so the on-the-wire bytes
-            // match `sketchlib-go::DDSketch.SerializePortable` exactly.
-            // Closes part of ProjectASAP/ASAPCollector#243.
+            // match the portable serialization exactly.
             //
             // The DataPoint-level METRIC scalars (count/sum/min/max) were
-            // dropped from `DdSketchState` (ProjectASAP/sketchlib-go#61 +
-            // ProjectASAP/asap_sketchlib#57): the count is recoverable by
+            // dropped from `DdSketchState`: the count is recoverable by
             // summing `store_counts` and the others are bucket-estimated,
             // so the wire format now carries only alpha + the bucket store.
             alpha: self.sk.wire_alpha(),
@@ -133,9 +129,8 @@ impl DDSketchWrapper {
                 state.alpha
             )));
         }
-        // `DdSketchState` no longer carries the count/sum/min/max scalars
-        // (ProjectASAP/sketchlib-go#61 + ProjectASAP/asap_sketchlib#57). The
-        // total count is recovered by summing `store_counts` (see
+        // `DdSketchState` no longer carries the count/sum/min/max scalars.
+        // The total count is recovered by summing `store_counts` (see
         // `DdSketch::total_count`); min/max are estimated from the extreme
         // non-empty buckets inside `DdSketch::quantile`, within DDSketch's
         // alpha relative-accuracy bound. So we reconstruct purely from the
@@ -151,9 +146,8 @@ impl DDSketchWrapper {
 impl Sketch for DDSketchWrapper {
     fn snapshot(&self) -> Result<Vec<u8>, PrecomputeError> {
         if self.sk.total_count() == 0 {
-            // Mirror Go: empty sketch produces empty snapshot — the
-            // runtime drops empty payloads rather than emitting
-            // zero-byte envelopes.
+            // Empty sketch produces empty snapshot — the runtime drops
+            // empty payloads rather than emitting zero-byte envelopes.
             return Ok(Vec::new());
         }
         Ok(self.encode_envelope())
@@ -164,11 +158,10 @@ impl Sketch for DDSketchWrapper {
         prev: &[u8],
         threshold: u64,
     ) -> Result<DeltaResult, PrecomputeError> {
-        // Mirror Go's `DDSketchWrapper.ComputeDeltaAgainst`: decode the
-        // prior snapshot envelope, then diff via `asap_sketchlib`'s
-        // `DdSketch::compute_delta`. On an empty / undecodable prior, or
-        // an empty current sketch, fall back to a full snapshot so the
-        // emit path always produces a valid payload.
+        // Decode the prior snapshot envelope, then diff via
+        // `asap_sketchlib`'s `DdSketch::compute_delta`. On an empty /
+        // undecodable prior, or an empty current sketch, fall back to a
+        // full snapshot so the emit path always produces a valid payload.
         //
         // Under per-window delta-against-empty (the snapshot cache resets
         // the cached base to the empty-sketch snapshot at each window
@@ -212,10 +205,10 @@ impl Sketch for DDSketchWrapper {
         if delta.is_empty() {
             return Ok(());
         }
-        // Mirror Go's `DDSketchWrapper.ApplyDelta`, dispatching on payload
-        // shape. A full-state envelope (the `SketchEnvelope{DDSketchState}`
-        // wire format) takes the decode + merge path; otherwise the payload
-        // is a `DDSketchDelta` proto and is applied additively.
+        // Dispatch on payload shape. A full-state envelope (the
+        // `SketchEnvelope{DDSketchState}` wire format) takes the decode +
+        // merge path; otherwise the payload is a `DDSketchDelta` proto and
+        // is applied additively.
         if let Ok(other) = Self::decode_envelope(delta) {
             return self
                 .sk
@@ -247,8 +240,8 @@ impl Sketch for DDSketchWrapper {
     }
 
     fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
-        // (delta-baseline-contract.md §3): DDSketch opts in to
-        // per-window deltas. After a window-close emit the snapshot cache
+        // DDSketch opts in to per-window deltas. After a window-close
+        // emit the snapshot cache
         // caches THIS — the encoded envelope of an EMPTY DDSketch of the
         // same alpha — so the next window's `compute_delta_against` diffs
         // against empty and emits that window's own bucket store as a
@@ -324,7 +317,7 @@ mod tests {
         assert_eq!(w.snapshot().unwrap().len(), 0);
     }
 
-    // #30: DDSketch samples to shed update/bandwidth cost. Admit ~p of updates
+    // DDSketch samples to shed update/bandwidth cost. Admit ~p of updates
     // (total_count ~p×) and stamp the wire sample_p; quantiles are scale-
     // invariant so the SHAPE survives even though the raw count drops.
     #[test]
@@ -389,8 +382,7 @@ mod tests {
         let bytes = w.snapshot().unwrap();
         let decoded = DDSketchWrapper::decode_envelope(&bytes).unwrap();
         // count is recovered exactly by summing the bucket store; the
-        // count/sum scalars are no longer on the wire
-        // (ProjectASAP/sketchlib-go#61 + ProjectASAP/asap_sketchlib#57).
+        // count/sum scalars are no longer on the wire.
         assert_eq!(decoded.total_count(), w.sk.total_count());
         assert_eq!(decoded.store_counts, w.sk.store_counts);
         assert_eq!(decoded.store_offset, w.sk.store_offset);

@@ -1,11 +1,9 @@
 # `asap_sketches_registry` — OTAP-side `linkme` distributed-slice
 # registration crate for the unified `asap_sketches` processor plugin.
 #
-# Phase 5 step D. Mirrors the role `telegraf-patch/plugins/processors/all/`
-# plays for the Telegraf side: a small overlay applied onto the OTAP
-# Dataflow workspace at build time that brings the
-# `OTAP_PROCESSOR_FACTORIES` registration for the ASAP precompute
-# plugin into the binary's link scope.
+# A small overlay applied onto the OTAP Dataflow workspace at build
+# time that brings the `OTAP_PROCESSOR_FACTORIES` registration for the
+# ASAP precompute plugin into the binary's link scope.
 #
 # The Cargo manifest is intentionally minimal. Heavy lifting (the
 # Tokio lifecycle, codec, 5-sketch dispatch) lives in
@@ -23,8 +21,7 @@
 # - `linkme` / `otap-df-engine` / `otap-df-otap` / `otap-df-config`
 #   are taken from the OTAP workspace via `workspace = true` so the
 #   versions track the upstream submodule's pin (avoids the
-#   "two distinct versions of linkme in the binary" failure mode
-#   called out in [otap design §10](../../docs/design-asap-otap-rust-integration.md#10-open-questions-and-risks)).
+#   "two distinct versions of linkme in the binary" failure mode).
 
 [package]
 name = "asap_sketches_registry"
@@ -35,7 +32,7 @@ license = "MIT"
 publish = false
 
 # Single library file; named `mod.rs` rather than `lib.rs` to match the
-# `otap-patch/all/mod.rs` path the design doc §6 calls out.
+# `otap-patch/all/mod.rs` path the overlay layout calls out.
 [lib]
 name = "asap_sketches_registry"
 path = "mod.rs"
@@ -50,7 +47,7 @@ asap-precompute-rs = { path = "../../../../../asap-precompute-rs", features = ["
 
 # Pulled from the OTAP workspace so the linkme version matches the
 # binary's. Mismatched linkme versions cause silent registration
-# misses — see otap design §10 (Linkme + cross-crate registration).
+# misses.
 linkme = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

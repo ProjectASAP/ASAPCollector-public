@@ -1,10 +1,8 @@
 # `asap_sketches` — OTAP-Rust unified ASAP precompute plugin
 
-The OTAP-Rust mirror of Telegraf's `processors.allsketches` and
-`asap-otelcol`'s legacy per-sketch processors: one plugin
-parameterized by `sketch_type` that adapts the host-neutral
-`asap-precompute-rs` runtime to OTAP Dataflow's Arrow-native
-streaming model.
+One plugin parameterized by `sketch_type` that adapts the
+host-neutral `asap-precompute-rs` runtime to OTAP Dataflow's
+Arrow-native streaming model.
 
 This directory holds the **plugin shell** scaffolding: sample TOML,
 this README, and a future `Cargo.toml` / `src/lib.rs` once Phase D
@@ -14,34 +12,31 @@ poll, graceful drain — lives upstream in
 [`asap-precompute-rs/src/otap/`](../../../asap-precompute-rs/src/otap/),
 gated by the `otap` feature.
 
-See [`docs/design-asap-otap-rust-integration.md`](../../../docs/design-asap-otap-rust-integration.md)
-for the design rationale; in particular:
+Design notes:
 
-- §3 explains why this is a single unified plugin rather than five
-  per-sketch plugins.
-- §5 specifies the lifecycle contract: `linkme` slice registration,
-  async `Stream<RecordBatch>` consumption, `NodeControlMsg::Wakeup`
+- This is a single unified plugin rather than five per-sketch
+  plugins.
+- The lifecycle contract is: `linkme` slice registration, async
+  `Stream<RecordBatch>` consumption, `NodeControlMsg::Wakeup`
   scheduled flush, graceful-shutdown drain.
-- §6 calls out this directory layout as the target shape.
-- §8 documents the configuration shape that
-  [`sample.toml`](./sample.toml) demonstrates.
+- This directory layout is the target shape.
+- The configuration shape is documented by
+  [`sample.toml`](./sample.toml).
 
 ## Phase status
 
-- **Phase B** (PR #256) — codec (`decode_batch` / `encode_batch`)
-  shipped.
-- **Phase C** (this PR) — full plugin lifecycle + 5-sketch
-  dispatch live in
+- **Phase B** — codec (`decode_batch` / `encode_batch`) shipped.
+- **Phase C** — full plugin lifecycle + 5-sketch dispatch live in
   [`asap-precompute-rs/src/otap/{config,lifecycle,records}.rs`](../../../asap-precompute-rs/src/otap/).
   The plugin shell here documents the user-facing configuration;
   the binary-level `linkme` registration is **deliberately
-  deferred** to Phase D per the §11 phase plan.
-- **Phase D** (next) — `build_asap_otap.sh` build script and
+  deferred** to Phase D.
+- **Phase D** (next) — the overlay build script and
   `otap-patch/all/mod.rs` `linkme` distributed-slice registration.
   Phase D adds `Cargo.toml` + `src/lib.rs` here once the OTAP
   submodule binding is wired in.
 - **Phase E** (optional) — cross-host envelope parity, gated on
-  cross-language byte-parity (issue #243).
+  cross-language byte-parity.
 
 ## Configuration
 
@@ -65,8 +60,7 @@ Field reference:
 
 ## Lifecycle
 
-The plugin owns three async tasks (per
-[design doc §5](../../../docs/design-asap-otap-rust-integration.md#5-plugin-lifecycle--otap-receiver--processor)):
+The plugin owns three async tasks:
 
 1. **Input task** — consumes the host-supplied
    `Stream<OtapMetricRecords>`. For each batch:

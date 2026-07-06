@@ -1,10 +1,9 @@
 # asap-precompute-rs
 
-`asap-precompute-rs` is the Rust mirror of ASAP's `asap-precompute-go`,
-the host-neutral edge precompute runtime. It owns the windowing,
-snapshot caching, and delta-encoding logic for the Rust edge runtime,
-and — under the `otap` feature — the OTAP Dataflow integration layer
-(Arrow codec + Tokio plugin lifecycle).
+`asap-precompute-rs` is ASAP's host-neutral edge precompute runtime.
+It owns the windowing, snapshot caching, and delta-encoding logic for
+the Rust edge runtime, and — under the `otap` feature — the OTAP
+Dataflow integration layer (Arrow codec + Tokio plugin lifecycle).
 
 Per-platform Adapter implementations (the Layer-4 shims) translate their
 host's native event into an `Observation`, hand it to a `Precompute`,
@@ -41,10 +40,8 @@ native event.
 
 ## Dependency
 
-The sketch library [`asap_sketchlib`](https://github.com/ProjectASAP/asap_sketchlib)
-is public (open on GitHub, published on crates.io). `Cargo.toml` pins it
-to a specific public commit; switch to `branch = "main"` or a crates.io
-version spec to track other releases.
+[`asap_sketchlib`](https://github.com/ProjectASAP/asap_sketchlib) is a
+public dependency.
 
 ## Validation
 

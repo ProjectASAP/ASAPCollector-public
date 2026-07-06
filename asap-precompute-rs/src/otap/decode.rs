@@ -1,11 +1,10 @@
 //! `decode_batch`: [`arrow_array::RecordBatch`] → `Vec<Observation>`.
 //!
-//! Mirrors the row-emit shape of `asap-precompute-go/otel/decode.go`:
-//! one `Observation` per row in the input batch. The OTAP shape is
+//! One `Observation` per row in the input batch. The OTAP shape is
 //! column-major where OTel's pmetric is a tree, so the codec walks
 //! the columns once up front (resolving them to typed Arrow array
 //! references), then iterates rows pulling values by index. This is
-//! the throughput win the design doc §4 calls out.
+//! the throughput win.
 
 use std::sync::Arc;
 
@@ -75,8 +74,7 @@ pub enum OtapDecodeError {
 
 /// Decode an OTAP `RecordBatch` into a `Vec<Observation>`.
 ///
-/// One `Observation` per row. Column resolution is by name (per
-/// design doc §4 v1 schema-discovery strategy). Any row whose
+/// One `Observation` per row. Column resolution is by name. Any row whose
 /// `_asap_envelope` cell is non-null emits a
 /// [`crate::observation::ObservationValueKind::Envelope`]
 /// observation; otherwise the row routes through the scalar

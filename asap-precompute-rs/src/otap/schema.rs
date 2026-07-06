@@ -1,8 +1,7 @@
 //! Well-known column / attribute names for the OTAP-Rust codec.
 //!
-//! Strategy-B carrier keys are pinned by
-//! [edge-framework §7.2](../../../docs/design-asap-edge-framework.md#72-two-encoding-strategies)
-//! and are case-sensitive, prefix-included. Every Strategy-B adapter
+//! Strategy-B carrier keys are case-sensitive, prefix-included.
+//! Every Strategy-B adapter
 //! (Telegraf today, OTAP / Vector tomorrow) uses these exact
 //! spellings — the codec MUST NOT change them.
 
@@ -22,7 +21,7 @@ pub const COLUMN_VALUE: &str = "value";
 
 // ---------- Strategy-B per-row attribute keys ----------
 //
-// Per edge-framework §7.2: in the OTAP carrier these ride as
+// In the OTAP carrier these ride as
 // `AttributeValueType::Bytes` / typed values on the per-row attribute
 // child batch (NOT as sibling top-level columns on the metrics batch
 // — OTAP's strict schema validator rejects extension columns). The
@@ -82,9 +81,8 @@ mod tests {
 
     #[test]
     fn well_known_keys_match_edge_framework_doc() {
-        // Cross-check against the Strategy-B keys table in
-        // edge-framework §7.2 — these MUST be byte-identical to the
-        // spellings the doc pins for cross-platform interop.
+        // Cross-check the Strategy-B key spellings — these MUST be
+        // byte-identical for cross-platform interop.
         assert_eq!(ATTR_ENVELOPE, "_asap_envelope");
         assert_eq!(ATTR_SKETCH_TYPE, "_asap_sketch_type");
         assert_eq!(ATTR_AGG_ID, "_asap_agg_id");

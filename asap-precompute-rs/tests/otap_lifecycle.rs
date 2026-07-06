@@ -1,9 +1,8 @@
-//! Phase 5 step C lifecycle harness for the `asap_sketches` plugin.
+//! Lifecycle harness for the `asap_sketches` plugin.
 //!
-//! Coverage map (per the design doc §11 Phase C exit criterion —
-//! "OTAP-harness lifecycle tests pass for each `sketch_type`;
-//! round-trip raw input → envelope output preserves expected sketch
-//! counts"):
+//! Exit criterion: OTAP-harness lifecycle tests pass for each
+//! `sketch_type`; round-trip raw input → envelope output preserves
+//! expected sketch counts.
 //!
 //! - One end-to-end test per `sketch_type` (DDSketch / KLL / HLL /
 //!   CountSketch / CountMinSketch). Drive raw observations through
@@ -17,7 +16,7 @@
 //! - Control-channel test: signal a plan change, assert the
 //!   reconfigure path applies the new plan and the post-change
 //!   emit reflects the new metric_name.
-//! - Per-test regression: Phase B's codec round-trip still passes
+//! - Per-test regression: the codec round-trip still passes
 //!   (covered by `tests/otap_codec.rs` which is run alongside).
 //!
 //! These tests use Tokio's `current_thread` runtime via
@@ -317,11 +316,10 @@ async fn lifecycle_countsketch_emits_envelope_with_correct_sketch_type() {
 async fn lifecycle_countminsketch_emits_envelope_with_correct_sketch_type() {
     // CMS now keys off the observation's attribute set (the OTAP
     // scalar path: Float-kind, empty bytes -> AttributesKey(labels))
-    // and accepts Float-kind input, mirroring the Go edge. Pin all
-    // rows to a single `host` series so the runtime collapses them
-    // into one envelope. (Before the B6 fix CMS rejected Float-kind
-    // input and emitted nothing; it now records the attribute-set
-    // frequency.)
+    // and accepts Float-kind input. Pin all rows to a single `host`
+    // series so the runtime collapses them into one envelope. (Before
+    // the B6 fix CMS rejected Float-kind input and emitted nothing; it
+    // now records the attribute-set frequency.)
     let records = run_lifecycle(
         "countminsketch",
         "flow_count",

@@ -1,12 +1,10 @@
 //! State-machine integration tests for `asap-precompute-rs`.
 //!
-//! These tests use a fake `Sketch` (mirroring `fakeSketch` in
-//! `asap-precompute-go/snapshot_cache_test.go`) so they can exercise
-//! the runtime without depending on real sketch wrappers.
+//! These tests use a fake `Sketch` so they can exercise the runtime
+//! without depending on real sketch wrappers.
 //!
 //! Coverage:
-//!   - `series_key` byte-equivalence with the Go reference (golden
-//!     literal strings).
+//!   - `series_key` byte-equivalence (golden literal strings).
 //!   - `SnapshotCache::compute_delta` always-refresh policy.
 //!   - End-to-end observe → tick cycle.
 //!   - `Drain` rotates partial-window state.
@@ -26,9 +24,8 @@ use asap_precompute_rs::{
 };
 
 // ----------------------------------------------------------------
-// Fake Sketch + SketchObserver test doubles. Mirror Go fakeSketch
-// in `asap-precompute-go/snapshot_cache_test.go` exactly so the
-// byte-level test fixtures (delta:"<state>" prefix) stay identical.
+// Fake Sketch + SketchObserver test doubles. The byte-level test
+// fixtures (delta:"<state>" prefix) are pinned so they stay identical.
 
 #[derive(Clone, Default)]
 struct FakeSketchInner {
@@ -81,8 +78,7 @@ impl Sketch for FakeSketch {
                 is_full: true,
             });
         }
-        // Mirror Go: delta = "delta:" + state (ignoring prev for the
-        // fake — the Go fake does the same).
+        // delta = "delta:" + state (ignoring prev for the fake).
         let _ = prev;
         let mut delta = Vec::with_capacity(inner.state.len() + 6);
         delta.extend_from_slice(b"delta:");
@@ -128,7 +124,7 @@ struct FakeObserver;
 
 impl SketchObserver for FakeObserver {
     fn observe(&self, sketch: &mut dyn Sketch, obs: &Observation) -> Result<(), PrecomputeError> {
-        // Mirror Go fakeObserver: append a tag byte per value kind.
+        // Append a tag byte per value kind.
         let tag: &[u8] = match obs.value.kind {
             asap_precompute_rs::ObservationValueKind::Float => b"f",
             asap_precompute_rs::ObservationValueKind::Hash => b"h",
@@ -144,16 +140,15 @@ fn make_factory() -> Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> {
 }
 
 // ----------------------------------------------------------------
-// 1. SeriesKey byte-equivalence with Go.
+// 1. SeriesKey byte-equivalence.
 //
-// Hardcoded golden values match Go's `legacyFullKey` /
-// `legacySeriesKey` output (see `matchers_test.go` fixtures).
+// Hardcoded golden values pin the series-key output.
 //
 // Format: "<aggID>|<resourceAttrs>|<dpAttrs>".
 
 #[test]
 fn series_key_no_aggregate_by_full_set() {
-    // Go fixture #1: aggID=42, resAttrs={service.name=web,host.name=node-1},
+    // Fixture 1: aggID=42, resAttrs={service.name=web,host.name=node-1},
     // dpAttrs={http.method=GET,http.status=200}, no aggregate_by.
     // Sorted keys: host.name<service.name, http.method<http.status.
     let res = vec![
@@ -173,7 +168,7 @@ fn series_key_no_aggregate_by_full_set() {
 
 #[test]
 fn series_key_with_aggregate_by_filters_keys() {
-    // Go fixture #2: aggregate_by filters dp keys; resource always
+    // Fixture 2: aggregate_by filters dp keys; resource always
     // included sorted.
     let res = vec![
         KeyValue::new("region", "us-east"),
@@ -198,7 +193,7 @@ fn series_key_with_aggregate_by_filters_keys() {
 
 #[test]
 fn series_key_aggregate_by_with_missing_keys_skipped() {
-    // Go fixture #3: aggregate_by lists "b" but it's missing → skip.
+    // Fixture 3: aggregate_by lists "b" but it's missing → skip.
     let res = vec![KeyValue::new("service.name", "ingest")];
     let dp = vec![KeyValue::new("a", "1"), KeyValue::new("c", "3")];
     let got = series_key(
@@ -212,7 +207,7 @@ fn series_key_aggregate_by_with_missing_keys_skipped() {
 
 #[test]
 fn series_key_empty_dp_attrs() {
-    // Go fixture #4.
+    // Fixture 4.
     let res = vec![KeyValue::new("deployment.environment", "prod")];
     let got = series_key(99, &res, &[], &[]);
     assert_eq!(got, "99|deployment.environment=prod;|");
@@ -220,7 +215,7 @@ fn series_key_empty_dp_attrs() {
 
 #[test]
 fn series_key_empty_resource_attrs() {
-    // Go fixture #5.
+    // Fixture 5.
     let dp = vec![KeyValue::new("x", "1"), KeyValue::new("y", "2")];
     let got = series_key(3, &[], &dp, &[]);
     assert_eq!(got, "3||x=1;y=2;");

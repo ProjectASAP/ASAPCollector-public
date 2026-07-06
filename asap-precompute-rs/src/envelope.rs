@@ -1,18 +1,16 @@
 //! Runtime view of the [`asap_sketchlib`] `SketchEnvelope` proto.
 //!
-//! Mirrors `asap-precompute-go/envelope.go`.
+//! The runtime's `SketchEnvelope` struct wraps the proto-encoded
+//! payload bytes plus the surrounding runtime metadata that today's
+//! OTel modified-OTLP variants (Strategy A) and tomorrow's Strategy-B
+//! adapters (Telegraf / Vector / OTAP) both need (window bounds,
+//! agg_id, encoding tag, sketch_type tag, host-neutral labels, metric
+//! name, count, temporality).
 //!
-//! The Go side defines a `SketchEnvelope` Go struct that wraps the
-//! proto-encoded payload bytes plus the surrounding Go-side runtime
-//! metadata that today's OTel modified-OTLP variants (Strategy A) and
-//! tomorrow's Strategy-B adapters (Telegraf / Vector / OTAP) both need
-//! (window bounds, agg_id, encoding tag, sketch_type tag, host-neutral
-//! labels, metric name, count, temporality).
-//!
-//! The Rust side mirrors that struct verbatim. The actual prost-
-//! generated proto type is re-exported as [`ProtoSketchEnvelope`] for
-//! adapters that need proto-level access (e.g. for round-tripping the
-//! `payload` against `asap_sketchlib`'s sketch-state oneof).
+//! The actual prost-generated proto type is re-exported as
+//! [`ProtoSketchEnvelope`] for adapters that need proto-level access
+//! (e.g. for round-tripping the `payload` against `asap_sketchlib`'s
+//! sketch-state oneof).
 
 use crate::config::AggId;
 use crate::observation::KeyValue;
@@ -31,8 +29,7 @@ pub type ProtoSketchEnvelope = asap_sketchlib::proto::sketchlib::SketchEnvelope;
 /// Identifies which sketch algorithm produced the envelope's payload
 /// bytes.
 ///
-/// Mirrors the design-doc §5.1 `SketchEnvelope.sketch_type` enum and
-/// the Go `SketchType` constants. The `asap_sketchlib` proto today
+/// The `asap_sketchlib` proto today
 /// carries the sketch type implicitly via its `sketch_state` oneof,
 /// but the Layer-3 runtime keeps it as an explicit tag because
 /// envelopes flow through code paths that don't always unmarshal the
@@ -58,8 +55,7 @@ pub enum SketchType {
 
 impl SketchType {
     /// Returns the canonical name for the sketch type, matching the
-    /// well-known string spellings used by Strategy-B adapters
-    /// (ADR-0003 §4 standardized keys) and the Go `String()` method.
+    /// well-known string spellings used by Strategy-B adapters.
     pub fn name(&self) -> &'static str {
         match self {
             Self::DDSketch => "DDSketch",
@@ -73,9 +69,6 @@ impl SketchType {
 }
 
 /// Describes how the bytes in [`SketchEnvelope::payload`] are encoded.
-///
-/// Mirrors the design-doc §5.1 `SketchEnvelope.encoding` enum and the
-/// Go `Encoding` constants.
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -96,8 +89,7 @@ pub enum Encoding {
 }
 
 impl Encoding {
-    /// Returns the canonical encoding name. Mirrors the Go `String()`
-    /// method.
+    /// Returns the canonical encoding name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::ProtoFull => "PROTO_FULL",
@@ -113,12 +105,11 @@ impl Encoding {
 /// and tomorrow's Strategy-B adapters both need (window bounds,
 /// `agg_id`, encoding tag, sketch-type tag, host-neutral labels).
 ///
-/// Mirrors the Go `SketchEnvelope` struct field-by-field. The
-/// `payload` bytes are byte-identical to today's `asap_sketchlib`
-/// proto encoding (see ADR-0002 §"Behavior preservation").
+/// The `payload` bytes are byte-identical to today's `asap_sketchlib`
+/// proto encoding.
 ///
 /// The on-the-wire representation depends on the platform's encoding
-/// strategy (design-doc §7.2):
+/// strategy:
 ///   - Strategy A (OTel today): `payload` rides a typed
 ///     `pmetric::Metric.data` oneof variant (DDSketch / KLLSketch / …).
 ///   - Strategy B (Telegraf / Vector / OTAP): the whole struct is
@@ -129,7 +120,7 @@ impl Encoding {
 /// [`crate::precompute::Precompute::observe_envelope`] deserializes.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SketchEnvelope {
-    /// Design-doc `SketchEnvelope.schema_version` field. Adapters
+    /// Wire schema version. Adapters
     /// reject envelopes whose version exceeds the highest version
     /// they understand.
     pub schema_version: u32,
@@ -162,7 +153,7 @@ pub struct SketchEnvelope {
     /// How `payload` is laid out.
     pub encoding: Encoding,
     /// Proto-encoded sketch state or delta. The bandwidth-invariant
-    /// blob (design-doc §5.2).
+    /// blob.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub payload: Vec<u8>,
     /// Determinism contract for cross-language reconstruction. Comes
@@ -183,8 +174,7 @@ pub struct SketchEnvelope {
     /// know the metric name per-emission so `Adapter::encode` can
     /// stamp it onto the synthesized output Metric. This is an
     /// in-process Rust field — NOT a proto wire field. The canonical
-    /// wire bytes remain `payload` (ADR-0002 §"Behavior
-    /// preservation").
+    /// wire bytes remain `payload`.
     pub metric_name: String,
     /// Total observation count this envelope represents (sum of
     /// `dp.Count()` for the producing window's input samples).

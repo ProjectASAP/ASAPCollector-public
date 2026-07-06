@@ -1,19 +1,15 @@
-//! [`ControlChannel`] trait. Mirrors
-//! `asap-precompute-go/controlchannel/channel.go`.
+//! [`ControlChannel`] trait.
 //!
 //! The controller delivers
 //! [`crate::config::PrecomputeConfigSet`] plans to runtime adapters
 //! through implementations of this trait. Concrete implementations
-//! (OpAMP, HTTP-poll, file-watch — see ADR-0003) land in subsequent
-//! PRs alongside the per-language adapter glue. Phase 3 step 1
-//! (this PR) only ships the trait.
+//! (OpAMP, HTTP-poll, file-watch) land alongside the per-language
+//! adapter glue.
 
 use crate::config::PrecomputeConfigSet;
 
 /// Delivers [`PrecomputeConfigSet`]s from the controller to
 /// adapters at runtime.
-///
-/// Mirrors Go `controlchannel.ControlChannel`.
 pub trait ControlChannel: Send + Sync {
     /// Returns a non-`None` [`PrecomputeConfigSet`] if the plan has
     /// changed since the last poll. `None` means "no change."
@@ -34,9 +30,8 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// No-op stub used to prove the trait can be implemented.
-    /// Mirrors the Go test approach of constructing a minimal
-    /// fake before the real OpAMP / HTTP-poll impls land.
+    /// No-op stub used to prove the trait can be implemented — a
+    /// minimal fake before the real OpAMP / HTTP-poll impls land.
     struct StubChannel {
         last_ack: AtomicU64,
     }

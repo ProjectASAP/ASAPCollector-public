@@ -1,7 +1,6 @@
 //! CountSketch wrapper over [`asap_sketchlib::CountSketch`].
 //!
-//! Mirrors `asap-precompute-go/sketches/countsketch.go`. Implements
-//! [`Sketch`] + [`FrequencySketch`].
+//! Implements [`Sketch`] + [`FrequencySketch`].
 
 use asap_sketchlib::proto::sketchlib::{
     sketch_envelope, CountSketchState, CounterType, SketchEnvelope as ProtoEnvelope,
@@ -15,14 +14,12 @@ use crate::precompute::{
 };
 
 /// Width, in bits, of the single 64-bit per-item hash that sketchlib's
-/// CountSketch bit-slices across rows. See `cms.rs::MAX_ROW_HASH_BITS`
-/// and Go's `maxRowHashBits` (`asap-precompute-go/sketches/cms.go`).
+/// CountSketch bit-slices across rows. See `cms.rs::MAX_ROW_HASH_BITS`.
 const MAX_ROW_HASH_BITS: usize = 64;
 
 /// Clamp `rows` so `rows * ceil(log2(cols)) <= 64`. Identical to the CMS
-/// helper (`cms.rs::clamp_rows_for_hash_bits`) and Go's
-/// `clampRowsForHashBits`. `cols` is assumed already rounded to a power
-/// of two. Returns at least 1.
+/// helper (`cms.rs::clamp_rows_for_hash_bits`). `cols` is assumed already
+/// rounded to a power of two. Returns at least 1.
 fn clamp_rows_for_hash_bits(rows: usize, cols: usize) -> usize {
     let bits_per_row = cols.trailing_zeros() as usize;
     if bits_per_row == 0 {
@@ -32,8 +29,7 @@ fn clamp_rows_for_hash_bits(rows: usize, cols: usize) -> usize {
     rows.min(max_rows).max(1)
 }
 
-/// Fixed seed for CountSketch admission sampling, mirroring Go's
-/// `countSketchSampleSeed` (`asap-precompute-go/sketches/countsketch.go`).
+/// Fixed seed for CountSketch admission sampling.
 const COUNTSKETCH_SAMPLE_SEED: u64 = 0x5a3e06d;
 
 /// CountSketch wrapper.
@@ -49,19 +45,16 @@ pub struct CountSketchWrapper {
 impl CountSketchWrapper {
     /// Construct a CountSketch with the given dimensions.
     ///
-    /// Go's `NewCountSketchWrapper`
-    /// (`asap-precompute-go/sketches/countsketch.go`) REJECTS (returns an
-    /// error for) a non-power-of-two `cols` and the same narrow-hash
-    /// condition (`rows * log2(cols) > 64`). Rust `new()` returns `Self`
+    /// A non-power-of-two `cols` and the narrow-hash condition
+    /// (`rows * log2(cols) > 64`) are invalid. `new()` returns `Self`
     /// (not `Result`), so instead of rejecting we apply the SAME
     /// normalization as `CMSWrapper::new`: round `cols` up to the next
     /// power of two and clamp `rows` by the 64-bit per-item hash budget.
     ///
-    /// The two runtimes therefore yield IDENTICAL dims for any VALID
-    /// config (power-of-two `cols` within the budget — e.g. the canonical
-    /// `2048` / depth `4`); an invalid config that Go would reject is
-    /// repaired here identically rather than panicking, keeping #243
-    /// byte-parity for every config the Go side accepts.
+    /// Any VALID config (power-of-two `cols` within the budget — e.g. the
+    /// canonical `2048` / depth `4`) is left as-is; an invalid config is
+    /// repaired here identically rather than panicking, preserving
+    /// byte-parity.
     pub fn new(rows: usize, cols: usize) -> Self {
         let cols = cols.max(1).next_power_of_two();
         let rows = clamp_rows_for_hash_bits(rows, cols);
@@ -75,7 +68,7 @@ impl CountSketchWrapper {
     }
 
     /// Enable producer-side admission sampling at probability `p` (builder
-    /// form). Mirrors Go's `CountSketchWrapper.WithSampleP`.
+    /// form).
     pub fn with_sample_p(mut self, p: f64) -> Self {
         self.set_sample_p(p);
         self
@@ -112,13 +105,12 @@ impl CountSketchWrapper {
     }
 
     fn build_state(&self) -> CountSketchState {
-        // Mirror sketchlib-go::CountSketch.SerializePortable: emit
-        // packed sint64 `counts_int` (Opt-2: 4–8× smaller than f64
+        // Emit packed sint64 `counts_int` (Opt-2: 4–8× smaller than f64
         // for typical small-integer counter values) and per-row L2
         // norms derived as `l2[r] = sum_c counts[r][c]^2`. Both fields
-        // are required for cross-language byte parity against the
-        // sketchlib-go golden fixture; without them the envelope
-        // diverges in counter_type, counts_*, and l2 simultaneously.
+        // are required for cross-language byte parity against the golden
+        // fixture; without them the envelope diverges in counter_type,
+        // counts_*, and l2 simultaneously.
         let mut counts_int = Vec::with_capacity(self.rows * self.cols);
         let mut l2 = Vec::with_capacity(self.rows);
         for row in self.sk.matrix.iter().take(self.rows) {
@@ -213,11 +205,10 @@ impl Sketch for CountSketchWrapper {
         prev: &[u8],
         threshold: u64,
     ) -> Result<DeltaResult, PrecomputeError> {
-        // Mirror Go's `CountSketchWrapper.ComputeDeltaAgainst`: decode the
-        // prior snapshot envelope, then diff via `asap_sketchlib`'s
-        // `CountSketch::compute_delta`. On an empty / undecodable prior, or
-        // an empty current sketch, fall back to a full snapshot so the emit
-        // path always produces a valid payload.
+        // Decode the prior snapshot envelope, then diff via
+        // `asap_sketchlib`'s `CountSketch::compute_delta`. On an empty /
+        // undecodable prior, or an empty current sketch, fall back to a
+        // full snapshot so the emit path always produces a valid payload.
         //
         // Under per-window delta-against-empty (the snapshot cache resets
         // the cached base to the empty-sketch snapshot at each window
@@ -267,8 +258,7 @@ impl Sketch for CountSketchWrapper {
         if payload.is_empty() {
             return Ok(());
         }
-        // Mirror Go's `CountSketchWrapper.ApplyDelta`, dispatching on
-        // payload shape. A full-state envelope (the
+        // Dispatch on payload shape. A full-state envelope (the
         // `SketchEnvelope{CountSketchState}` wire format) takes the decode +
         // merge path; otherwise the payload is a `CountSketchDelta` proto
         // and is applied additively via `apply_delta_bytes`.
@@ -300,8 +290,8 @@ impl Sketch for CountSketchWrapper {
     }
 
     fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
-        // (delta-baseline-contract.md §3): CountSketch opts in to
-        // per-window deltas. After a window-close emit the snapshot cache
+        // CountSketch opts in to per-window deltas. After a window-close
+        // emit the snapshot cache
         // caches THIS — the encoded envelope of an EMPTY CountSketch of the
         // same dimensions — so the next window's `compute_delta_against`
         // diffs against empty and emits that window's own (signed) per-cell
@@ -341,10 +331,9 @@ impl FrequencySketch for CountSketchWrapper {
 
     fn top_k(&self, _k: usize) -> Vec<FrequencyEntry> {
         // The wire-format `CountSketch` doesn't carry a TopK heap.
-        // Returning empty matches the Go reference's behavior when
-        // `TopK == nil` (the legacy CMS processor never queries
-        // TopK; the Go CountSketch wrapper exposes TopK only when
-        // the underlying sketch tracks it).
+        // Returning empty matches the behavior when `TopK == nil`
+        // (the legacy CMS processor never queries TopK; the CountSketch
+        // wrapper exposes TopK only when the underlying sketch tracks it).
         Vec::new()
     }
 }
@@ -354,12 +343,11 @@ impl FrequencySketch for CountSketchWrapper {
 ///
 /// The key is the observation's `bytes` field when present (preserves
 /// pre-shaped callers / unit tests), else the full label set via
-/// [`crate::matchers::attributes_key`] (matching the Go edge's
-/// `AttributesKey(labels, nil)`), falling back to [`Self::default_key`]
-/// only when there are no labels either. The weight is the value's
-/// `float` when a pre-shaped `bytes` key is present (existing-test
-/// compat) or `1.0` for the OTAP labels path (mirroring Go's
-/// `obsKindKeyedFreq` frequency weight). Float-kind input is accepted.
+/// [`crate::matchers::attributes_key`], falling back to
+/// [`Self::default_key`] only when there are no labels either. The weight
+/// is the value's `float` when a pre-shaped `bytes` key is present
+/// (existing-test compat) or `1.0` for the OTAP labels path. Float-kind
+/// input is accepted.
 pub struct CountSketchObserver {
     /// Default key used when the observation has neither a `bytes`
     /// field nor any labels.
@@ -432,8 +420,8 @@ mod tests {
 
     // B6 regression: on the OTAP edge, observations arrive Float-kind
     // with empty bytes. CountSketch must count the per-attribute-set
-    // key with weight 1.0 (Go's obsKindKeyedFreq), NOT degenerately
-    // count the metric NAME via default_key.
+    // key with weight 1.0, NOT degenerately count the metric NAME via
+    // default_key.
     #[test]
     fn observe_counts_attribute_set_not_metric_name() {
         use crate::matchers::attributes_key;

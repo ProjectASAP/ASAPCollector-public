@@ -1,8 +1,7 @@
 //! `AsapSketchesPlugin` configuration + 5-sketch `sketch_type`
 //! dispatch factory.
 //!
-//! Mirrors the Telegraf-side `allsketches/config.go` (Phase 4 step C,
-//! PR #237): a single plugin parameterized by `sketch_type` with a
+//! A single plugin parameterized by `sketch_type` with a
 //! dispatch table that maps the user-facing string to:
 //!
 //! - The `Precompute` config knobs (`SketchType` enum + sketch_params).
@@ -10,8 +9,8 @@
 //! - A [`BoxedObserver`] that knows how to feed `ObservationValue`
 //!   into the concrete sketch.
 //!
-//! Phase C `sketch_type` strings (lowercase) match the design doc §8
-//! config example verbatim.
+//! The `sketch_type` strings (lowercase) are the canonical config
+//! spellings.
 //!
 //! [`SketchFactory`]: crate::precompute::SketchFactory
 //! [`BoxedObserver`]: crate::precompute::BoxedObserver
@@ -64,8 +63,8 @@ pub enum ConfigError {
     },
 }
 
-/// Plugin-level config block. Mirrors the design doc §8 TOML shape
-/// 1:1. Exposes the `sketch_type` knob plus the per-sketch tuning
+/// Plugin-level config block. Exposes the `sketch_type` knob plus the
+/// per-sketch tuning
 /// parameters; the plugin unpacks this into a [`PrecomputeConfig`]
 /// and constructs the right `Precompute` impl.
 ///
@@ -82,8 +81,7 @@ pub struct PluginConfig {
     pub output_metric_name: String,
     /// Controller-plan join key.
     pub agg_id: u64,
-    /// Sketch-specific tuning knobs. See the per-sketch table in the
-    /// design doc §8.
+    /// Sketch-specific tuning knobs.
     pub sketch_params: SketchParams,
     /// Optional CountSketch / CMS default key — the bytes used when
     /// an observation's `bytes` field is empty. Defaults to
@@ -141,8 +139,7 @@ impl std::fmt::Debug for SketchDispatch {
 }
 
 /// Build a [`PrecomputeConfig`] + [`SketchDispatch`] pair from a
-/// [`PluginConfig`]. Mirrors the Telegraf side's
-/// `(toPrecomputeConfig, sketchFactory)` pair.
+/// [`PluginConfig`].
 pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatch), ConfigError> {
     if config.window_size.is_zero() {
         return Err(ConfigError::InvalidWindowSize {
@@ -178,8 +175,7 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
 }
 
 /// Map `sketch_type` (case-insensitive) onto the right factory +
-/// observer + `SketchType` enum value. Mirrors the Telegraf
-/// `sketchFactory` dispatch table.
+/// observer + `SketchType` enum value.
 fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> {
     let normalized = config.sketch_type.to_ascii_lowercase();
     let params = &config.sketch_params;

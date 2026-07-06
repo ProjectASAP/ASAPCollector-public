@@ -1,10 +1,9 @@
 //! Type-level smoke tests for the bootstrap public API.
 //!
 //! These tests don't exercise the runtime (which is
-//! `unimplemented!()` in this PR — see Phase 3 step 2). They lock in
-//! the trait surface, the constructor shapes, and the serde
-//! round-trip behavior so subsequent migration PRs notice if
-//! anything drifts.
+//! `unimplemented!()` here). They lock in the trait surface, the
+//! constructor shapes, and the serde round-trip behavior so
+//! subsequent changes notice if anything drifts.
 
 use asap_precompute_rs::adapter::Adapter;
 use asap_precompute_rs::control_channel::ControlChannel;
@@ -247,7 +246,7 @@ fn precompute_impl_update_config_swaps_active() {
     };
     p.update_config(&cs);
     // stats() returns the empty snapshot — runtime fields
-    // remain zero until Phase 3 step 2 wires them up.
+    // remain zero until the runtime is wired up.
     let s = p.stats();
     assert_eq!(s.input_observations, 0);
 }

@@ -1,6 +1,6 @@
 //! Host-neutral input to [`crate::precompute::Precompute::observe`].
 //!
-//! Mirrors `asap-precompute-go/observation.go`. Adapters decode their
+//! Adapters decode their
 //! native event (`pmetric.NumberDataPoint` / `telegraf::Metric` /
 //! `vector::Event` / `arrow::RecordBatch`) into one of these. The
 //! runtime never sees host-specific types; it only sees [`Observation`]
@@ -14,8 +14,6 @@ use crate::envelope::SketchEnvelope;
 /// because attribute maps are host-specific (e.g. `pcommon::Map` is
 /// OTel-only). Telegraf, Vector, and OTAP adapters carry the same
 /// struct without pulling host crates in.
-///
-/// Mirrors the Go `Observation` struct verbatim.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Observation {
     /// Wall-clock observation timestamp in milliseconds since the Unix
@@ -44,8 +42,7 @@ pub struct Observation {
 impl Observation {
     /// Construct a new [`Observation`].
     ///
-    /// Trivial constructor; mirrors the way Go callers populate the
-    /// struct field-by-field.
+    /// Trivial field-by-field constructor.
     pub fn new(
         timestamp_ms: u64,
         metric: impl Into<String>,
@@ -64,7 +61,7 @@ impl Observation {
 }
 
 /// A single string-string label pair. Mirrors the `repeated KeyValue`
-/// field in the `SketchEnvelope` proto and the Go `KeyValue` struct.
+/// field in the `SketchEnvelope` proto.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct KeyValue {
     /// Label key.
@@ -84,10 +81,6 @@ impl KeyValue {
 }
 
 /// Kind discriminator on [`ObservationValue`].
-///
-/// The Go side uses an iota-defined enum (`KindFloat`, `KindHash`, …);
-/// here we use a Rust enum, but the variant names mirror the Go
-/// constants 1:1.
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -104,13 +97,12 @@ pub enum ObservationValueKind {
     /// `envelope` is the meaningful field; the observation carries a
     /// pre-aggregated upstream sketch and should be routed through
     /// [`crate::precompute::Precompute::observe_envelope`], NOT
-    /// expanded to scalar samples (design doc §5.2).
+    /// expanded to scalar samples.
     Envelope,
 }
 
 impl ObservationValueKind {
-    /// Returns a debug-friendly name for the kind. Mirrors the Go
-    /// `String()` method for parity with debug output.
+    /// Returns a debug-friendly name for the kind.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Float => "Float",
@@ -124,12 +116,10 @@ impl ObservationValueKind {
 /// Kind-discriminated union over the four observation value shapes the
 /// runtime supports.
 ///
-/// Go does not have a clean tagged-union type, so the Go side uses a
-/// `Kind` discriminator with all four fields side-by-side and an
-/// invariant that exactly one is meaningful per kind. Rust supports
-/// real tagged unions, but this struct shape is preserved 1:1 with the
-/// Go layout to keep the migration mechanical and to make the (kind,
-/// per-field) invariant explicit on the wire and in serde output.
+/// Rather than a Rust enum, this uses a `Kind` discriminator with all
+/// four fields side-by-side and an invariant that exactly one is
+/// meaningful per kind — making the (kind, per-field) invariant
+/// explicit on the wire and in serde output.
 ///
 /// Construction goes through [`ObservationValue::float`] /
 /// [`ObservationValue::hash`] / [`ObservationValue::bytes`] /
@@ -155,8 +145,6 @@ pub struct ObservationValue {
 
 impl ObservationValue {
     /// Construct an `ObservationValue` of [`ObservationValueKind::Float`].
-    ///
-    /// Mirrors Go's `FloatValue(v)`.
     pub fn float(v: f64) -> Self {
         Self {
             kind: ObservationValueKind::Float,
@@ -166,8 +154,6 @@ impl ObservationValue {
     }
 
     /// Construct an `ObservationValue` of [`ObservationValueKind::Hash`].
-    ///
-    /// Mirrors Go's `HashValue(h)`.
     pub fn hash(h: u64) -> Self {
         Self {
             kind: ObservationValueKind::Hash,
@@ -177,8 +163,6 @@ impl ObservationValue {
     }
 
     /// Construct an `ObservationValue` of [`ObservationValueKind::Bytes`].
-    ///
-    /// Mirrors Go's `BytesValue(b)`.
     pub fn bytes(b: Vec<u8>) -> Self {
         Self {
             kind: ObservationValueKind::Bytes,
@@ -189,8 +173,6 @@ impl ObservationValue {
 
     /// Construct an `ObservationValue` of
     /// [`ObservationValueKind::Envelope`].
-    ///
-    /// Mirrors Go's `EnvelopeValue(env)`.
     pub fn envelope(env: SketchEnvelope) -> Self {
         Self {
             kind: ObservationValueKind::Envelope,

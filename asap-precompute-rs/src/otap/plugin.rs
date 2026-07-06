@@ -1,9 +1,7 @@
 //! Minimal plugin shell that wires [`super::decode_batch`] /
 //! [`super::encode_batch`] against a [`crate::precompute::Precompute`].
 //!
-//! Phase B exit criterion (per
-//! [otap design §11](../../../docs/design-asap-otap-rust-integration.md#11-phase-plan))
-//! reads:
+//! The Phase B deliverable is:
 //!
 //! > Codec implementation: `asap-precompute-rs/src/otap/` + minimal
 //! > plugin shell that wires `decode_batch` / `encode_batch` against
@@ -103,8 +101,7 @@ impl<P: Precompute> StubPlugin<P> {
 
     /// Force a `Precompute::drain` (graceful shutdown flush) and
     /// encode the result. Phase C's `NodeControlMsg::Shutdown`
-    /// handler calls this once before dropping the plugin, mirroring
-    /// the Telegraf side's `Stop` path.
+    /// handler calls this once before dropping the plugin.
     pub fn drain(&self) -> Result<RecordBatch, OtapEncodeError> {
         let envelopes = self.precompute.drain();
         encode_batch(&envelopes)

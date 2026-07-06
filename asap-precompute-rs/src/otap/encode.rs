@@ -1,7 +1,7 @@
 //! `encode_batch`: `&[SketchEnvelope]` → [`arrow_array::RecordBatch`].
 //!
-//! Mirrors `asap-precompute-go/telegraf/encode.go` (Strategy-B):
-//! one row per envelope, with the envelope payload riding in the
+//! Strategy-B encoding: one row per envelope, with the envelope
+//! payload riding in the
 //! well-known `_asap_envelope` Binary column and companion metadata
 //! keys (`_asap_sketch_type`, `_asap_agg_id`, `_asap_schema_version`,
 //! `_asap_window_start_ms`, `_asap_window_end_ms`, `_asap_encoding`)
@@ -9,11 +9,9 @@
 //!
 //! At the Phase-B layer those carrier keys are projected as flat
 //! columns. The Phase-C plugin shell will lift them onto OTAP's
-//! per-row attribute child batch (per
-//! [edge-framework §7.2](../../../docs/design-asap-edge-framework.md#72-two-encoding-strategies)
-//! — OTAP's strict schema validator rejects extension columns on
-//! Logs/Metrics/Traces RecordBatches, so the lift step is required
-//! before the batch goes downstream).
+//! per-row attribute child batch (OTAP's strict schema validator
+//! rejects extension columns on Logs/Metrics/Traces RecordBatches,
+//! so the lift step is required before the batch goes downstream).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -61,9 +59,7 @@ pub enum OtapEncodeError {
 /// flatten resource attrs into `labels` already (Strategy-B
 /// platforms have no resource scope; per envelope.rs docstring).
 ///
-/// `time_unix_nano` is set to `window_end_ms * 1_000_000` per the
-/// Telegraf encode helper (mirrors `asap-precompute-go/telegraf/encode.go`'s
-/// `time.UnixMilli(env.WindowEndMs)`).
+/// `time_unix_nano` is set to `window_end_ms * 1_000_000`.
 ///
 /// Returns an empty batch (zero rows, schema-only) when `envelopes` is
 /// empty.

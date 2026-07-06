@@ -1,5 +1,4 @@
-//! [`Sketch`] trait family + [`Precompute`] trait. Mirrors
-//! `asap-precompute-go/precompute.go`.
+//! [`Sketch`] trait family + [`Precompute`] trait.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,10 +17,9 @@ use crate::window::{SeriesEntry, WindowState};
 /// Narrow interface the Layer-3 runtime needs from a Layer-1 sketch
 /// implementation.
 ///
-/// Mirrors Go `precompute.Sketch`. Real sketches (DDSketch, KLL, HLL,
-/// CountSketch, CountMinSketch) live in [`asap_sketchlib`]; thin
-/// wrappers in subsequent phases impl this trait against each
-/// concrete sketch.
+/// Real sketches (DDSketch, KLL, HLL, CountSketch, CountMinSketch)
+/// live in [`asap_sketchlib`]; thin wrappers impl this trait against
+/// each concrete sketch.
 ///
 /// The interface is intentionally minimal — `observe` is per-sketch
 /// (because each sketch has different value-shapes: float, hash,
@@ -69,8 +67,8 @@ pub trait Sketch: Send + Sync {
 
     /// Per-window delta base for a window-reset producer.
     ///
-    /// When a family opts in to "true per-window deltas"
-    /// (delta-baseline-contract.md §3), this returns the snapshot bytes
+    /// When a family opts in to "true per-window deltas",
+    /// this returns the snapshot bytes
     /// the [`crate::snapshot_cache::SnapshotCache`] should cache as the
     /// outbound base AFTER each window-close emit — i.e. the snapshot of
     /// an EMPTY sketch of the same shape. The next window's
@@ -102,8 +100,6 @@ pub trait Sketch: Send + Sync {
 }
 
 /// Output of [`Sketch::compute_delta_against`].
-///
-/// Mirrors Go's `(payload []byte, isFull bool, err error)` triple.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeltaResult {
     /// Wire bytes — either a sparse delta (when `is_full = false`)
@@ -144,7 +140,7 @@ pub trait CardinalitySketch: Sketch {
 }
 
 /// Implemented by sketches that support the **coordinated** producer-side
-/// sampling path (`SSP`, #30). Mirrors Go's `precompute.SampleSetter`.
+/// sampling path (`SSP`).
 ///
 /// Only the additive count/quantile families opt in —
 /// [`crate::sketches::CMSWrapper`], `CountSketchWrapper`, and `DDSketchWrapper`.
@@ -161,8 +157,7 @@ pub trait SampleSetter {
     fn set_sample_p(&mut self, p: f64);
 }
 
-/// One entry in a [`FrequencySketch::top_k`] result. Mirrors Go
-/// `precompute.FrequencyEntry`.
+/// One entry in a [`FrequencySketch::top_k`] result.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FrequencyEntry {
     /// Opaque byte slice the sketch indexes by (the same shape
@@ -194,7 +189,7 @@ pub trait FrequencySketch: Sketch {
 /// observation value (Float / Hash / Bytes) into the concrete
 /// sketch.
 ///
-/// Mirrors Go `precompute.SketchObserver`. NOT part of the [`Sketch`]
+/// NOT part of the [`Sketch`]
 /// trait itself because the value type is sketch-specific (DDSketch
 /// wants float, HLL wants hash, set-aggregator wants bytes), and
 /// forcing all sketches to accept all kinds would push pointless
@@ -214,26 +209,22 @@ pub trait SketchObserver: Send + Sync {
 
 /// Errors returned by the precompute runtime.
 ///
-/// Mirrors the Go-side sentinel errors (`ErrSeriesCapExceeded`,
-/// `ErrLateData`, `ErrNoConfig`, `ErrAggIDMismatch`,
-/// `ErrSketchTypeMismatch`) plus a generic `Other` for nested
-/// adapter / sketch errors.
+/// Sentinel variants cover series-cap, late-data, missing-config,
+/// and agg-id / sketch-type mismatches, plus a generic `Other` for
+/// nested adapter / sketch errors.
 #[derive(Debug, Error)]
 pub enum PrecomputeError {
-    /// `MaxSeries` is reached and `OnOverflow` is `Drop`. Mirrors Go
-    /// `ErrSeriesCapExceeded`.
+    /// `MaxSeries` is reached and `OnOverflow` is `Drop`.
     #[error("precompute: series cap exceeded")]
     SeriesCapExceeded,
     /// Observation timestamp is older than the active window's lower
-    /// bound minus `AllowedLateness`. Mirrors Go `ErrLateData`.
+    /// bound minus `AllowedLateness`.
     #[error("precompute: observation timestamp outside allowed lateness")]
     LateData,
-    /// Precompute has no `PrecomputeConfig`. Mirrors Go
-    /// `ErrNoConfig`.
+    /// Precompute has no `PrecomputeConfig`.
     #[error("precompute: no config installed")]
     NoConfig,
     /// Envelope's `agg_id` doesn't match this Precompute's config.
-    /// Mirrors Go `ErrAggIDMismatch`.
     #[error(
         "precompute: envelope agg_id does not match config: envelope={envelope} config={config}"
     )]
@@ -244,7 +235,7 @@ pub enum PrecomputeError {
         config: u64,
     },
     /// Envelope's `sketch_type` doesn't match this Precompute's
-    /// config. Mirrors Go `ErrSketchTypeMismatch`.
+    /// config.
     #[error(
         "precompute: envelope sketch_type does not match config: envelope={envelope:?} config={config:?}"
     )]
@@ -260,10 +251,9 @@ pub enum PrecomputeError {
     Other(String),
 }
 
-/// Host-neutral runtime described in design-doc §6.2 and
-/// ADR-0002 §"Public API".
+/// Host-neutral runtime.
 ///
-/// Mirrors Go `precompute.Precompute`. One [`Precompute`] instance
+/// One [`Precompute`] instance
 /// owns one sketch type (see [`crate::config::PrecomputeConfig::sketch_type`]);
 /// a deployment with multiple sketch types runs multiple instances
 /// side-by-side.
@@ -278,7 +268,7 @@ pub trait Precompute: Send + Sync {
     /// window.
     ///
     /// The envelope's bytes are NEVER expanded to scalar samples
-    /// (design-doc §5.2 bandwidth invariant).
+    /// (bandwidth invariant).
     fn observe_envelope(&self, env: &SketchEnvelope) -> Result<(), PrecomputeError>;
 
     /// Rotates the active window (when due) and returns the closed
@@ -305,7 +295,7 @@ pub trait Precompute: Send + Sync {
     ///
     /// The in-flight window is preserved (matchers / `aggregate_by`
     /// may change, but bytes already accumulated stay where they
-    /// are); see ADR-0003 §3.
+    /// are).
     fn update_config(&self, cs: &PrecomputeConfigSet);
 
     /// Returns the live counters; safe to call concurrently.
@@ -318,7 +308,7 @@ pub trait Precompute: Send + Sync {
 
 /// Point-in-time snapshot of [`Precompute`] runtime counters.
 ///
-/// Mirrors Go `precompute.StatsSnapshot`. Values across fields may be
+/// Values across fields may be
 /// drawn from slightly different instants — adapters that need an
 /// atomic multi-counter view must add an explicit lock.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -346,7 +336,7 @@ pub struct StatsSnapshot {
 
 /// Type-erased boxed [`SketchObserver`].
 ///
-/// Mirrors Go's interface-typed observer field. The default impl in
+/// The default impl in
 /// [`PrecomputeImpl`] holds this in an `Option` because either
 /// `cfg` or `observer` may be `None` at construction time.
 pub type BoxedObserver = Box<dyn SketchObserver>;
@@ -354,15 +344,13 @@ pub type BoxedObserver = Box<dyn SketchObserver>;
 /// Factory function that constructs an empty [`Sketch`] of the type
 /// owned by a specific [`Precompute`] instance.
 ///
-/// Mirrors Go `precompute.SketchFactory`. Phase 3 step 2 keeps
-/// construction per-instance rather than registry-based to avoid
+/// Construction is per-instance rather than registry-based to avoid
 /// global state.
 pub type SketchFactory = Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync>;
 
 /// Concrete implementation of [`Precompute`].
 ///
-/// Mirrors the Go `precompute` (lowercase, package-private) struct
-/// but is exposed publicly here so tests and downstream binaries
+/// Exposed publicly so tests and downstream binaries
 /// can construct one directly. Fields are private; construction
 /// goes through [`PrecomputeImpl::new`].
 pub struct PrecomputeImpl {
@@ -386,8 +374,6 @@ impl PrecomputeImpl {
     /// construction time, but [`Precompute::observe`] will return
     /// [`PrecomputeError::NoConfig`] until [`Precompute::update_config`]
     /// is called.
-    ///
-    /// Mirrors Go `precompute.New`.
     pub fn new(
         initial_cfg: Option<PrecomputeConfig>,
         sketch_factory: Option<SketchFactory>,
@@ -409,8 +395,7 @@ impl PrecomputeImpl {
         }
     }
 
-    /// Returns the configured sketch type. Mirrors Go's
-    /// `precompute.sketchType` field accessor (used by tests).
+    /// Returns the configured sketch type.
     pub fn sketch_type(&self) -> SketchType {
         self.sketch_type
     }
@@ -422,16 +407,14 @@ impl PrecomputeImpl {
 }
 
 impl PrecomputeImpl {
-    /// Returns a clone of the active config or `None`. Mirrors Go
-    /// `(*precompute).activeConfig`.
+    /// Returns a clone of the active config or `None`.
     fn active_config(&self) -> Option<PrecomputeConfig> {
         self.cfg.lock().expect("config lock poisoned").clone()
     }
 
     /// Walks the closed series, serializes each into a
     /// [`SketchEnvelope`] (honoring `delta_transmission`), and
-    /// updates the rolling stats counters. Mirrors Go
-    /// `(*precompute).finishRotate`.
+    /// updates the rolling stats counters.
     fn finish_rotate(
         &self,
         closed: Vec<SeriesEntry>,
@@ -464,8 +447,7 @@ impl PrecomputeImpl {
     }
 
     /// Turns a closed series entry into a [`SketchEnvelope`].
-    /// Honors `delta_transmission` via the snapshot cache. Mirrors
-    /// Go `(*precompute).serializeSeries`.
+    /// Honors `delta_transmission` via the snapshot cache.
     fn serialize_series(
         &self,
         entry: &SeriesEntry,
@@ -500,12 +482,11 @@ impl PrecomputeImpl {
         }
         let mut labels = series_attrs(&entry.labels, &cfg.aggregate_by);
         if cfg.emit_window_stats {
-            // Append the two operator-visibility attrs the legacy
-            // countsketchprocessor stamps onto each emitted data
-            // point. Adding them at the envelope-Labels layer makes
-            // them flow through the OTel adapter's
-            // KeyValuesToAttributes naturally, so runtime and legacy
-            // data points carry the same attribute set.
+            // Append the two operator-visibility attrs onto each
+            // emitted data point. Adding them at the envelope-Labels
+            // layer makes them flow through the OTel adapter's
+            // KeyValuesToAttributes naturally, so every data point
+            // carries the same attribute set.
             let window_seconds = if cfg.window.size == Duration::ZERO {
                 0
             } else {
@@ -550,7 +531,7 @@ impl Precompute for PrecomputeImpl {
 
         // Envelope-valued observations route through the dedicated
         // pre-aggregated path so we never explode them to scalars.
-        // Mirror Go: the input_observations counter is bumped before
+        // The input_observations counter is bumped before
         // routing so envelope-valued observations also count.
         {
             let mut stats = self.stats.lock().expect("stats lock poisoned");
@@ -601,8 +582,8 @@ impl Precompute for PrecomputeImpl {
             Some(c) => c,
             None => return Err(PrecomputeError::NoConfig),
         };
-        // AggID match — strict, per design-doc §5.2 enforcement
-        // point #4. Mismatches are hard errors, not silent drops.
+        // AggID match — strict. Mismatches are hard errors, not
+        // silent drops.
         if cfg.agg_id != 0 && env.agg_id != 0 && env.agg_id != cfg.agg_id {
             return Err(PrecomputeError::AggIdMismatch {
                 envelope: env.agg_id,
@@ -685,8 +666,8 @@ impl Precompute for PrecomputeImpl {
     }
 
     fn shutdown(&self) -> Result<(), PrecomputeError> {
-        // CompareAndSwap: only the first shutdown does work. Phase 3
-        // step 2 will run a final tick here, mirroring Go's Shutdown.
+        // CompareAndSwap: only the first shutdown does work. A later
+        // revision will run a final tick here on the shutdown path.
         let _ = self
             .closed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
