@@ -1,0 +1,47 @@
+[package]
+name = "asap-precompute-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Host-neutral edge precompute runtime for ASAP. Rust mirror of asap-precompute-go."
+license = "MIT"
+
+# The ASAP sketch library is developed in the open at
+# https://github.com/ProjectASAP/asap_sketchlib (also published on
+# crates.io as `asap_sketchlib`). Pinned to a specific public commit so
+# this crate builds against exactly the sketch API it was written for;
+# bump the `rev` (or switch to `branch = "main"`) to track newer work.
+[dependencies]
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "fc9e27ab3ab6ce93de8ac8c5c6b16f778092ea5b" }
+serde = { version = "1", features = ["derive"] }
+prost = "0.13"
+thiserror = "1"
+
+# Apache Arrow is only pulled in by the OTAP-Rust codec (Phase 5 step B).
+# The other consumers of this crate (asap-otel / asap-telegraf /
+# sketchvector — all on a row-oriented data model) never touch Arrow,
+# so the `otap` feature is non-default to keep their build cheap.
+arrow-array = { version = "53", optional = true }
+arrow-schema = { version = "53", optional = true }
+
+# Tokio drives the Phase 5 step C plugin lifecycle (Stream consumer
+# task + Wakeup-driven flush ticker + control-channel poll task +
+# graceful drain). Only the `rt`, `sync`, `time`, and `macros`
+# sub-features are needed; the full set is pulled in via the `otap`
+# feature gate so default-feature consumers don't pay for it.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"], optional = true }
+futures = { version = "0.3", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+serde_json = "1"
+# The full tokio runtime is required for #[tokio::test]-driven
+# lifecycle tests under `tests/otap_*.rs`.
+tokio = { version = "1", features = ["full"] }
+
+[features]
+default = []
+# Enables the OTAP-Rust codec + plugin lifecycle at `crate::otap`
+# (decode_batch / encode_batch over `arrow::RecordBatch`, plus the
+# `AsapSketchesPlugin` Tokio runtime). See
+# `docs/design-asap-otap-rust-integration.md` §11 (Phase B + C).
+otap = ["dep:arrow-array", "dep:arrow-schema", "dep:tokio", "dep:futures"]
