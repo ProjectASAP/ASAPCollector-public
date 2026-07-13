@@ -171,24 +171,6 @@ pub trait CardinalitySketch: Sketch {
     fn estimate_cardinality(&self) -> f64;
 }
 
-/// Implemented by sketches that support the **coordinated** producer-side
-/// sampling path (`SSP`).
-///
-/// Only the additive count/quantile families opt in —
-/// [`crate::sketches::CMSWrapper`], `CountSketchWrapper`, and `DDSketchWrapper`.
-/// `Sum`, `KLL`, and `HLL` are deliberately left out: the coordinator's
-/// ε-floor `p` is whole-sketch and meant for additive sketches; HLL keeps its
-/// own separate hash-threshold sampling, and Sum/KLL carry no sampling at all.
-/// The runtime gates first by configured `SketchType`, then downcasts through
-/// this trait, so a non-supporting sketch is left untouched (never panicked on
-/// the observe path).
-pub trait SampleSetter {
-    /// Set the admission-sampling probability `p` (in `(0,1]`; `≥1`/`≤0`/NaN
-    /// disables sampling) and reseed. Re-applied to the live sketch so a call
-    /// after construction takes effect immediately.
-    fn set_sample_p(&mut self, p: f64);
-}
-
 /// One entry in a [`FrequencySketch::top_k`] result.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FrequencyEntry {

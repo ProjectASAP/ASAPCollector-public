@@ -34,19 +34,11 @@ fn clamp_rows_for_hash_bits(rows: usize, cols: usize) -> usize {
     rows.min(max_rows).max(1)
 }
 
-/// Fixed seed for CMS admission sampling. A constant seed keeps the
-/// admitted subset reproducible; producers sample independently (see
-/// `crate::sampling`).
-const CMS_SAMPLE_SEED: u64 = 0x5A4D_5043; // "ZMPC"
-
 /// CountMinSketch wrapper.
 pub struct CMSWrapper {
     sk: CountMinSketch,
     rows: usize,
     cols: usize,
-    /// Per-sketch admission-sampling probability in (0,1]; 1.0 = exact (default).
-    sample_p: f64,
-    sampler: crate::sampling::GeometricSampler,
     /// Outbound wire format for this series' snapshots/deltas. Baked from
     /// `cfg.encoding` by the OTAP sketch factory.
     wire_encoding: Encoding,
@@ -76,8 +68,6 @@ impl CMSWrapper {
             sk: CountMinSketch::new(rows, cols),
             rows,
             cols,
-            sample_p: 1.0,
-            sampler: crate::sampling::GeometricSampler::new(1.0, CMS_SAMPLE_SEED),
             wire_encoding: Encoding::ProtoFull,
         }
     }
@@ -89,37 +79,8 @@ impl CMSWrapper {
         self
     }
 
-    /// Enable producer-side admission sampling at probability `p` (builder
-    /// form). `p >= 1` (or NaN/≤0) leaves the sketch exact.
-    pub fn with_sample_p(mut self, p: f64) -> Self {
-        self.set_sample_p(p);
-        self
-    }
-
-    /// Set the admission-sampling probability and reseed the sampler. Used by
-    /// the [`crate::precompute::SampleSetter`] path so the coordinator can
-    /// hot-adjust `p` on a live edge.
-    pub fn set_sample_p(&mut self, p: f64) {
-        self.sample_p = if !(p > 0.0) || p >= 1.0 || p.is_nan() {
-            1.0
-        } else {
-            p
-        };
-        self.sampler.reset(self.sample_p, CMS_SAMPLE_SEED);
-    }
-
-    /// The configured admission-sampling probability (1.0 = exact).
-    pub fn sample_p(&self) -> f64 {
-        self.sample_p
-    }
-
-    /// Insert a string-keyed weighted observation. When sampling is active the
-    /// update is admitted with probability `p` (geometric skip); the wire
-    /// `sample_p` lets the query side rescale by `1/p`.
+    /// Insert a string-keyed weighted observation.
     pub fn update(&mut self, key: &str, value: f64) {
-        if !self.sampler.admit() {
-            return;
-        }
         self.sk.update(key, value);
     }
 
@@ -171,10 +132,7 @@ impl CMSWrapper {
             format_version: 1,
             producer: None,
             hash_spec: None,
-            // Stamp the configured p (or 0.0 when exact — the proto3 default,
-            // dual-read as 1.0 by the backend, preserving byte-parity with the
-            // unsampled path). See `sampling::wire_sample_p`.
-            sample_p: crate::sampling::wire_sample_p(self.sample_p),
+            sample_p: 0.0,
             sketch_state: Some(sketch_envelope::SketchState::CountMin(self.build_state())),
         };
         let mut buf = Vec::with_capacity(env.encoded_len());
@@ -381,8 +339,6 @@ impl Sketch for CMSWrapper {
 
     fn reset(&mut self) {
         self.sk = CountMinSketch::new(self.rows, self.cols);
-        // Preserve the configured p across window resets; just reseed the gap.
-        self.sampler.reset(self.sample_p, CMS_SAMPLE_SEED);
     }
 
     fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
@@ -411,14 +367,6 @@ impl Sketch for CMSWrapper {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
-    }
-}
-
-impl crate::precompute::SampleSetter for CMSWrapper {
-    fn set_sample_p(&mut self, p: f64) {
-        // Delegate to the inherent method (explicit path avoids resolving back
-        // to this trait method).
-        CMSWrapper::set_sample_p(self, p);
     }
 }
 
@@ -504,53 +452,6 @@ mod tests {
         let bytes = w.snapshot().unwrap();
         let decoded = CMSWrapper::decode_envelope(&bytes).unwrap();
         assert_eq!(decoded.sketch(), w.sk.sketch());
-    }
-
-    // Coordinated sampling. WithSampleP(p<1) must (a) admit only ~p of
-    // updates so the raw sketch count is ~p× the input, and (b) stamp the wire
-    // sample_p so the query side can rescale by 1/p. Exact (p>=1) stays byte-clean.
-    #[test]
-    fn with_sample_p_admits_p_fraction_and_stamps_envelope() {
-        use crate::precompute::SampleSetter;
-        // exact wrapper: every update lands, envelope sample_p stays 0.0 (parity).
-        let mut exact = CMSWrapper::new(8, 1024);
-        for _ in 0..10_000 {
-            exact.update("k", 1.0);
-        }
-        assert!((exact.estimate_count(b"k") - 10_000.0).abs() < 1.0);
-        let env = ProtoEnvelope::decode(exact.snapshot().unwrap().as_slice()).unwrap();
-        assert_eq!(
-            env.sample_p, 0.0,
-            "exact sketch must stamp 0.0 for byte-parity"
-        );
-
-        // sampled wrapper at p=0.1: raw count ~p×, stamped sample_p == p.
-        let p = 0.1;
-        let mut sampled = CMSWrapper::new(8, 1024).with_sample_p(p);
-        assert_eq!(sampled.sample_p(), p);
-        let n = 100_000;
-        for _ in 0..n {
-            sampled.update("k", 1.0);
-        }
-        let raw = sampled.estimate_count(b"k");
-        let admitted_frac = raw / n as f64;
-        assert!(
-            (admitted_frac - p).abs() < 0.03,
-            "admitted fraction {admitted_frac} not ≈ p={p}"
-        );
-        let env = ProtoEnvelope::decode(sampled.snapshot().unwrap().as_slice()).unwrap();
-        assert!(
-            (env.sample_p - p).abs() < 1e-12,
-            "sampled envelope must stamp p={p}, got {}",
-            env.sample_p
-        );
-
-        // SetSampleP (the coordinated hot-adjust path) works through the trait.
-        let mut w = CMSWrapper::new(4, 256);
-        SampleSetter::set_sample_p(&mut w, 0.25);
-        assert_eq!(w.sample_p(), 0.25);
-        SampleSetter::set_sample_p(&mut w, 1.0); // disable
-        assert_eq!(w.sample_p(), 1.0);
     }
 
     // B6 regression: on the OTAP edge, observations arrive Float-kind
