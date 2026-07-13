@@ -11,10 +11,10 @@
 //! [`SketchEnvelope`] back to the host's native event.
 
 #![warn(missing_docs)]
-// The sketch/sampling code intentionally guards against NaN with the
-// negated-comparison idiom `!(p > 0.0)` (which rejects NaN, unlike the
-// clippy-suggested `p <= 0.0`). Allow the lint crate-wide rather than
-// rewrite five behavior-sensitive comparisons.
+// The sketch code intentionally guards against NaN with the
+// negated-comparison idiom `!(x > 0.0)` (which rejects NaN, unlike the
+// clippy-suggested `x <= 0.0`). Allow the lint crate-wide rather than
+// rewrite behavior-sensitive comparisons.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod adapter;
@@ -26,7 +26,6 @@ pub mod observation;
 #[cfg(feature = "otap")]
 pub mod otap;
 pub mod precompute;
-pub mod sampling;
 pub mod sketches;
 pub mod snapshot_cache;
 pub mod window;
@@ -39,6 +38,6 @@ pub use envelope::{Encoding, SketchEnvelope, SketchType};
 pub use matchers::{LabelMatcher, MatchOp};
 pub use observation::{KeyValue, Observation, ObservationValue, ObservationValueKind};
 pub use precompute::{
-    CardinalitySketch, FrequencyEntry, FrequencySketch, Precompute, QuantileSketch, SampleSetter,
-    Sketch, SketchObserver,
+    CardinalitySketch, FrequencyEntry, FrequencySketch, Precompute, QuantileSketch, Sketch,
+    SketchObserver,
 };
