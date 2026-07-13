@@ -162,3 +162,67 @@ Every boundary and its true cost:
 
 Config knobs live on `PluginConfig` / `PrecomputeConfig`:
 `encoding`, `delta_transmission`, `transmit_sketch`, `quantiles`.
+
+---
+
+## Code map
+
+Each seam in the diagrams/pseudocode above, linked to source. Permalinks are
+pinned to the merged commits (`ASAPCollector-public@1be24ef`,
+`asap_sketchlib@0a2ac37`) so the line numbers don't drift.
+
+### The OTAP node
+
+| Seam | Source |
+|---|---|
+| `AsapSketchesProcessor` — the `local::Processor<OtapPdata>` node | [`otap-patch/all/mod.rs#L229`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/otap-patch/all/mod.rs#L229) |
+| `process(msg, effect_handler)` — the PData / control dispatch | [`otap-patch/all/mod.rs#L244-L245`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/otap-patch/all/mod.rs#L244-L245) |
+
+### Ingest (raw metrics or inbound sketches)
+
+| Seam | Source |
+|---|---|
+| `flatten(records)` — sibling-batch → flat `RecordBatch` (zero-copy) | [`otap/records.rs#L187`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/otap/records.rs#L187) |
+| `decode_batch(batch)` — Arrow columns → `Vec<Observation>` (read-in-place) | [`otap/decode.rs#L94`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/otap/decode.rs#L94) |
+| `observe_envelope` ingest — routes `ProtoDelta`/`MsgpackDelta` vs full | [`window.rs#L265`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/window.rs#L265) |
+| `Sketch::apply_delta_encoded(payload, enc)` — encoding-aware apply (default) | [`precompute.rs#L66`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/precompute.rs#L66) |
+| …DDSketch override (proto vs msgpack dispatch) | [`sketches/ddsketch.rs#L263`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/sketches/ddsketch.rs#L263) |
+
+### Flush / emit (`serialize_series` — the key seam)
+
+| Seam | Source |
+|---|---|
+| `finish_rotate` — walks closed series, collects envelopes | [`precompute.rs#L465`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/precompute.rs#L465) |
+| `serialize_series` — estimate branch **and** sketch-on-wire branch | [`precompute.rs#L499`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/precompute.rs#L499) |
+| `full_encoding` / `delta_encoding` — `cfg.encoding` → emitted tag | [`precompute.rs#L610`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/precompute.rs#L610) · [`#L621`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/precompute.rs#L621) |
+| `encode_batch` — writes the `value` column from `env.value` | [`otap/encode.rs#L104`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/otap/encode.rs#L104) |
+
+### Estimate mode (Topology A)
+
+| Seam | Source |
+|---|---|
+| `Sketch::estimate(quantiles, top_k)` — default empty | [`precompute.rs#L116`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/precompute.rs#L116) |
+| `EstimatePoint { labels, value }` | [`precompute.rs#L209`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/precompute.rs#L209) |
+| DDSketch estimate — one point per quantile | [`sketches/ddsketch.rs#L338`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/sketches/ddsketch.rs#L338) |
+| KLL estimate — one point per quantile | [`sketches/kll.rs#L259`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/sketches/kll.rs#L259) |
+| HLL estimate — single cardinality point | [`sketches/hll.rs#L290`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/sketches/hll.rs#L290) |
+
+### Wire format & config knobs
+
+| Seam | Source |
+|---|---|
+| `Encoding::MsgpackDelta` variant | [`envelope.rs#L95`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/envelope.rs#L95) |
+| `Encoding::is_msgpack()` | [`envelope.rs#L113`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/envelope.rs#L113) |
+| `SketchEnvelope::value` (estimate scalar) | [`envelope.rs#L214`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/envelope.rs#L214) |
+| wrapper `wire_encoding` baked by the factory (`with_wire_encoding`) | [`sketches/ddsketch.rs#L61`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/sketches/ddsketch.rs#L61) |
+| wrapper `snapshot` — proto vs msgpack dispatch | [`sketches/ddsketch.rs#L163`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/sketches/ddsketch.rs#L163) |
+| `PluginConfig.encoding` (user-facing) → `resolve()` | [`otap/config.rs#L102`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/otap/config.rs#L102) · [`resolve #L164`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/otap/config.rs#L164) |
+| `PrecomputeConfig.transmit_sketch` + manual `Default` (defaults `true`) | [`config.rs#L166`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/config.rs#L166) · [`Default #L275`](https://github.com/ProjectASAP/ASAPCollector-public/blob/1be24ef1deeff38d79502d861291783fc34209d1/asap-precompute-rs/src/config.rs#L275) |
+
+### The msgpack format itself (`asap_sketchlib`)
+
+| Seam | Source |
+|---|---|
+| `DdSketch::compute_delta_msgpack` (sparse bucket delta) | [`portable/ddsketch.rs#L282`](https://github.com/ProjectASAP/asap_sketchlib/blob/0a2ac3725f9b6d562f3ed7d9a48c6a1ae0c285e6/src/message_pack_format/portable/ddsketch.rs#L282) |
+| `impl MessagePackCodec for DdSketchDelta` (parallel-array wire layout) | [`portable/ddsketch.rs#L465`](https://github.com/ProjectASAP/asap_sketchlib/blob/0a2ac3725f9b6d562f3ed7d9a48c6a1ae0c285e6/src/message_pack_format/portable/ddsketch.rs#L465) |
+| `impl MessagePackCodec for KllSketchData` (KLL full form) | [`portable/kll.rs#L360`](https://github.com/ProjectASAP/asap_sketchlib/blob/0a2ac3725f9b6d562f3ed7d9a48c6a1ae0c285e6/src/message_pack_format/portable/kll.rs#L360) |
