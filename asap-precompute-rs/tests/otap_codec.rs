@@ -45,6 +45,7 @@ fn envelope_for(sketch_type: SketchType, payload: &[u8]) -> SketchEnvelope {
         metric_name: format!("metric_{}", sketch_type.name()),
         count: 0,
         aggregation_temporality: 0,
+        value: 0.0,
     }
 }
 

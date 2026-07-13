@@ -205,6 +205,13 @@ pub struct SketchEnvelope {
     /// The OTel adapter encode path reads this to set
     /// `Sum::SetAggregationTemporality(...)`. In-process only.
     pub aggregation_temporality: i32,
+    /// Estimated scalar result for the `transmit_sketch = false` output
+    /// mode — a quantile value (DDSketch / KLL) or a cardinality estimate
+    /// (HLL). Zero and ignored when a sketch `payload` is present; the
+    /// distinguishing labels (e.g. `quantile`) live in [`Self::labels`].
+    /// Encode writes it to the `value` column.
+    #[serde(default)]
+    pub value: f64,
 }
 
 #[cfg(test)]
@@ -248,6 +255,7 @@ mod tests {
             metric_name: "http_request_duration".into(),
             count: 100,
             aggregation_temporality: 1,
+            value: 88.0,
         };
         let json = serde_json::to_string(&env).expect("serialize");
         let decoded: SketchEnvelope = serde_json::from_str(&json).expect("deserialize");

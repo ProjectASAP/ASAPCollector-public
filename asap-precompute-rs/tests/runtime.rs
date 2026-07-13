@@ -937,6 +937,84 @@ mod real_sketch {
     }
 
     #[test]
+    fn ddsketch_estimate_mode_emits_quantile_gauges() {
+        // transmit_sketch=false → one Gauge row per configured quantile,
+        // value = the quantile estimate, distinguished by a `quantile` label.
+        let cfg = PrecomputeConfig {
+            agg_id: 1,
+            sketch_type: SketchType::DDSketch,
+            mode: AggregationMode::Tumbling,
+            window: WindowSpec {
+                size: Duration::from_secs(10),
+                ..Default::default()
+            },
+            transmit_sketch: false,
+            quantiles: vec![0.5, 0.99],
+            ..Default::default()
+        };
+        let p = PrecomputeImpl::new(
+            Some(cfg),
+            Some(ddsketch_factory()),
+            Some(Box::new(DDSketchObserver)),
+        );
+        for i in 1..=100 {
+            p.observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
+                .expect("observe");
+        }
+        let envs = p.tick(10_000);
+        assert_eq!(envs.len(), 2, "one gauge per quantile");
+        let find = |q: &str| {
+            envs.iter()
+                .find(|e| {
+                    e.labels
+                        .iter()
+                        .any(|kv| kv.key == "quantile" && kv.value == q)
+                })
+                .unwrap_or_else(|| panic!("missing quantile {q}"))
+        };
+        for env in &envs {
+            assert_eq!(env.encoding, Encoding::Unspecified);
+            assert!(
+                env.payload.is_empty(),
+                "estimate rows carry no sketch bytes"
+            );
+        }
+        let p50 = find("0.5").value;
+        let p99 = find("0.99").value;
+        assert!((p50 - 50.0).abs() / 50.0 < 0.05, "p50={p50}");
+        assert!((p99 - 99.0).abs() / 99.0 < 0.05, "p99={p99}");
+    }
+
+    #[test]
+    fn hll_estimate_mode_emits_cardinality_gauge() {
+        let cfg = PrecomputeConfig {
+            agg_id: 1,
+            sketch_type: SketchType::HLLSketch,
+            mode: AggregationMode::Tumbling,
+            window: WindowSpec {
+                size: Duration::from_secs(10),
+                ..Default::default()
+            },
+            transmit_sketch: false,
+            ..Default::default()
+        };
+        let p = PrecomputeImpl::new(Some(cfg), Some(hll_factory()), Some(Box::new(HLLObserver)));
+        for i in 0..1000u64 {
+            p.observe(&bytes_obs("unique_users", 1_000, "ip", &i.to_le_bytes()))
+                .expect("observe");
+        }
+        let envs = p.tick(10_000);
+        assert_eq!(envs.len(), 1, "one cardinality gauge");
+        assert_eq!(envs[0].encoding, Encoding::Unspecified);
+        assert!(envs[0].payload.is_empty());
+        assert!(
+            (envs[0].value - 1000.0).abs() / 1000.0 < 0.1,
+            "cardinality={}",
+            envs[0].value
+        );
+    }
+
+    #[test]
     fn cms_msgpack_full_roundtrips_through_ingest() {
         // A msgpack full frame emitted by one node is re-ingested by a
         // second (envelope-input) node via observe_envelope → the

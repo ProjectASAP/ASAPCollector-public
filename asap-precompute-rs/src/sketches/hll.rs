@@ -11,7 +11,9 @@ use prost::Message;
 
 use crate::envelope::Encoding;
 use crate::observation::Observation;
-use crate::precompute::{CardinalitySketch, DeltaResult, PrecomputeError, Sketch, SketchObserver};
+use crate::precompute::{
+    CardinalitySketch, DeltaResult, EstimatePoint, PrecomputeError, Sketch, SketchObserver,
+};
 
 /// HLL wrapper. Owns one `asap_sketchlib::HllSketch`.
 pub struct HLLWrapper {
@@ -283,6 +285,16 @@ impl Sketch for HLLWrapper {
         }
         let empty = HLLWrapper::new(self.variant, self.precision);
         Ok(Some(empty.encode_envelope()))
+    }
+
+    fn estimate(&self, _quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {
+        if self.sk.registers.iter().all(|&r| r == 0) {
+            return Vec::new();
+        }
+        vec![EstimatePoint {
+            labels: Vec::new(),
+            value: CardinalitySketch::estimate_cardinality(self),
+        }]
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

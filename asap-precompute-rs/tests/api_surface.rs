@@ -111,6 +111,7 @@ fn sketch_envelope_round_trips_through_serde_json() {
         metric_name: "http_request_count".into(),
         count: 4096,
         aggregation_temporality: 1,
+        value: 0.0,
     };
     let json = serde_json::to_string(&env).expect("serialize");
     let decoded: SketchEnvelope = serde_json::from_str(&json).expect("deserialize");

@@ -10,8 +10,10 @@ use asap_sketchlib::{DdSketch, MessagePackCodec};
 use prost::Message;
 
 use crate::envelope::Encoding;
-use crate::observation::Observation;
-use crate::precompute::{DeltaResult, PrecomputeError, QuantileSketch, Sketch, SketchObserver};
+use crate::observation::{KeyValue, Observation};
+use crate::precompute::{
+    DeltaResult, EstimatePoint, PrecomputeError, QuantileSketch, Sketch, SketchObserver,
+};
 
 /// DDSketch wrapper.
 ///
@@ -331,6 +333,19 @@ impl Sketch for DDSketchWrapper {
         }
         let empty = DDSketchWrapper::new(self.alpha);
         Ok(Some(empty.encode_envelope()))
+    }
+
+    fn estimate(&self, quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {
+        if self.sk.total_count() == 0 {
+            return Vec::new();
+        }
+        quantiles
+            .iter()
+            .map(|&q| EstimatePoint {
+                labels: vec![KeyValue::new("quantile", format!("{q}"))],
+                value: QuantileSketch::quantile(self, q),
+            })
+            .collect()
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

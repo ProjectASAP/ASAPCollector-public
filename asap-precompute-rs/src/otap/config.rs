@@ -104,6 +104,14 @@ pub struct PluginConfig {
     /// snapshot (per-window against-empty). Combined with a msgpack
     /// `encoding`, this emits `MsgpackDelta` frames.
     pub delta_transmission: bool,
+    /// When `false`, emit estimated scalar results instead of sketch bytes
+    /// (see [`crate::config::PrecomputeConfig::transmit_sketch`]): one Gauge
+    /// per [`Self::quantiles`] entry for DDSketch / KLL, a cardinality Gauge
+    /// for HLL. Defaults to `true` (transmit the sketch).
+    pub transmit_sketch: bool,
+    /// Quantiles emitted per series when `transmit_sketch = false` and the
+    /// sketch is a quantile sketch (DDSketch / KLL). Ignored otherwise.
+    pub quantiles: Vec<f64>,
 }
 
 impl Default for PluginConfig {
@@ -120,6 +128,8 @@ impl Default for PluginConfig {
             emit_window_stats: false,
             encoding: Encoding::ProtoFull,
             delta_transmission: false,
+            transmit_sketch: true,
+            quantiles: Vec::new(),
         }
     }
 }
@@ -168,11 +178,11 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         },
         matchers: Vec::new(),
         aggregate_by: Vec::new(),
-        transmit_sketch: true,
+        transmit_sketch: config.transmit_sketch,
         delta_transmission: config.delta_transmission,
         delta_threshold: 0,
         encoding: config.encoding,
-        quantiles: Vec::new(),
+        quantiles: config.quantiles.clone(),
         sketch_params: config.sketch_params.clone(),
         max_series: 0,
         on_overflow: crate::config::OnOverflow::Drop,
