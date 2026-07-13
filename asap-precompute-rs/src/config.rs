@@ -142,7 +142,7 @@ pub fn sketch_param_get(params: &SketchParams, key: &str, default: f64) -> f64 {
 
 /// Host-neutral form of today's per-OTel-processor `Config` struct,
 /// plus `max_series` / `on_overflow`.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrecomputeConfig {
     /// Controller-plan join key. One config per `AggId`.
     pub agg_id: AggId,
@@ -265,6 +265,37 @@ pub struct PrecomputeConfig {
     /// because the other 4 sketch processors (DDSketch / KLL / HLL /
     /// CMS) do not emit them.
     pub emit_window_stats: bool,
+}
+
+/// Manual `Default` (not derived) so `transmit_sketch` defaults to `true` —
+/// the historical behavior is to emit the sketch, and estimate mode
+/// (`transmit_sketch = false`) is opt-in. Every other field keeps its
+/// type's zero value. Kept exhaustive on purpose: a newly-added field must
+/// be given a default here (compile error otherwise).
+impl Default for PrecomputeConfig {
+    fn default() -> Self {
+        Self {
+            transmit_sketch: true,
+            agg_id: AggId::default(),
+            sketch_type: SketchType::default(),
+            mode: AggregationMode::default(),
+            window: WindowSpec::default(),
+            matchers: Vec::new(),
+            aggregate_by: Vec::new(),
+            delta_transmission: false,
+            delta_threshold: 0,
+            encoding: Encoding::default(),
+            quantiles: Vec::new(),
+            sketch_params: SketchParams::default(),
+            max_series: 0,
+            on_overflow: OnOverflow::default(),
+            metric_name: String::new(),
+            temporality: 0,
+            omit_resource_attrs: false,
+            global_aggregation: false,
+            emit_window_stats: false,
+        }
+    }
 }
 
 impl PrecomputeConfig {

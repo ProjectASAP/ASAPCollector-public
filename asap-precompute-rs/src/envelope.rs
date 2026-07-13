@@ -86,6 +86,13 @@ pub enum Encoding {
     /// `payload` is a msgpack-encoded full state (some sketches expose
     /// msgpack as a faster wire format).
     Msgpack,
+    /// `payload` is a msgpack-encoded sparse delta against the
+    /// receiver's cached snapshot of this series — the msgpack twin of
+    /// [`Self::ProtoDelta`]. Carried by the four delta-capable sketches
+    /// (DDSketch / HLL / CountSketch / CountMinSketch) as the
+    /// struct-of-parallel-arrays layout produced by `asap_sketchlib`'s
+    /// `compute_delta_msgpack`. KLL never emits this (full-only).
+    MsgpackDelta,
 }
 
 impl Encoding {
@@ -95,8 +102,16 @@ impl Encoding {
             Self::ProtoFull => "PROTO_FULL",
             Self::ProtoDelta => "PROTO_DELTA",
             Self::Msgpack => "MSGPACK",
+            Self::MsgpackDelta => "MSGPACK_DELTA",
             Self::Unspecified => "UNSPECIFIED",
         }
+    }
+
+    /// Whether this encoding serializes sketch state as MessagePack
+    /// (full or delta) rather than proto. Used by the sketch wrappers to
+    /// pick the wire codec.
+    pub fn is_msgpack(&self) -> bool {
+        matches!(self, Self::Msgpack | Self::MsgpackDelta)
     }
 }
 
@@ -190,6 +205,13 @@ pub struct SketchEnvelope {
     /// The OTel adapter encode path reads this to set
     /// `Sum::SetAggregationTemporality(...)`. In-process only.
     pub aggregation_temporality: i32,
+    /// Estimated scalar result for the `transmit_sketch = false` output
+    /// mode — a quantile value (DDSketch / KLL) or a cardinality estimate
+    /// (HLL). Zero and ignored when a sketch `payload` is present; the
+    /// distinguishing labels (e.g. `quantile`) live in [`Self::labels`].
+    /// Encode writes it to the `value` column.
+    #[serde(default)]
+    pub value: f64,
 }
 
 #[cfg(test)]
@@ -211,7 +233,10 @@ mod tests {
         assert_eq!(Encoding::ProtoFull.name(), "PROTO_FULL");
         assert_eq!(Encoding::ProtoDelta.name(), "PROTO_DELTA");
         assert_eq!(Encoding::Msgpack.name(), "MSGPACK");
+        assert_eq!(Encoding::MsgpackDelta.name(), "MSGPACK_DELTA");
         assert_eq!(Encoding::Unspecified.name(), "UNSPECIFIED");
+        assert!(Encoding::Msgpack.is_msgpack() && Encoding::MsgpackDelta.is_msgpack());
+        assert!(!Encoding::ProtoFull.is_msgpack() && !Encoding::ProtoDelta.is_msgpack());
     }
 
     #[test]
@@ -230,6 +255,7 @@ mod tests {
             metric_name: "http_request_duration".into(),
             count: 100,
             aggregation_temporality: 1,
+            value: 88.0,
         };
         let json = serde_json::to_string(&env).expect("serialize");
         let decoded: SketchEnvelope = serde_json::from_str(&json).expect("deserialize");

@@ -906,6 +906,7 @@ mod tests {
             metric_name: "m".into(),
             count: 0,
             aggregation_temporality: 0,
+            value: 0.0,
         };
         let flat = super::super::encode_batch(std::slice::from_ref(&env)).expect("encode");
         let lifted = lift(&flat).expect("lift");

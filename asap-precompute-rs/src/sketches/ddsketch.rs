@@ -6,11 +6,14 @@
 use asap_sketchlib::proto::sketchlib::{
     sketch_envelope, DdSketchState, SketchEnvelope as ProtoEnvelope,
 };
-use asap_sketchlib::DdSketch;
+use asap_sketchlib::{DdSketch, MessagePackCodec};
 use prost::Message;
 
-use crate::observation::Observation;
-use crate::precompute::{DeltaResult, PrecomputeError, QuantileSketch, Sketch, SketchObserver};
+use crate::envelope::Encoding;
+use crate::observation::{KeyValue, Observation};
+use crate::precompute::{
+    DeltaResult, EstimatePoint, PrecomputeError, QuantileSketch, Sketch, SketchObserver,
+};
 
 /// DDSketch wrapper.
 ///
@@ -30,6 +33,11 @@ pub struct DDSketchWrapper {
     /// count sketches). The `p` still rides on the envelope for transparency.
     sample_p: f64,
     sampler: crate::sampling::GeometricSampler,
+    /// Outbound wire format for this series' snapshots/deltas. Baked from
+    /// `cfg.encoding` by the OTAP sketch factory; `snapshot` /
+    /// `compute_delta_against` / `delta_against_empty_base` honor it to
+    /// pick proto vs msgpack.
+    wire_encoding: Encoding,
 }
 
 /// Fixed seed for DDSketch admission sampling.
@@ -44,7 +52,15 @@ impl DDSketchWrapper {
             alpha,
             sample_p: 1.0,
             sampler: crate::sampling::GeometricSampler::new(1.0, DD_SAMPLE_SEED),
+            wire_encoding: Encoding::ProtoFull,
         }
+    }
+
+    /// Set the outbound wire format (proto vs msgpack). Builder form used
+    /// by the OTAP sketch factory to bake in `cfg.encoding`.
+    pub fn with_wire_encoding(mut self, encoding: Encoding) -> Self {
+        self.wire_encoding = encoding;
+        self
     }
 
     /// Enable NitroSketch geometric skip-sampling at probability `p` (builder
@@ -150,6 +166,11 @@ impl Sketch for DDSketchWrapper {
             // empty payloads rather than emitting zero-byte envelopes.
             return Ok(Vec::new());
         }
+        if self.wire_encoding.is_msgpack() {
+            return self.sk.to_msgpack().map_err(|e| {
+                PrecomputeError::Other(format!("DDSketchWrapper msgpack snapshot: {e}"))
+            });
+        }
         Ok(self.encode_envelope())
     }
 
@@ -182,6 +203,25 @@ impl Sketch for DDSketchWrapper {
             return Ok(DeltaResult {
                 payload: full,
                 is_full: true,
+            });
+        }
+        if self.wire_encoding.is_msgpack() {
+            // Msgpack path: the cached base is a msgpack-encoded full
+            // `DdSketch`; diff against it and emit the sparse msgpack delta.
+            let prev_sk = match DdSketch::from_msgpack(prev) {
+                Ok(sk) => sk,
+                Err(_) => {
+                    let full = self.snapshot()?;
+                    return Ok(DeltaResult {
+                        payload: full,
+                        is_full: true,
+                    });
+                }
+            };
+            let delta = self.sk.compute_delta_msgpack(&prev_sk, threshold);
+            return Ok(DeltaResult {
+                payload: delta,
+                is_full: false,
             });
         }
         let prev_sk = match Self::decode_envelope(prev) {
@@ -220,6 +260,30 @@ impl Sketch for DDSketchWrapper {
             .map_err(|e| PrecomputeError::Other(format!("DDSketchWrapper apply_delta: {e}")))
     }
 
+    fn apply_delta_encoded(
+        &mut self,
+        payload: &[u8],
+        encoding: Encoding,
+    ) -> Result<(), PrecomputeError> {
+        if payload.is_empty() {
+            return Ok(());
+        }
+        match encoding {
+            Encoding::MsgpackDelta => self.sk.apply_delta_msgpack_bytes(payload).map_err(|e| {
+                PrecomputeError::Other(format!("DDSketchWrapper msgpack apply_delta: {e}"))
+            }),
+            Encoding::Msgpack => {
+                let other = DdSketch::from_msgpack(payload).map_err(|e| {
+                    PrecomputeError::Other(format!("DDSketchWrapper msgpack decode: {e}"))
+                })?;
+                self.sk
+                    .merge(&other)
+                    .map_err(|e| PrecomputeError::Other(format!("DDSketchWrapper merge: {e}")))
+            }
+            _ => self.apply_delta(payload),
+        }
+    }
+
     fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
         // The runtime always merges sketches owned by the same
         // Precompute (same alpha). Our trait is generic, so we
@@ -228,7 +292,15 @@ impl Sketch for DDSketchWrapper {
         if bytes.is_empty() {
             return Ok(());
         }
-        let decoded = Self::decode_envelope(&bytes)?;
+        // `other.snapshot()` is in that wrapper's `wire_encoding`; same
+        // Precompute ⇒ same encoding as ours, so decode by our own tag.
+        let decoded = if self.wire_encoding.is_msgpack() {
+            DdSketch::from_msgpack(&bytes).map_err(|e| {
+                PrecomputeError::Other(format!("DDSketchWrapper msgpack merge decode: {e}"))
+            })?
+        } else {
+            Self::decode_envelope(&bytes)?
+        };
         self.sk
             .merge(&decoded)
             .map_err(|e| PrecomputeError::Other(format!("DDSketchWrapper merge: {e}")))
@@ -252,8 +324,28 @@ impl Sketch for DDSketchWrapper {
         // latter short-circuits to empty bytes (the runtime drops empty
         // payloads), and empty bytes would make `compute_delta_against`
         // fall back to a full snapshot instead of a delta.
+        if self.wire_encoding.is_msgpack() {
+            let empty = DdSketch::new(self.alpha);
+            let bytes = empty.to_msgpack().map_err(|e| {
+                PrecomputeError::Other(format!("DDSketchWrapper msgpack empty base: {e}"))
+            })?;
+            return Ok(Some(bytes));
+        }
         let empty = DDSketchWrapper::new(self.alpha);
         Ok(Some(empty.encode_envelope()))
+    }
+
+    fn estimate(&self, quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {
+        if self.sk.total_count() == 0 {
+            return Vec::new();
+        }
+        quantiles
+            .iter()
+            .map(|&q| EstimatePoint {
+                labels: vec![KeyValue::new("quantile", format!("{q}"))],
+                value: QuantileSketch::quantile(self, q),
+            })
+            .collect()
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

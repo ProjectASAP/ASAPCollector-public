@@ -200,6 +200,13 @@ fn build_envelope(
         .map(|arr| arr.value(row))
         .unwrap_or(0);
 
+    let value = columns
+        .value
+        .as_ref()
+        .filter(|arr| !arr.is_null(row))
+        .map(|arr| arr.value(row))
+        .unwrap_or(0.0);
+
     Ok(SketchEnvelope {
         schema_version,
         sketch_type,
@@ -214,6 +221,7 @@ fn build_envelope(
         metric_name: metric.to_string(),
         count: 0,
         aggregation_temporality: 0,
+        value,
     })
 }
 
@@ -237,6 +245,7 @@ fn parse_encoding(row: usize, raw: &str) -> Result<Encoding, OtapDecodeError> {
         "PROTO_FULL" => Ok(Encoding::ProtoFull),
         "PROTO_DELTA" => Ok(Encoding::ProtoDelta),
         "MSGPACK" => Ok(Encoding::Msgpack),
+        "MSGPACK_DELTA" => Ok(Encoding::MsgpackDelta),
         "UNSPECIFIED" | "" => Ok(Encoding::Unspecified),
         _ => Err(OtapDecodeError::UnknownEncoding {
             row,

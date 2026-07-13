@@ -882,6 +882,250 @@ mod real_sketch {
     }
 
     #[test]
+    fn ddsketch_msgpack_delta_first_full_then_delta() {
+        // End-to-end Stage-3 wiring: a msgpack-configured DDSketch emits a
+        // full `Msgpack` frame on the first window and a sparse
+        // `MsgpackDelta` frame on the next, each reconstructable via
+        // sketchlib's msgpack codec.
+        use asap_sketchlib::MessagePackCodec;
+
+        let cfg = PrecomputeConfig {
+            agg_id: 1,
+            sketch_type: SketchType::DDSketch,
+            mode: AggregationMode::Tumbling,
+            window: WindowSpec {
+                size: Duration::from_secs(10),
+                ..Default::default()
+            },
+            delta_transmission: true,
+            delta_threshold: 1,
+            encoding: Encoding::MsgpackDelta,
+            ..Default::default()
+        };
+        let factory: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
+            Box::new(DDSketchWrapper::new(0.01).with_wire_encoding(Encoding::MsgpackDelta))
+                as Box<dyn Sketch>
+        });
+        let p = PrecomputeImpl::new(Some(cfg), Some(factory), Some(Box::new(DDSketchObserver)));
+
+        // Window 0 — first emission is a full msgpack frame.
+        for i in 1..=50 {
+            p.observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
+                .expect("observe");
+        }
+        let envs = p.tick(10_000);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].encoding, Encoding::Msgpack);
+        let full = asap_sketchlib::DdSketch::from_msgpack(&envs[0].payload).expect("decode full");
+        assert_eq!(full.total_count(), 50);
+
+        // Window 1 — a sparse msgpack delta frame; applying it to an empty
+        // base reconstructs this window's own count (no cross-window leak).
+        for i in 1..=50 {
+            p.observe(&float_obs("latency_ms", 11_000, "GET", i as f64))
+                .expect("observe");
+        }
+        let envs = p.tick(20_000);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].encoding, Encoding::MsgpackDelta);
+        assert!(!envs[0].payload.is_empty());
+        let mut recon = asap_sketchlib::DdSketch::new(0.01);
+        recon
+            .apply_delta_msgpack_bytes(&envs[0].payload)
+            .expect("apply msgpack delta");
+        assert_eq!(recon.total_count(), 50);
+    }
+
+    #[test]
+    fn ddsketch_estimate_mode_emits_quantile_gauges() {
+        // transmit_sketch=false → one Gauge row per configured quantile,
+        // value = the quantile estimate, distinguished by a `quantile` label.
+        let cfg = PrecomputeConfig {
+            agg_id: 1,
+            sketch_type: SketchType::DDSketch,
+            mode: AggregationMode::Tumbling,
+            window: WindowSpec {
+                size: Duration::from_secs(10),
+                ..Default::default()
+            },
+            transmit_sketch: false,
+            quantiles: vec![0.5, 0.99],
+            ..Default::default()
+        };
+        let p = PrecomputeImpl::new(
+            Some(cfg),
+            Some(ddsketch_factory()),
+            Some(Box::new(DDSketchObserver)),
+        );
+        for i in 1..=100 {
+            p.observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
+                .expect("observe");
+        }
+        let envs = p.tick(10_000);
+        assert_eq!(envs.len(), 2, "one gauge per quantile");
+        let find = |q: &str| {
+            envs.iter()
+                .find(|e| {
+                    e.labels
+                        .iter()
+                        .any(|kv| kv.key == "quantile" && kv.value == q)
+                })
+                .unwrap_or_else(|| panic!("missing quantile {q}"))
+        };
+        for env in &envs {
+            assert_eq!(env.encoding, Encoding::Unspecified);
+            assert!(
+                env.payload.is_empty(),
+                "estimate rows carry no sketch bytes"
+            );
+        }
+        let p50 = find("0.5").value;
+        let p99 = find("0.99").value;
+        assert!((p50 - 50.0).abs() / 50.0 < 0.05, "p50={p50}");
+        assert!((p99 - 99.0).abs() / 99.0 < 0.05, "p99={p99}");
+    }
+
+    #[test]
+    fn hll_estimate_mode_emits_cardinality_gauge() {
+        let cfg = PrecomputeConfig {
+            agg_id: 1,
+            sketch_type: SketchType::HLLSketch,
+            mode: AggregationMode::Tumbling,
+            window: WindowSpec {
+                size: Duration::from_secs(10),
+                ..Default::default()
+            },
+            transmit_sketch: false,
+            ..Default::default()
+        };
+        let p = PrecomputeImpl::new(Some(cfg), Some(hll_factory()), Some(Box::new(HLLObserver)));
+        for i in 0..1000u64 {
+            p.observe(&bytes_obs("unique_users", 1_000, "ip", &i.to_le_bytes()))
+                .expect("observe");
+        }
+        let envs = p.tick(10_000);
+        assert_eq!(envs.len(), 1, "one cardinality gauge");
+        assert_eq!(envs[0].encoding, Encoding::Unspecified);
+        assert!(envs[0].payload.is_empty());
+        assert!(
+            (envs[0].value - 1000.0).abs() / 1000.0 < 0.1,
+            "cardinality={}",
+            envs[0].value
+        );
+    }
+
+    #[test]
+    fn cms_msgpack_full_roundtrips_through_ingest() {
+        // A msgpack full frame emitted by one node is re-ingested by a
+        // second (envelope-input) node via observe_envelope → the
+        // encoding-aware full-merge path, and the merged estimate matches.
+        use asap_sketchlib::MessagePackCodec;
+
+        let cfg = PrecomputeConfig {
+            agg_id: 1,
+            sketch_type: SketchType::CountMinSketch,
+            mode: AggregationMode::Tumbling,
+            window: WindowSpec {
+                size: Duration::from_secs(10),
+                ..Default::default()
+            },
+            encoding: Encoding::Msgpack,
+            ..Default::default()
+        };
+        let factory: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
+            Box::new(CMSWrapper::new(4, 32).with_wire_encoding(Encoding::Msgpack))
+                as Box<dyn Sketch>
+        });
+        let producer = PrecomputeImpl::new(
+            Some(cfg.clone()),
+            Some(factory),
+            Some(Box::new(CMSObserver)),
+        );
+        for _ in 0..100 {
+            producer
+                .observe(&bytes_obs("events", 1_000, "hot", b"hot"))
+                .expect("observe");
+        }
+        let envs = producer.tick(10_000);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].encoding, Encoding::Msgpack);
+
+        // Second node ingests the emitted msgpack envelope and re-emits.
+        let factory2: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
+            Box::new(CMSWrapper::new(4, 32).with_wire_encoding(Encoding::Msgpack))
+                as Box<dyn Sketch>
+        });
+        let merger = PrecomputeImpl::new(Some(cfg), Some(factory2), Some(Box::new(CMSObserver)));
+        merger.observe_envelope(&envs[0]).expect("observe_envelope");
+        let out = merger.tick(20_000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].encoding, Encoding::Msgpack);
+        let merged =
+            asap_sketchlib::CountMinSketch::from_msgpack(&out[0].payload).expect("decode merged");
+        assert!(merged.estimate("hot") >= 90.0);
+    }
+
+    #[test]
+    fn kll_msgpack_full_roundtrips_through_ingest() {
+        use asap_sketchlib::MessagePackCodec;
+
+        let cfg = PrecomputeConfig {
+            agg_id: 1,
+            sketch_type: SketchType::KLLSketch,
+            mode: AggregationMode::Tumbling,
+            window: WindowSpec {
+                size: Duration::from_secs(10),
+                ..Default::default()
+            },
+            encoding: Encoding::Msgpack,
+            ..Default::default()
+        };
+        let factory: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
+            Box::new(KLLWrapper::new(200, None).with_wire_encoding(Encoding::Msgpack))
+                as Box<dyn Sketch>
+        });
+        let producer = PrecomputeImpl::new(
+            Some(cfg.clone()),
+            Some(factory),
+            Some(Box::new(KLLObserver)),
+        );
+        for i in 1..=1000 {
+            producer
+                .observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
+                .expect("observe");
+        }
+        let envs = producer.tick(10_000);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].encoding, Encoding::Msgpack);
+        assert!(!envs[0].payload.is_empty());
+        let psk =
+            asap_sketchlib::KllSketch::from_msgpack(&envs[0].payload).expect("decode producer");
+        assert!(
+            (psk.quantile(0.5) - 500.0).abs() < 60.0,
+            "producer p50={}",
+            psk.quantile(0.5)
+        );
+
+        // Second node ingests the msgpack full frame and re-emits a valid
+        // msgpack frame (smoke). NOTE: cross-host KLL *merge* accuracy is a
+        // known, pre-existing limitation shared by the proto path — KLL's
+        // retained items carry level weights that item-replay drops — so we
+        // assert only that ingest + re-emit round-trips structurally, not
+        // that the merged median is preserved.
+        let factory2: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
+            Box::new(KLLWrapper::new(200, None).with_wire_encoding(Encoding::Msgpack))
+                as Box<dyn Sketch>
+        });
+        let merger = PrecomputeImpl::new(Some(cfg), Some(factory2), Some(Box::new(KLLObserver)));
+        merger.observe_envelope(&envs[0]).expect("observe_envelope");
+        let out = merger.tick(20_000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].encoding, Encoding::Msgpack);
+        let sk = asap_sketchlib::KllSketch::from_msgpack(&out[0].payload).expect("decode merged");
+        assert!(sk.count() > 0, "re-emitted merged sketch must be non-empty");
+    }
+
+    #[test]
     fn kll_wrapper_observe_tick_emits_envelope() {
         let cfg = PrecomputeConfig {
             agg_id: 1,
