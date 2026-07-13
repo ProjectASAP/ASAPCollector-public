@@ -988,6 +988,66 @@ mod real_sketch {
     }
 
     #[test]
+    fn kll_msgpack_full_roundtrips_through_ingest() {
+        use asap_sketchlib::MessagePackCodec;
+
+        let cfg = PrecomputeConfig {
+            agg_id: 1,
+            sketch_type: SketchType::KLLSketch,
+            mode: AggregationMode::Tumbling,
+            window: WindowSpec {
+                size: Duration::from_secs(10),
+                ..Default::default()
+            },
+            encoding: Encoding::Msgpack,
+            ..Default::default()
+        };
+        let factory: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
+            Box::new(KLLWrapper::new(200, None).with_wire_encoding(Encoding::Msgpack))
+                as Box<dyn Sketch>
+        });
+        let producer = PrecomputeImpl::new(
+            Some(cfg.clone()),
+            Some(factory),
+            Some(Box::new(KLLObserver)),
+        );
+        for i in 1..=1000 {
+            producer
+                .observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
+                .expect("observe");
+        }
+        let envs = producer.tick(10_000);
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0].encoding, Encoding::Msgpack);
+        assert!(!envs[0].payload.is_empty());
+        let psk =
+            asap_sketchlib::KllSketch::from_msgpack(&envs[0].payload).expect("decode producer");
+        assert!(
+            (psk.quantile(0.5) - 500.0).abs() < 60.0,
+            "producer p50={}",
+            psk.quantile(0.5)
+        );
+
+        // Second node ingests the msgpack full frame and re-emits a valid
+        // msgpack frame (smoke). NOTE: cross-host KLL *merge* accuracy is a
+        // known, pre-existing limitation shared by the proto path — KLL's
+        // retained items carry level weights that item-replay drops — so we
+        // assert only that ingest + re-emit round-trips structurally, not
+        // that the merged median is preserved.
+        let factory2: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
+            Box::new(KLLWrapper::new(200, None).with_wire_encoding(Encoding::Msgpack))
+                as Box<dyn Sketch>
+        });
+        let merger = PrecomputeImpl::new(Some(cfg), Some(factory2), Some(Box::new(KLLObserver)));
+        merger.observe_envelope(&envs[0]).expect("observe_envelope");
+        let out = merger.tick(20_000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].encoding, Encoding::Msgpack);
+        let sk = asap_sketchlib::KllSketch::from_msgpack(&out[0].payload).expect("decode merged");
+        assert!(sk.count() > 0, "re-emitted merged sketch must be non-empty");
+    }
+
+    #[test]
     fn kll_wrapper_observe_tick_emits_envelope() {
         let cfg = PrecomputeConfig {
             agg_id: 1,

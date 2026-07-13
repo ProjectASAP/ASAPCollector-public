@@ -61,21 +61,6 @@ pub enum ConfigError {
         /// Raw value from config (in milliseconds, post-parse).
         value: u128,
     },
-
-    /// A msgpack `encoding` was requested for a sketch type that has no
-    /// msgpack codec. Today this is only `kll` (KLL is proto-only /
-    /// full-only; its wrapper is history-backed, not portable-struct
-    /// backed).
-    #[error(
-        "asap_sketches: encoding {encoding} is not supported for sketch_type {sketch_type:?} \
-         (msgpack is unavailable for KLL; use a proto encoding)"
-    )]
-    MsgpackUnsupported {
-        /// The offending sketch type spelling.
-        sketch_type: String,
-        /// The requested encoding name.
-        encoding: &'static str,
-    },
 }
 
 /// Plugin-level config block. Exposes the `sketch_type` knob plus the
@@ -112,8 +97,8 @@ pub struct PluginConfig {
     pub emit_window_stats: bool,
     /// Outbound wire format for emitted envelopes. `ProtoFull` (default)
     /// keeps the proto `SketchEnvelope` format; `Msgpack` / `MsgpackDelta`
-    /// select the msgpack codec. Msgpack is rejected for `sketch_type =
-    /// "kll"` (KLL is proto-only / full-only).
+    /// select the msgpack codec. KLL supports `Msgpack` (full only — it has
+    /// no delta form, so `MsgpackDelta` still emits `Msgpack` full frames).
     pub encoding: Encoding,
     /// Whether to delta-encode emitted state against the cached outbound
     /// snapshot (per-window against-empty). Combined with a msgpack
@@ -173,15 +158,6 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         });
     }
     let dispatch = build_dispatch(config)?;
-    // KLL has no msgpack codec (its wrapper is history-backed, not
-    // portable-struct backed), so reject msgpack up front rather than
-    // emitting proto bytes under a msgpack tag at runtime.
-    if config.encoding.is_msgpack() && dispatch.sketch_type == SketchType::KLLSketch {
-        return Err(ConfigError::MsgpackUnsupported {
-            sketch_type: config.sketch_type.clone(),
-            encoding: config.encoding.name(),
-        });
-    }
     let pcfg = PrecomputeConfig {
         agg_id: config.agg_id,
         sketch_type: dispatch.sketch_type,
@@ -242,7 +218,9 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             };
             Ok(SketchDispatch {
                 sketch_type: SketchType::KLLSketch,
-                factory: Box::new(move || Box::new(KLLWrapper::new(k as i32, seed))),
+                factory: Box::new(move || {
+                    Box::new(KLLWrapper::new(k as i32, seed).with_wire_encoding(encoding))
+                }),
                 observer: boxed_observer(KLLObserver),
             })
         }
@@ -416,19 +394,16 @@ mod tests {
     }
 
     #[test]
-    fn kll_rejects_msgpack_encoding() {
-        for enc in [Encoding::Msgpack, Encoding::MsgpackDelta] {
+    fn kll_allows_all_encodings() {
+        // KLL now has a msgpack full form; every encoding resolves.
+        for enc in [
+            Encoding::ProtoFull,
+            Encoding::Msgpack,
+            Encoding::MsgpackDelta,
+        ] {
             let mut cfg = make_config("kll");
             cfg.encoding = enc;
-            let err = resolve(&cfg).expect_err("kll + msgpack must be rejected");
-            assert!(matches!(err, ConfigError::MsgpackUnsupported { .. }));
+            assert!(resolve(&cfg).is_ok(), "kll should accept {enc:?}");
         }
-    }
-
-    #[test]
-    fn kll_still_allows_proto_encoding() {
-        let mut cfg = make_config("kll");
-        cfg.encoding = Encoding::ProtoFull;
-        assert!(resolve(&cfg).is_ok());
     }
 }

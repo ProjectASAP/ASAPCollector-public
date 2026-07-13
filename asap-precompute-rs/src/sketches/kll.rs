@@ -5,12 +5,14 @@
 //! (`init_with_seed` lands a deterministic compaction RNG).
 
 use asap_sketchlib::sketches::KLL;
+use asap_sketchlib::{KllSketchData, MessagePackCodec};
 use prost::Message;
 
 use asap_sketchlib::proto::sketchlib::{
     sketch_envelope, CoinState, KllState, SketchEnvelope as ProtoEnvelope,
 };
 
+use crate::envelope::Encoding;
 use crate::observation::Observation;
 use crate::precompute::{DeltaResult, PrecomputeError, QuantileSketch, Sketch, SketchObserver};
 
@@ -34,6 +36,10 @@ pub struct KLLWrapper {
     /// so cross-language byte-parity now lives against the compactor's
     /// actual state, not this history vec.
     history: Vec<f64>,
+    /// Outbound wire format. KLL is full-only, so msgpack means the
+    /// portable `KllSketchData` form; proto means the `KllState` envelope.
+    /// Baked from `cfg.encoding` by the OTAP sketch factory.
+    wire_encoding: Encoding,
 }
 
 impl KLLWrapper {
@@ -45,7 +51,53 @@ impl KLLWrapper {
             k,
             seed,
             history: Vec::new(),
+            wire_encoding: Encoding::ProtoFull,
         }
+    }
+
+    /// Set the outbound wire format (proto vs msgpack). Builder form used
+    /// by the OTAP sketch factory to bake in `cfg.encoding`.
+    pub fn with_wire_encoding(mut self, encoding: Encoding) -> Self {
+        self.wire_encoding = encoding;
+        self
+    }
+
+    /// Portable KLL msgpack full form — byte-identical to
+    /// `asap_sketchlib::KllSketch::to_msgpack` for the same compactor
+    /// state. Built straight from the backend's `serialize_to_bytes` so no
+    /// `KllSketch` facade is needed.
+    fn encode_msgpack(&self) -> Result<Vec<u8>, PrecomputeError> {
+        let sketch_bytes = self
+            .sk
+            .serialize_to_bytes()
+            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper msgpack serialize: {e}")))?;
+        KllSketchData {
+            k: self.k as u16,
+            sketch_bytes,
+        }
+        .to_msgpack()
+        .map_err(|e| PrecomputeError::Other(format!("KLLWrapper msgpack encode: {e}")))
+    }
+
+    /// Merge a msgpack-encoded portable KLL frame in.
+    ///
+    /// Replays the peer's retained items (`wire_items`) into our compactor
+    /// — the same approach the proto ingest path uses — rather than
+    /// `KLL::merge`, which loses weight when the target is empty (skewing
+    /// quantiles). This keeps msgpack KLL ingest behaviorally identical to
+    /// the proto path.
+    fn merge_msgpack(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError> {
+        let data = KllSketchData::from_msgpack(bytes)
+            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper msgpack decode: {e}")))?;
+        let other: KLL<f64> = KLL::deserialize_from_bytes(&data.sketch_bytes)
+            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper msgpack deserialize: {e}")))?;
+        for v in other.wire_items() {
+            if v.is_finite() {
+                self.history.push(v);
+                self.sk.update(&v);
+            }
+        }
+        Ok(())
     }
 
     /// Insert a single observation.
@@ -122,6 +174,13 @@ fn build_kll(k: i32, seed: Option<u64>) -> KLL<f64> {
 
 impl Sketch for KLLWrapper {
     fn snapshot(&self) -> Result<Vec<u8>, PrecomputeError> {
+        if self.wire_encoding.is_msgpack() {
+            // Msgpack reads the compactor directly (not the history vec).
+            if self.sk.count() == 0 {
+                return Ok(Vec::new());
+            }
+            return self.encode_msgpack();
+        }
         if self.history.is_empty() {
             return Ok(Vec::new());
         }
@@ -156,10 +215,29 @@ impl Sketch for KLLWrapper {
         Ok(())
     }
 
+    fn apply_delta_encoded(
+        &mut self,
+        payload: &[u8],
+        encoding: Encoding,
+    ) -> Result<(), PrecomputeError> {
+        if payload.is_empty() {
+            return Ok(());
+        }
+        // KLL is full-only; a msgpack frame is a portable KLL full state —
+        // merge its compactor. Proto frames keep the history-replay path.
+        if encoding.is_msgpack() {
+            return self.merge_msgpack(payload);
+        }
+        self.apply_delta(payload)
+    }
+
     fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
         let bytes = other.snapshot()?;
         if bytes.is_empty() {
             return Ok(());
+        }
+        if self.wire_encoding.is_msgpack() {
+            return self.merge_msgpack(&bytes);
         }
         let other_history = Self::decode_envelope_into_history(&bytes)?;
         for &v in &other_history {
