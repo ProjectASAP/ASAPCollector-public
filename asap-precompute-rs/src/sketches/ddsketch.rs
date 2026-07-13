@@ -27,21 +27,12 @@ use crate::precompute::{
 pub struct DDSketchWrapper {
     sk: DdSketch,
     alpha: f64,
-    /// Per-sketch admission-sampling probability in (0,1]; 1.0 = exact (default).
-    /// DDSketch is scale-invariant under uniform sampling, so it samples to shed
-    /// update/bandwidth cost; the query side needs NO `1/p` rescale (unlike the
-    /// count sketches). The `p` still rides on the envelope for transparency.
-    sample_p: f64,
-    sampler: crate::sampling::GeometricSampler,
     /// Outbound wire format for this series' snapshots/deltas. Baked from
     /// `cfg.encoding` by the OTAP sketch factory; `snapshot` /
     /// `compute_delta_against` / `delta_against_empty_base` honor it to
     /// pick proto vs msgpack.
     wire_encoding: Encoding,
 }
-
-/// Fixed seed for DDSketch admission sampling.
-const DD_SAMPLE_SEED: u64 = 0x4444_5350; // "DDSP"
 
 impl DDSketchWrapper {
     /// Construct an empty DDSketch with relative-accuracy alpha.
@@ -50,8 +41,6 @@ impl DDSketchWrapper {
         Self {
             sk: DdSketch::new(alpha),
             alpha,
-            sample_p: 1.0,
-            sampler: crate::sampling::GeometricSampler::new(1.0, DD_SAMPLE_SEED),
             wire_encoding: Encoding::ProtoFull,
         }
     }
@@ -63,35 +52,8 @@ impl DDSketchWrapper {
         self
     }
 
-    /// Enable NitroSketch geometric skip-sampling at probability `p` (builder
-    /// form).
-    pub fn with_sample_p(mut self, p: f64) -> Self {
-        self.set_sample_p(p);
-        self
-    }
-
-    /// Set the admission-sampling probability and reseed. Used by the
-    /// [`crate::precompute::SampleSetter`] coordinated path.
-    pub fn set_sample_p(&mut self, p: f64) {
-        self.sample_p = if !(p > 0.0) || p >= 1.0 || p.is_nan() {
-            1.0
-        } else {
-            p
-        };
-        self.sampler.reset(self.sample_p, DD_SAMPLE_SEED);
-    }
-
-    /// The configured admission-sampling probability (1.0 = exact).
-    pub fn sample_p(&self) -> f64 {
-        self.sample_p
-    }
-
-    /// Insert a single positive observation, admitted with probability `p` when
-    /// sampling is active.
+    /// Insert a single positive observation.
     pub fn update(&mut self, value: f64) {
-        if !self.sampler.admit() {
-            return;
-        }
         self.sk.update(value);
     }
 
@@ -120,7 +82,7 @@ impl DDSketchWrapper {
             format_version: 1,
             producer: None,
             hash_spec: None,
-            sample_p: crate::sampling::wire_sample_p(self.sample_p),
+            sample_p: 0.0,
             sketch_state: Some(sketch_envelope::SketchState::Ddsketch(self.build_state())),
         };
         let mut buf = Vec::with_capacity(env.encoded_len());
@@ -308,7 +270,6 @@ impl Sketch for DDSketchWrapper {
 
     fn reset(&mut self) {
         self.sk = DdSketch::new(self.alpha);
-        self.sampler.reset(self.sample_p, DD_SAMPLE_SEED);
     }
 
     fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
@@ -350,12 +311,6 @@ impl Sketch for DDSketchWrapper {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
-    }
-}
-
-impl crate::precompute::SampleSetter for DDSketchWrapper {
-    fn set_sample_p(&mut self, p: f64) {
-        DDSketchWrapper::set_sample_p(self, p);
     }
 }
 
@@ -407,50 +362,6 @@ mod tests {
         let w = DDSketchWrapper::new(0.01);
         assert_eq!(w.sk.total_count(), 0);
         assert_eq!(w.snapshot().unwrap().len(), 0);
-    }
-
-    // DDSketch samples to shed update/bandwidth cost. Admit ~p of updates
-    // (total_count ~p×) and stamp the wire sample_p; quantiles are scale-
-    // invariant so the SHAPE survives even though the raw count drops.
-    #[test]
-    fn sampling_admits_p_fraction_and_preserves_quantile_shape() {
-        use crate::precompute::SampleSetter;
-        let p = 0.1;
-        let mut w = DDSketchWrapper::new(0.01).with_sample_p(p);
-        assert_eq!(w.sample_p(), p);
-        let n = 100_000u64;
-        // uniform-ish stream 1..=1000 repeated, so the median is well-defined.
-        for i in 0..n {
-            w.update(1.0 + (i % 1000) as f64);
-        }
-        let admitted = w.sk.total_count();
-        let frac = admitted as f64 / n as f64;
-        assert!(
-            (frac - p).abs() < 0.03,
-            "admitted fraction {frac} not ≈ p={p}"
-        );
-        // scale-invariance: median of the sampled sketch ≈ median of the stream (~500).
-        let med = w.quantile(0.5);
-        assert!(
-            (med - 500.0).abs() < 60.0,
-            "sampled median {med} drifted from ~500"
-        );
-        // envelope stamps p; exact path would stamp 0.0.
-        let env = ProtoEnvelope::decode(w.snapshot().unwrap().as_slice()).unwrap();
-        assert!(
-            (env.sample_p - p).abs() < 1e-12,
-            "envelope must stamp p, got {}",
-            env.sample_p
-        );
-
-        let mut ex = DDSketchWrapper::new(0.01);
-        SampleSetter::set_sample_p(&mut ex, 1.0); // disabled stays exact
-        ex.update(1.0);
-        let eenv = ProtoEnvelope::decode(ex.snapshot().unwrap().as_slice()).unwrap();
-        assert_eq!(
-            eenv.sample_p, 0.0,
-            "exact DDSketch must stamp 0.0 for byte-parity"
-        );
     }
 
     #[test]
