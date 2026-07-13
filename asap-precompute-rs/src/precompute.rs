@@ -54,6 +54,23 @@ pub trait Sketch: Send + Sync {
     /// envelope is encoded as `ProtoDelta`.
     fn apply_delta(&mut self, delta: &[u8]) -> Result<(), PrecomputeError>;
 
+    /// Encoding-aware ingest of an inbound frame (full or delta).
+    ///
+    /// `encoding` is the inbound envelope's [`Encoding`] tag, which may
+    /// differ from this node's configured outbound format (e.g. a central
+    /// merger receiving `MsgpackDelta` while emitting `Msgpack`). The
+    /// default delegates to [`Self::apply_delta`], preserving the proto
+    /// behavior (which auto-detects a full envelope vs a proto delta);
+    /// msgpack-capable wrappers override this to dispatch the proto vs
+    /// msgpack decoder off the tag.
+    fn apply_delta_encoded(
+        &mut self,
+        payload: &[u8],
+        _encoding: Encoding,
+    ) -> Result<(), PrecomputeError> {
+        self.apply_delta(payload)
+    }
+
     /// Folds another sketch (typically a freshly-decoded envelope
     /// payload) into this one.
     ///
@@ -463,9 +480,9 @@ impl PrecomputeImpl {
                 cfg.delta_threshold,
             )?;
             let enc = if result.is_full {
-                Encoding::ProtoFull
+                full_encoding(cfg.encoding)
             } else {
-                Encoding::ProtoDelta
+                delta_encoding(cfg.encoding)
             };
             (result.payload, enc)
         } else {
@@ -475,7 +492,7 @@ impl PrecomputeImpl {
             // later config change that flips delta_transmission to
             // true.
             self.snapshot_cache.cache_outbound(&series_key, &snap);
-            (snap, Encoding::ProtoFull)
+            (snap, full_encoding(cfg.encoding))
         };
         if payload.is_empty() {
             return Ok(None);
@@ -516,6 +533,29 @@ impl PrecomputeImpl {
             count: entry.count,
             aggregation_temporality: cfg.temporality,
         }))
+    }
+}
+
+/// Maps a configured wire format to the [`Encoding`] tag stamped on a
+/// **full** frame: msgpack configs emit `Msgpack`, everything else
+/// `ProtoFull`. The wrapper's `snapshot()` produces bytes in the matching
+/// format because its `wire_encoding` is baked from the same `cfg.encoding`.
+fn full_encoding(configured: Encoding) -> Encoding {
+    if configured.is_msgpack() {
+        Encoding::Msgpack
+    } else {
+        Encoding::ProtoFull
+    }
+}
+
+/// Maps a configured wire format to the [`Encoding`] tag stamped on a
+/// **delta** frame: msgpack configs emit `MsgpackDelta`, everything else
+/// `ProtoDelta`.
+fn delta_encoding(configured: Encoding) -> Encoding {
+    if configured.is_msgpack() {
+        Encoding::MsgpackDelta
+    } else {
+        Encoding::ProtoDelta
     }
 }
 

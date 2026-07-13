@@ -237,6 +237,7 @@ fn parse_encoding(row: usize, raw: &str) -> Result<Encoding, OtapDecodeError> {
         "PROTO_FULL" => Ok(Encoding::ProtoFull),
         "PROTO_DELTA" => Ok(Encoding::ProtoDelta),
         "MSGPACK" => Ok(Encoding::Msgpack),
+        "MSGPACK_DELTA" => Ok(Encoding::MsgpackDelta),
         "UNSPECIFIED" | "" => Ok(Encoding::Unspecified),
         _ => Err(OtapDecodeError::UnknownEncoding {
             row,

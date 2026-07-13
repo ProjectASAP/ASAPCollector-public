@@ -61,6 +61,21 @@ pub enum ConfigError {
         /// Raw value from config (in milliseconds, post-parse).
         value: u128,
     },
+
+    /// A msgpack `encoding` was requested for a sketch type that has no
+    /// msgpack codec. Today this is only `kll` (KLL is proto-only /
+    /// full-only; its wrapper is history-backed, not portable-struct
+    /// backed).
+    #[error(
+        "asap_sketches: encoding {encoding} is not supported for sketch_type {sketch_type:?} \
+         (msgpack is unavailable for KLL; use a proto encoding)"
+    )]
+    MsgpackUnsupported {
+        /// The offending sketch type spelling.
+        sketch_type: String,
+        /// The requested encoding name.
+        encoding: &'static str,
+    },
 }
 
 /// Plugin-level config block. Exposes the `sketch_type` knob plus the
@@ -95,6 +110,15 @@ pub struct PluginConfig {
     /// Whether to append `sample_count` / `window_duration_seconds`
     /// to every emitted envelope's labels.
     pub emit_window_stats: bool,
+    /// Outbound wire format for emitted envelopes. `ProtoFull` (default)
+    /// keeps the proto `SketchEnvelope` format; `Msgpack` / `MsgpackDelta`
+    /// select the msgpack codec. Msgpack is rejected for `sketch_type =
+    /// "kll"` (KLL is proto-only / full-only).
+    pub encoding: Encoding,
+    /// Whether to delta-encode emitted state against the cached outbound
+    /// snapshot (per-window against-empty). Combined with a msgpack
+    /// `encoding`, this emits `MsgpackDelta` frames.
+    pub delta_transmission: bool,
 }
 
 impl Default for PluginConfig {
@@ -109,6 +133,8 @@ impl Default for PluginConfig {
             omit_resource_attrs: false,
             global_aggregation: false,
             emit_window_stats: false,
+            encoding: Encoding::ProtoFull,
+            delta_transmission: false,
         }
     }
 }
@@ -147,6 +173,15 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         });
     }
     let dispatch = build_dispatch(config)?;
+    // KLL has no msgpack codec (its wrapper is history-backed, not
+    // portable-struct backed), so reject msgpack up front rather than
+    // emitting proto bytes under a msgpack tag at runtime.
+    if config.encoding.is_msgpack() && dispatch.sketch_type == SketchType::KLLSketch {
+        return Err(ConfigError::MsgpackUnsupported {
+            sketch_type: config.sketch_type.clone(),
+            encoding: config.encoding.name(),
+        });
+    }
     let pcfg = PrecomputeConfig {
         agg_id: config.agg_id,
         sketch_type: dispatch.sketch_type,
@@ -158,9 +193,9 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         matchers: Vec::new(),
         aggregate_by: Vec::new(),
         transmit_sketch: true,
-        delta_transmission: false,
+        delta_transmission: config.delta_transmission,
         delta_threshold: 0,
-        encoding: Encoding::ProtoFull,
+        encoding: config.encoding,
         quantiles: Vec::new(),
         sketch_params: config.sketch_params.clone(),
         max_series: 0,
@@ -179,6 +214,10 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
 fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> {
     let normalized = config.sketch_type.to_ascii_lowercase();
     let params = &config.sketch_params;
+    // Baked into each msgpack-capable wrapper so its `snapshot` /
+    // `compute_delta_against` / `delta_against_empty_base` pick the right
+    // wire codec (KLL ignores it — proto-only).
+    let encoding = config.encoding;
     match normalized.as_str() {
         SKETCH_TYPE_DDSKETCH => {
             let alpha = positive_in_unit_interval(
@@ -187,7 +226,9 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             );
             Ok(SketchDispatch {
                 sketch_type: SketchType::DDSketch,
-                factory: Box::new(move || Box::new(DDSketchWrapper::new(alpha))),
+                factory: Box::new(move || {
+                    Box::new(DDSketchWrapper::new(alpha).with_wire_encoding(encoding))
+                }),
                 observer: boxed_observer(DDSketchObserver),
             })
         }
@@ -213,10 +254,10 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             Ok(SketchDispatch {
                 sketch_type: SketchType::HLLSketch,
                 factory: Box::new(move || {
-                    Box::new(HLLWrapper::new(
-                        asap_sketchlib::HllVariant::Regular,
-                        precision as u32,
-                    ))
+                    Box::new(
+                        HLLWrapper::new(asap_sketchlib::HllVariant::Regular, precision as u32)
+                            .with_wire_encoding(encoding),
+                    )
                 }),
                 observer: boxed_observer(HLLObserver),
             })
@@ -235,7 +276,10 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             Ok(SketchDispatch {
                 sketch_type: SketchType::CountSketch,
                 factory: Box::new(move || {
-                    Box::new(CountSketchWrapper::new(depth as usize, width as usize))
+                    Box::new(
+                        CountSketchWrapper::new(depth as usize, width as usize)
+                            .with_wire_encoding(encoding),
+                    )
                 }),
                 observer: boxed_observer(CountSketchObserver { default_key }),
             })
@@ -250,7 +294,10 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             Ok(SketchDispatch {
                 sketch_type: SketchType::CountMinSketch,
                 factory: Box::new(move || {
-                    Box::new(CMSWrapper::new(depth as usize, width as usize))
+                    Box::new(
+                        CMSWrapper::new(depth as usize, width as usize)
+                            .with_wire_encoding(encoding),
+                    )
                 }),
                 observer: boxed_observer(CMSObserver),
             })
@@ -354,5 +401,34 @@ mod tests {
         let cfg = make_config("countminsketch");
         let (_, dispatch) = resolve(&cfg).expect("resolve");
         let _ = (dispatch.factory)();
+    }
+
+    #[test]
+    fn msgpack_encoding_flows_into_precompute_config() {
+        let mut cfg = make_config("ddsketch");
+        cfg.encoding = Encoding::MsgpackDelta;
+        cfg.delta_transmission = true;
+        let (pcfg, dispatch) = resolve(&cfg).expect("resolve");
+        assert_eq!(pcfg.encoding, Encoding::MsgpackDelta);
+        assert!(pcfg.delta_transmission);
+        // Factory builds a wrapper with the encoding baked in.
+        let _ = (dispatch.factory)();
+    }
+
+    #[test]
+    fn kll_rejects_msgpack_encoding() {
+        for enc in [Encoding::Msgpack, Encoding::MsgpackDelta] {
+            let mut cfg = make_config("kll");
+            cfg.encoding = enc;
+            let err = resolve(&cfg).expect_err("kll + msgpack must be rejected");
+            assert!(matches!(err, ConfigError::MsgpackUnsupported { .. }));
+        }
+    }
+
+    #[test]
+    fn kll_still_allows_proto_encoding() {
+        let mut cfg = make_config("kll");
+        cfg.encoding = Encoding::ProtoFull;
+        assert!(resolve(&cfg).is_ok());
     }
 }
