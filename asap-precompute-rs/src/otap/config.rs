@@ -95,6 +95,23 @@ pub struct PluginConfig {
     /// Whether to append `sample_count` / `window_duration_seconds`
     /// to every emitted envelope's labels.
     pub emit_window_stats: bool,
+    /// Outbound wire format for emitted envelopes. `ProtoFull` (default)
+    /// keeps the proto `SketchEnvelope` format; `Msgpack` / `MsgpackDelta`
+    /// select the msgpack codec. KLL supports `Msgpack` (full only — it has
+    /// no delta form, so `MsgpackDelta` still emits `Msgpack` full frames).
+    pub encoding: Encoding,
+    /// Whether to delta-encode emitted state against the cached outbound
+    /// snapshot (per-window against-empty). Combined with a msgpack
+    /// `encoding`, this emits `MsgpackDelta` frames.
+    pub delta_transmission: bool,
+    /// When `false`, emit estimated scalar results instead of sketch bytes
+    /// (see [`crate::config::PrecomputeConfig::transmit_sketch`]): one Gauge
+    /// per [`Self::quantiles`] entry for DDSketch / KLL, a cardinality Gauge
+    /// for HLL. Defaults to `true` (transmit the sketch).
+    pub transmit_sketch: bool,
+    /// Quantiles emitted per series when `transmit_sketch = false` and the
+    /// sketch is a quantile sketch (DDSketch / KLL). Ignored otherwise.
+    pub quantiles: Vec<f64>,
 }
 
 impl Default for PluginConfig {
@@ -109,6 +126,10 @@ impl Default for PluginConfig {
             omit_resource_attrs: false,
             global_aggregation: false,
             emit_window_stats: false,
+            encoding: Encoding::ProtoFull,
+            delta_transmission: false,
+            transmit_sketch: true,
+            quantiles: Vec::new(),
         }
     }
 }
@@ -157,11 +178,11 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         },
         matchers: Vec::new(),
         aggregate_by: Vec::new(),
-        transmit_sketch: true,
-        delta_transmission: false,
+        transmit_sketch: config.transmit_sketch,
+        delta_transmission: config.delta_transmission,
         delta_threshold: 0,
-        encoding: Encoding::ProtoFull,
-        quantiles: Vec::new(),
+        encoding: config.encoding,
+        quantiles: config.quantiles.clone(),
         sketch_params: config.sketch_params.clone(),
         max_series: 0,
         on_overflow: crate::config::OnOverflow::Drop,
@@ -179,6 +200,10 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
 fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> {
     let normalized = config.sketch_type.to_ascii_lowercase();
     let params = &config.sketch_params;
+    // Baked into each msgpack-capable wrapper so its `snapshot` /
+    // `compute_delta_against` / `delta_against_empty_base` pick the right
+    // wire codec (KLL ignores it — proto-only).
+    let encoding = config.encoding;
     match normalized.as_str() {
         SKETCH_TYPE_DDSKETCH => {
             let alpha = positive_in_unit_interval(
@@ -187,7 +212,9 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             );
             Ok(SketchDispatch {
                 sketch_type: SketchType::DDSketch,
-                factory: Box::new(move || Box::new(DDSketchWrapper::new(alpha))),
+                factory: Box::new(move || {
+                    Box::new(DDSketchWrapper::new(alpha).with_wire_encoding(encoding))
+                }),
                 observer: boxed_observer(DDSketchObserver),
             })
         }
@@ -201,7 +228,9 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             };
             Ok(SketchDispatch {
                 sketch_type: SketchType::KLLSketch,
-                factory: Box::new(move || Box::new(KLLWrapper::new(k as i32, seed))),
+                factory: Box::new(move || {
+                    Box::new(KLLWrapper::new(k as i32, seed).with_wire_encoding(encoding))
+                }),
                 observer: boxed_observer(KLLObserver),
             })
         }
@@ -213,10 +242,10 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             Ok(SketchDispatch {
                 sketch_type: SketchType::HLLSketch,
                 factory: Box::new(move || {
-                    Box::new(HLLWrapper::new(
-                        asap_sketchlib::HllVariant::Regular,
-                        precision as u32,
-                    ))
+                    Box::new(
+                        HLLWrapper::new(asap_sketchlib::HllVariant::Regular, precision as u32)
+                            .with_wire_encoding(encoding),
+                    )
                 }),
                 observer: boxed_observer(HLLObserver),
             })
@@ -235,7 +264,10 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             Ok(SketchDispatch {
                 sketch_type: SketchType::CountSketch,
                 factory: Box::new(move || {
-                    Box::new(CountSketchWrapper::new(depth as usize, width as usize))
+                    Box::new(
+                        CountSketchWrapper::new(depth as usize, width as usize)
+                            .with_wire_encoding(encoding),
+                    )
                 }),
                 observer: boxed_observer(CountSketchObserver { default_key }),
             })
@@ -250,7 +282,10 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             Ok(SketchDispatch {
                 sketch_type: SketchType::CountMinSketch,
                 factory: Box::new(move || {
-                    Box::new(CMSWrapper::new(depth as usize, width as usize))
+                    Box::new(
+                        CMSWrapper::new(depth as usize, width as usize)
+                            .with_wire_encoding(encoding),
+                    )
                 }),
                 observer: boxed_observer(CMSObserver),
             })
@@ -354,5 +389,31 @@ mod tests {
         let cfg = make_config("countminsketch");
         let (_, dispatch) = resolve(&cfg).expect("resolve");
         let _ = (dispatch.factory)();
+    }
+
+    #[test]
+    fn msgpack_encoding_flows_into_precompute_config() {
+        let mut cfg = make_config("ddsketch");
+        cfg.encoding = Encoding::MsgpackDelta;
+        cfg.delta_transmission = true;
+        let (pcfg, dispatch) = resolve(&cfg).expect("resolve");
+        assert_eq!(pcfg.encoding, Encoding::MsgpackDelta);
+        assert!(pcfg.delta_transmission);
+        // Factory builds a wrapper with the encoding baked in.
+        let _ = (dispatch.factory)();
+    }
+
+    #[test]
+    fn kll_allows_all_encodings() {
+        // KLL now has a msgpack full form; every encoding resolves.
+        for enc in [
+            Encoding::ProtoFull,
+            Encoding::Msgpack,
+            Encoding::MsgpackDelta,
+        ] {
+            let mut cfg = make_config("kll");
+            cfg.encoding = enc;
+            assert!(resolve(&cfg).is_ok(), "kll should accept {enc:?}");
+        }
     }
 }

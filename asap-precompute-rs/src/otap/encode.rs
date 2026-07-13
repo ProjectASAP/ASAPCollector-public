@@ -52,9 +52,9 @@ pub enum OtapEncodeError {
 /// `Utf8` column per distinct label key drawn from the union of
 /// every envelope's `labels` slice.
 ///
-/// `value` is always encoded as 0.0 — encode is the
-/// envelope-emission direction, so the `value` column is informational
-/// only, and the actual sketch state rides in `_asap_envelope`. Encode
+/// `value` carries the estimate-mode scalar (a quantile or cardinality
+/// estimate) from `SketchEnvelope::value`, and is 0.0 for sketch-payload
+/// envelopes (whose state rides in `_asap_envelope`). Encode
 /// does not touch `Observation::resource_labels` because envelopes
 /// flatten resource attrs into `labels` already (Strategy-B
 /// platforms have no resource scope; per envelope.rs docstring).
@@ -99,7 +99,9 @@ pub fn encode_batch(envelopes: &[SketchEnvelope]) -> Result<RecordBatch, OtapEnc
     for env in envelopes {
         time_col.push(Some(env.window_end_ms.saturating_mul(1_000_000)));
         metric_col.push(Some(env.metric_name.clone()));
-        value_col.push(Some(0.0));
+        // The estimate-mode `value` (quantile / cardinality); 0.0 for
+        // sketch-payload envelopes.
+        value_col.push(Some(env.value));
         envelope_col.push(Some(env.payload.clone()));
         sketch_type_col.push(Some(env.sketch_type.name()));
         agg_id_col.push(Some(env.agg_id));
@@ -180,6 +182,7 @@ mod tests {
             metric_name: "http_request_duration".into(),
             count: 0,
             aggregation_temporality: 0,
+            value: 0.0,
         }
     }
 

@@ -262,11 +262,13 @@ impl WindowState {
             .expect("series entry must exist after insert");
 
         match env.encoding {
-            Encoding::ProtoDelta => {
+            Encoding::ProtoDelta | Encoding::MsgpackDelta => {
                 // Delta apply path: feed the delta bytes directly
-                // into the sketch; the wrapper knows the on-the-wire
-                // delta format.
-                entry.sketch.apply_delta(&env.payload)?;
+                // into the sketch; `apply_delta_encoded` dispatches the
+                // proto vs msgpack delta decoder off the inbound tag.
+                entry
+                    .sketch
+                    .apply_delta_encoded(&env.payload, env.encoding)?;
                 // Reconstruct the new full snapshot for cached
                 // inbound use.
                 if let Ok(snap) = entry.sketch.snapshot() {
@@ -278,9 +280,10 @@ impl WindowState {
                 // sketch and merge. The Layer-3 runtime doesn't hold
                 // a deserialize hook (those are sketch-specific); we
                 // go through the SketchFactory + ApplyDelta-as-merge
-                // convention.
+                // convention. `apply_delta_encoded` dispatches the
+                // proto vs msgpack full decoder off the inbound tag.
                 let mut other = sketch_factory();
-                other.apply_delta(&env.payload)?;
+                other.apply_delta_encoded(&env.payload, env.encoding)?;
                 entry.sketch.merge(other.as_ref())?;
                 snapshot_cache.cache_inbound(&key, &env.payload);
             }

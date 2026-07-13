@@ -7,7 +7,7 @@ license = "MIT"
 
 # asap_sketchlib is a public dependency.
 [dependencies]
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "fc9e27ab3ab6ce93de8ac8c5c6b16f778092ea5b" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "0a2ac3725f9b6d562f3ed7d9a48c6a1ae0c285e6" }
 serde = { version = "1", features = ["derive"] }
 prost = "0.13"
 thiserror = "1"

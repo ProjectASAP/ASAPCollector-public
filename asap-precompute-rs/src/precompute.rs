@@ -54,6 +54,23 @@ pub trait Sketch: Send + Sync {
     /// envelope is encoded as `ProtoDelta`.
     fn apply_delta(&mut self, delta: &[u8]) -> Result<(), PrecomputeError>;
 
+    /// Encoding-aware ingest of an inbound frame (full or delta).
+    ///
+    /// `encoding` is the inbound envelope's [`Encoding`] tag, which may
+    /// differ from this node's configured outbound format (e.g. a central
+    /// merger receiving `MsgpackDelta` while emitting `Msgpack`). The
+    /// default delegates to [`Self::apply_delta`], preserving the proto
+    /// behavior (which auto-detects a full envelope vs a proto delta);
+    /// msgpack-capable wrappers override this to dispatch the proto vs
+    /// msgpack decoder off the tag.
+    fn apply_delta_encoded(
+        &mut self,
+        payload: &[u8],
+        _encoding: Encoding,
+    ) -> Result<(), PrecomputeError> {
+        self.apply_delta(payload)
+    }
+
     /// Folds another sketch (typically a freshly-decoded envelope
     /// payload) into this one.
     ///
@@ -83,6 +100,21 @@ pub trait Sketch: Send + Sync {
     /// (full-only).
     fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
         Ok(None)
+    }
+
+    /// Produce estimated output points for the `transmit_sketch = false`
+    /// mode. `quantiles` are the configured quantiles (quantile sketches
+    /// emit one point per quantile with a `quantile` label); `top_k`
+    /// bounds frequency-sketch key output.
+    ///
+    /// The default returns empty — a sketch with no scalar estimate (or
+    /// one whose estimate surface isn't wired) contributes no rows.
+    /// DDSketch / KLL (quantiles) and HLL (cardinality) override it.
+    /// Frequency sketches need a heavy-hitter tracker to enumerate keys,
+    /// which the wire-format wrappers don't carry, so they stay on the
+    /// empty default.
+    fn estimate(&self, _quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {
+        Vec::new()
     }
 
     /// Type-erased downcast accessor used by paired
@@ -165,6 +197,21 @@ pub struct FrequencyEntry {
     pub key: Vec<u8>,
     /// Estimated frequency.
     pub count: f64,
+}
+
+/// One estimated output point for the `transmit_sketch = false` mode.
+///
+/// A quantile sketch emits one point per configured quantile (with a
+/// `quantile` label); HLL emits a single cardinality point (no extra
+/// label); a frequency sketch emits one point per top-k key (with a
+/// `key` label).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EstimatePoint {
+    /// Extra distinguishing labels appended to the series labels at
+    /// emit (e.g. `quantile=0.99`, `key=/api`). Empty for a lone scalar.
+    pub labels: Vec<KeyValue>,
+    /// The estimated value written to the output `value` column.
+    pub value: f64,
 }
 
 /// Implemented by sketches that answer count / top-k queries.
@@ -432,9 +479,10 @@ impl PrecomputeImpl {
         for entry in closed.into_iter() {
             // Best-effort: skip serialization errors. Real shims log
             // via their host logger; the Layer-3 runtime is host-
-            // neutral and has no logger.
-            if let Ok(Some(env)) = self.serialize_series(&entry, &cfg, rng) {
-                envelopes.push(env);
+            // neutral and has no logger. Estimate mode may yield several
+            // rows (one per quantile) per series.
+            if let Ok(envs) = self.serialize_series(&entry, &cfg, rng) {
+                envelopes.extend(envs);
             }
         }
         let mut stats = self.stats.lock().expect("stats lock poisoned");
@@ -453,9 +501,65 @@ impl PrecomputeImpl {
         entry: &SeriesEntry,
         cfg: &PrecomputeConfig,
         rng: [u64; 2],
-    ) -> Result<Option<SketchEnvelope>, PrecomputeError> {
+    ) -> Result<Vec<SketchEnvelope>, PrecomputeError> {
         // Rebuild the same key the window used at admit time.
         let series_key = cfg.series_key_for_entry(&entry.resource_labels, &entry.labels);
+
+        // Base labels shared by both output modes (series attrs + optional
+        // operator-visibility window stats).
+        let mut base_labels = series_attrs(&entry.labels, &cfg.aggregate_by);
+        if cfg.emit_window_stats {
+            let window_seconds = if cfg.window.size == Duration::ZERO {
+                0
+            } else {
+                cfg.window.size.as_secs()
+            };
+            base_labels.push(KeyValue::new(
+                "sample_count".to_string(),
+                entry.count.to_string(),
+            ));
+            base_labels.push(KeyValue::new(
+                "window_duration_seconds".to_string(),
+                window_seconds.to_string(),
+            ));
+        }
+
+        // Estimate mode (`transmit_sketch = false`): emit typed scalar rows
+        // — one Gauge per configured quantile (DDSketch / KLL), a single
+        // cardinality Gauge (HLL) — instead of sketch bytes. The estimate
+        // value rides the `value` field; the distinguishing label (e.g.
+        // `quantile`) is appended to the series labels.
+        if !cfg.transmit_sketch {
+            const DEFAULT_TOP_K: usize = 10;
+            let points = entry.sketch.estimate(&cfg.quantiles, DEFAULT_TOP_K);
+            let out = points
+                .into_iter()
+                .map(|p| {
+                    let mut labels = base_labels.clone();
+                    labels.extend(p.labels);
+                    SketchEnvelope {
+                        schema_version: 1,
+                        sketch_type: cfg.sketch_type,
+                        agg_id: cfg.agg_id,
+                        resource_labels: entry.resource_labels.clone(),
+                        labels,
+                        window_start_ms: rng[0],
+                        window_end_ms: rng[1],
+                        // No sketch bytes on the estimate path.
+                        encoding: Encoding::Unspecified,
+                        payload: Vec::new(),
+                        hash_spec: None,
+                        metric_name: cfg.metric_name.clone(),
+                        count: entry.count,
+                        aggregation_temporality: cfg.temporality,
+                        value: p.value,
+                    }
+                })
+                .collect();
+            return Ok(out);
+        }
+
+        // Sketch-on-the-wire mode.
         let (payload, encoding) = if cfg.delta_transmission {
             let result = self.snapshot_cache.compute_delta(
                 &series_key,
@@ -463,9 +567,9 @@ impl PrecomputeImpl {
                 cfg.delta_threshold,
             )?;
             let enc = if result.is_full {
-                Encoding::ProtoFull
+                full_encoding(cfg.encoding)
             } else {
-                Encoding::ProtoDelta
+                delta_encoding(cfg.encoding)
             };
             (result.payload, enc)
         } else {
@@ -475,38 +579,17 @@ impl PrecomputeImpl {
             // later config change that flips delta_transmission to
             // true.
             self.snapshot_cache.cache_outbound(&series_key, &snap);
-            (snap, Encoding::ProtoFull)
+            (snap, full_encoding(cfg.encoding))
         };
         if payload.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
-        let mut labels = series_attrs(&entry.labels, &cfg.aggregate_by);
-        if cfg.emit_window_stats {
-            // Append the two operator-visibility attrs onto each
-            // emitted data point. Adding them at the envelope-Labels
-            // layer makes them flow through the OTel adapter's
-            // KeyValuesToAttributes naturally, so every data point
-            // carries the same attribute set.
-            let window_seconds = if cfg.window.size == Duration::ZERO {
-                0
-            } else {
-                cfg.window.size.as_secs()
-            };
-            labels.push(KeyValue::new(
-                "sample_count".to_string(),
-                entry.count.to_string(),
-            ));
-            labels.push(KeyValue::new(
-                "window_duration_seconds".to_string(),
-                window_seconds.to_string(),
-            ));
-        }
-        Ok(Some(SketchEnvelope {
+        Ok(vec![SketchEnvelope {
             schema_version: 1,
             sketch_type: cfg.sketch_type,
             agg_id: cfg.agg_id,
             resource_labels: entry.resource_labels.clone(),
-            labels,
+            labels: base_labels,
             window_start_ms: rng[0],
             window_end_ms: rng[1],
             encoding,
@@ -515,7 +598,31 @@ impl PrecomputeImpl {
             metric_name: cfg.metric_name.clone(),
             count: entry.count,
             aggregation_temporality: cfg.temporality,
-        }))
+            value: 0.0,
+        }])
+    }
+}
+
+/// Maps a configured wire format to the [`Encoding`] tag stamped on a
+/// **full** frame: msgpack configs emit `Msgpack`, everything else
+/// `ProtoFull`. The wrapper's `snapshot()` produces bytes in the matching
+/// format because its `wire_encoding` is baked from the same `cfg.encoding`.
+fn full_encoding(configured: Encoding) -> Encoding {
+    if configured.is_msgpack() {
+        Encoding::Msgpack
+    } else {
+        Encoding::ProtoFull
+    }
+}
+
+/// Maps a configured wire format to the [`Encoding`] tag stamped on a
+/// **delta** frame: msgpack configs emit `MsgpackDelta`, everything else
+/// `ProtoDelta`.
+fn delta_encoding(configured: Encoding) -> Encoding {
+    if configured.is_msgpack() {
+        Encoding::MsgpackDelta
+    } else {
+        Encoding::ProtoDelta
     }
 }
 

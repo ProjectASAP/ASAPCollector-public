@@ -6,17 +6,23 @@
 use asap_sketchlib::proto::sketchlib::{
     sketch_envelope, HllVariant, HyperLogLogState, SketchEnvelope as ProtoEnvelope,
 };
-use asap_sketchlib::{HllSketch, HllVariant as RsHllVariant};
+use asap_sketchlib::{HllSketch, HllVariant as RsHllVariant, MessagePackCodec};
 use prost::Message;
 
+use crate::envelope::Encoding;
 use crate::observation::Observation;
-use crate::precompute::{CardinalitySketch, DeltaResult, PrecomputeError, Sketch, SketchObserver};
+use crate::precompute::{
+    CardinalitySketch, DeltaResult, EstimatePoint, PrecomputeError, Sketch, SketchObserver,
+};
 
 /// HLL wrapper. Owns one `asap_sketchlib::HllSketch`.
 pub struct HLLWrapper {
     sk: HllSketch,
     variant: RsHllVariant,
     precision: u32,
+    /// Outbound wire format for this series' snapshots/deltas. Baked from
+    /// `cfg.encoding` by the OTAP sketch factory.
+    wire_encoding: Encoding,
 }
 
 impl HLLWrapper {
@@ -26,7 +32,15 @@ impl HLLWrapper {
             sk: HllSketch::new(variant, precision),
             variant,
             precision,
+            wire_encoding: Encoding::ProtoFull,
         }
+    }
+
+    /// Set the outbound wire format (proto vs msgpack). Builder form used
+    /// by the OTAP sketch factory to bake in `cfg.encoding`.
+    pub fn with_wire_encoding(mut self, encoding: Encoding) -> Self {
+        self.wire_encoding = encoding;
+        self
     }
 
     /// Insert a byte slice, routed to a hashed-bytes path.
@@ -106,6 +120,12 @@ impl Sketch for HLLWrapper {
         if self.sk.registers.iter().all(|&r| r == 0) {
             return Ok(Vec::new());
         }
+        if self.wire_encoding.is_msgpack() {
+            return self
+                .sk
+                .to_msgpack()
+                .map_err(|e| PrecomputeError::Other(format!("HLLWrapper msgpack snapshot: {e}")));
+        }
         Ok(self.encode_envelope())
     }
 
@@ -139,6 +159,23 @@ impl Sketch for HLLWrapper {
             return Ok(DeltaResult {
                 payload: full,
                 is_full: true,
+            });
+        }
+        if self.wire_encoding.is_msgpack() {
+            let prev_sk = match HllSketch::from_msgpack(prev) {
+                Ok(sk) => sk,
+                Err(_) => {
+                    let full = self.snapshot()?;
+                    return Ok(DeltaResult {
+                        payload: full,
+                        is_full: true,
+                    });
+                }
+            };
+            let delta = self.sk.compute_delta_msgpack(&prev_sk, threshold);
+            return Ok(DeltaResult {
+                payload: delta,
+                is_full: false,
             });
         }
         let prev_sk = match Self::decode_envelope(prev) {
@@ -177,12 +214,44 @@ impl Sketch for HLLWrapper {
             .map_err(|e| PrecomputeError::Other(format!("HLLWrapper apply_delta: {e}")))
     }
 
+    fn apply_delta_encoded(
+        &mut self,
+        payload: &[u8],
+        encoding: Encoding,
+    ) -> Result<(), PrecomputeError> {
+        if payload.is_empty() {
+            return Ok(());
+        }
+        match encoding {
+            Encoding::MsgpackDelta => self.sk.apply_delta_msgpack_bytes(payload).map_err(|e| {
+                PrecomputeError::Other(format!("HLLWrapper msgpack apply_delta: {e}"))
+            }),
+            Encoding::Msgpack => {
+                let other = HllSketch::from_msgpack(payload).map_err(|e| {
+                    PrecomputeError::Other(format!("HLLWrapper msgpack decode: {e}"))
+                })?;
+                self.sk
+                    .merge(&other)
+                    .map_err(|e| PrecomputeError::Other(format!("HLLWrapper merge: {e}")))
+            }
+            _ => self.apply_delta(payload),
+        }
+    }
+
     fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
         let bytes = other.snapshot()?;
         if bytes.is_empty() {
             return Ok(());
         }
-        let decoded = Self::decode_envelope(&bytes)?;
+        // `other.snapshot()` is in that wrapper's `wire_encoding`; same
+        // Precompute ⇒ same encoding as ours, so decode by our own tag.
+        let decoded = if self.wire_encoding.is_msgpack() {
+            HllSketch::from_msgpack(&bytes).map_err(|e| {
+                PrecomputeError::Other(format!("HLLWrapper msgpack merge decode: {e}"))
+            })?
+        } else {
+            Self::decode_envelope(&bytes)?
+        };
         self.sk
             .merge(&decoded)
             .map_err(|e| PrecomputeError::Other(format!("HLLWrapper merge: {e}")))
@@ -207,8 +276,25 @@ impl Sketch for HLLWrapper {
         // short-circuits to empty bytes (the runtime drops empty
         // payloads), and empty bytes would make `compute_delta_against`
         // fall back to a full snapshot instead of a delta.
+        if self.wire_encoding.is_msgpack() {
+            let empty = HllSketch::new(self.variant, self.precision);
+            let bytes = empty.to_msgpack().map_err(|e| {
+                PrecomputeError::Other(format!("HLLWrapper msgpack empty base: {e}"))
+            })?;
+            return Ok(Some(bytes));
+        }
         let empty = HLLWrapper::new(self.variant, self.precision);
         Ok(Some(empty.encode_envelope()))
+    }
+
+    fn estimate(&self, _quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {
+        if self.sk.registers.iter().all(|&r| r == 0) {
+            return Vec::new();
+        }
+        vec![EstimatePoint {
+            labels: Vec::new(),
+            value: CardinalitySketch::estimate_cardinality(self),
+        }]
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

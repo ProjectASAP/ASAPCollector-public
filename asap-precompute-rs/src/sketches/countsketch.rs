@@ -5,9 +5,10 @@
 use asap_sketchlib::proto::sketchlib::{
     sketch_envelope, CountSketchState, CounterType, SketchEnvelope as ProtoEnvelope,
 };
-use asap_sketchlib::CountSketch;
+use asap_sketchlib::{CountSketch, MessagePackCodec};
 use prost::Message;
 
+use crate::envelope::Encoding;
 use crate::observation::Observation;
 use crate::precompute::{
     DeltaResult, FrequencyEntry, FrequencySketch, PrecomputeError, Sketch, SketchObserver,
@@ -40,6 +41,9 @@ pub struct CountSketchWrapper {
     /// Per-sketch admission-sampling probability in (0,1]; 1.0 = exact (default).
     sample_p: f64,
     sampler: crate::sampling::GeometricSampler,
+    /// Outbound wire format for this series' snapshots/deltas. Baked from
+    /// `cfg.encoding` by the OTAP sketch factory.
+    wire_encoding: Encoding,
 }
 
 impl CountSketchWrapper {
@@ -64,7 +68,15 @@ impl CountSketchWrapper {
             cols,
             sample_p: 1.0,
             sampler: crate::sampling::GeometricSampler::new(1.0, COUNTSKETCH_SAMPLE_SEED),
+            wire_encoding: Encoding::ProtoFull,
         }
+    }
+
+    /// Set the outbound wire format (proto vs msgpack). Builder form used
+    /// by the OTAP sketch factory to bake in `cfg.encoding`.
+    pub fn with_wire_encoding(mut self, encoding: Encoding) -> Self {
+        self.wire_encoding = encoding;
+        self
     }
 
     /// Enable producer-side admission sampling at probability `p` (builder
@@ -197,6 +209,11 @@ impl Sketch for CountSketchWrapper {
         if self.is_empty() {
             return Ok(Vec::new());
         }
+        if self.wire_encoding.is_msgpack() {
+            return self.sk.to_msgpack().map_err(|e| {
+                PrecomputeError::Other(format!("CountSketchWrapper msgpack snapshot: {e}"))
+            });
+        }
         Ok(self.encode_envelope())
     }
 
@@ -228,6 +245,31 @@ impl Sketch for CountSketchWrapper {
                 payload: full,
                 is_full: true,
             });
+        }
+        if self.wire_encoding.is_msgpack() {
+            let prev_sk = match CountSketch::from_msgpack(prev) {
+                Ok(sk) => sk,
+                Err(_) => {
+                    let full = self.snapshot()?;
+                    return Ok(DeltaResult {
+                        payload: full,
+                        is_full: true,
+                    });
+                }
+            };
+            return match self.sk.compute_delta_msgpack(&prev_sk, threshold as f64) {
+                Ok(delta) => Ok(DeltaResult {
+                    payload: delta,
+                    is_full: false,
+                }),
+                Err(_) => {
+                    let full = self.snapshot()?;
+                    Ok(DeltaResult {
+                        payload: full,
+                        is_full: true,
+                    })
+                }
+            };
         }
         let prev_sk = match Self::decode_envelope(prev) {
             Ok(sk) => sk,
@@ -273,12 +315,44 @@ impl Sketch for CountSketchWrapper {
             .map_err(|e| PrecomputeError::Other(format!("CountSketchWrapper apply_delta: {e}")))
     }
 
+    fn apply_delta_encoded(
+        &mut self,
+        payload: &[u8],
+        encoding: Encoding,
+    ) -> Result<(), PrecomputeError> {
+        if payload.is_empty() {
+            return Ok(());
+        }
+        match encoding {
+            Encoding::MsgpackDelta => self.sk.apply_delta_msgpack_bytes(payload).map_err(|e| {
+                PrecomputeError::Other(format!("CountSketchWrapper msgpack apply_delta: {e}"))
+            }),
+            Encoding::Msgpack => {
+                let other = CountSketch::from_msgpack(payload).map_err(|e| {
+                    PrecomputeError::Other(format!("CountSketchWrapper msgpack decode: {e}"))
+                })?;
+                self.sk
+                    .merge(&other)
+                    .map_err(|e| PrecomputeError::Other(format!("CountSketchWrapper merge: {e}")))
+            }
+            _ => self.apply_delta(payload),
+        }
+    }
+
     fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
         let bytes = other.snapshot()?;
         if bytes.is_empty() {
             return Ok(());
         }
-        let decoded = Self::decode_envelope(&bytes)?;
+        // `other.snapshot()` is in that wrapper's `wire_encoding`; same
+        // Precompute ⇒ same encoding as ours, so decode by our own tag.
+        let decoded = if self.wire_encoding.is_msgpack() {
+            CountSketch::from_msgpack(&bytes).map_err(|e| {
+                PrecomputeError::Other(format!("CountSketchWrapper msgpack merge decode: {e}"))
+            })?
+        } else {
+            Self::decode_envelope(&bytes)?
+        };
         self.sk
             .merge(&decoded)
             .map_err(|e| PrecomputeError::Other(format!("CountSketchWrapper merge: {e}")))
@@ -302,6 +376,13 @@ impl Sketch for CountSketchWrapper {
         // short-circuits to empty bytes (the runtime drops empty
         // payloads), and empty bytes would make `compute_delta_against`
         // fall back to a full snapshot instead of a delta.
+        if self.wire_encoding.is_msgpack() {
+            let empty = CountSketch::new(self.rows, self.cols);
+            let bytes = empty.to_msgpack().map_err(|e| {
+                PrecomputeError::Other(format!("CountSketchWrapper msgpack empty base: {e}"))
+            })?;
+            return Ok(Some(bytes));
+        }
         let empty = CountSketchWrapper::new(self.rows, self.cols);
         Ok(Some(empty.encode_envelope()))
     }
