@@ -36,25 +36,25 @@ the Schema tier means it can't vary when it needs to.
 ## Mapping sketch-envelope fields onto Schema / Dictionary / Record
 
 Applying "what's common across sketch instances, and across summarized
-series" as the separating question, at each of four distinct timescales:
+series" as the separating question, at each of three distinct timescales:
 
 | Timescale | Common across... | Fields | OTAP-equivalent tier |
 |---|---|---|---|
 | **Config-time** (changes only on redeploy/reconfig) | every sketch instance, and every summarized series | `sketch_type`; sketch configuration/parameters (sketch size, hash seed, hash function); `encoding`; `schema_version` | **Schema** — this is the contract for decoding *any* envelope byte, not data about one. |
 | **Series-lifetime** (fixed for one series, differs series to series) | every instance of *one* summarized series, but not across different series | `metric` name + `labels` (the aggregated attributes identifying the series) | **Dictionary** — a bounded, slowly-growing set of distinct (name, label-set) identities, each reused across every window that series produces. |
-| **Batch-lifetime** (fixed within one flush, but a *fresh* value each flush — never reused) | every row emitted in one flush, but not across successive flushes | `window_start_ms` / `window_end_ms` | **Neither Schema nor Dictionary** — see below. |
-| **Row-lifetime** (unique per row) | nothing — genuinely one-off | `envelope` bytes; `value` (estimate scalar) | **Record** — the only tier whose cost should scale with row count. |
+| **Sketch-instance-lifetime** (unique per sketch instance — the OTAP analogy to a row) | nothing — genuinely one-off | `window_start_ms` / `window_end_ms`; `envelope` bytes; `value` (estimate scalar) | **Record** — the only tier whose cost should scale with row count. |
 
-The batch-lifetime row deserves its own callout: `window_start_ms` /
-`window_end_ms` is identical across every series in one flush (so it *looks*
-like a dictionary candidate — one value, many rows), but it never repeats
-across flushes (each window is a fresh, monotonically-advancing pair) — so
-there is no reusable set of distinct values for a dictionary to amortize.
-Dictionary-encoding it buys nothing. The right home for a value that is
-constant-per-batch but non-repeating-across-batches is a **batch-level
-field carried once per RecordBatch** (closer to OTAP's `batch_id` /
-batch-header concept than to either Schema or Dictionary), not a per-row
-column and not a dictionary entry.
+`window_start_ms` / `window_end_ms` belongs on `RECORD`, not on some
+separate batch-level tier: a sketch instance accumulates raw metric samples
+over its own window as they arrive, so the window bounds describe *that
+one instance's* accumulation period — every sketch instance closes (and
+gets flushed) on its own, independent of any other. It can *look* like a
+shared, batch-level constant when a processor's tumbling-window rotation
+happens to close many series at once and emit them together with identical
+bounds — but that's an artifact of how emission happens to be grouped, not
+a property of the data itself; a scheme that closed each series' window on
+an independent schedule would still have this field behave the same way,
+one value per sketch instance.
 
 `agg_id` sits at the boundary between Schema and Dictionary: it's really a
 join key back to a Schema-tier config (which sketch parameters apply), so
@@ -68,8 +68,9 @@ to carry exactly one.
 The same split, drawn as an ER diagram: `SCHEMA` is keyed by `agg_id` (one
 per aggregation plan, usually but not necessarily one per stream),
 `DICTIONARY` is the slowly-growing set of distinct series identities, and
-`RECORD` is the per-flush row — referencing a dictionary entry by
-`series_id` rather than repeating `metric`/`labels` inline, the same way
+`RECORD` is one row per sketch instance — emitted each time a series'
+window closes — referencing a dictionary entry by `series_id` rather than
+repeating `metric`/`labels` inline, the same way
 OTel-Arrow's own attribute tables reference their parent by `parent_id`
 instead of repeating the parent row's fields.
 
@@ -116,9 +117,8 @@ one `SCHEMA` row — the recipe: which algorithm, which parameters, which
 window size.
 
 Requests arrive tagged with different label combinations. Each distinct
-combination needs its own sketch instance — that's what "aggregate per
-series" means — so each gets its own `DICTIONARY` entry, its own
-`series_id`:
+combination is tracked separately — that's what "aggregate per series"
+means — so each gets its own `DICTIONARY` entry, its own `series_id`:
 
 | series_id | labels | agg_id |
 |---|---|---|
@@ -162,9 +162,10 @@ carries the existing `series_id`, which transitively implies both its
 identity and its schema. `RECORD` is the only entity whose row count scales
 with actual observations, and its own fields
 (`window_start_ms`/`window_end_ms`, `envelope`, `value`) are exactly the
-ones that never repeat identically across rows — see the batch-lifetime
-callout above for why the window bounds still don't belong in `DICTIONARY`
-even though they're constant within one flush.
+ones that never repeat identically across rows: each sketch instance closes
+its own accumulation window independently, so the window bounds belong to
+that one `RECORD`, not to the series' `DICTIONARY` entry, which persists
+across many such windows.
 
 ## Field reference
 
@@ -175,7 +176,7 @@ even though they're constant within one flush.
 | `agg_id` | u32 | Primary key. Identifies this recipe — the aggregation plan/config. |
 | `sketch_type` | string | Which algorithm: DDSketch / KLL / HLL / Count Sketch / Count-Min Sketch. |
 | `sketch_size` | u32, optional | The algorithm's size/accuracy parameter (relative accuracy, buffer size, width × depth — whichever applies). |
-| `hash_seed` | u64, optional | Determinism contract for hash-based sketches (Count Sketch / Count-Min Sketch), so independently-produced sketches for the same series can merge correctly. |
+| `hash_seed` | u64, optional | Determinism contract for hash-based sketches (HLL, Count Sketch, Count-Min Sketch), so independently-produced sketches for the same series can merge correctly. |
 | `hash_function` | string, optional | Which hash function, for algorithms that need one. |
 | `encoding` | string | Wire layout of every `RECORD.envelope` under this schema: proto or msgpack, full or delta. |
 | `schema_version` | u32 | Wire-schema version, for forward/backward compatibility across deploys. |
@@ -185,9 +186,9 @@ even though they're constant within one flush.
 
 | `sketch_type` | What `sketch_size` holds | Example | `hash_seed` / `hash_function` |
 |---|---|---|---|
-| DDSketch | Relative accuracy (α) | `0.01` | not used |
-| KLL | Buffer size (`k`) | `200` | used |
-| HLL | Precision — register-count exponent, 4–18 | `12` | used |
+| DDSketch | Relative accuracy (α) | `0.01` | not used — bucket boundaries are computed directly from the value, no hashing involved |
+| KLL | Buffer size (`k`) | `200` | not used — KLL stores/compacts items directly; it has no hashing step (a separate, optional compaction seed exists to make its internal randomized compaction reproducible, but that's not this field) |
+| HLL | Precision — register-count exponent, 4–18 | `12` | used — every value must hash to the same register on every host, or merging two sketches (max-per-register) overcounts the true union |
 | Count Sketch | Width × depth | `2048 × 4` | used — sketch is hash-based, so both sides need the same seed/function to merge correctly |
 | Count-Min Sketch | Width × depth | `2048 × 4` | used — same reason as Count Sketch |
 
