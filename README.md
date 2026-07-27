@@ -1,4 +1,4 @@
-# ASAPCollector — OTAP Dataflow processor (public snapshot)
+# ASAPCollector — OTAP Dataflow processor 
 
 This repository is a **standalone, buildable snapshot** of ASAP's
 [OTAP Dataflow](https://github.com/open-telemetry/otel-arrow/tree/main/rust/otap-dataflow)
