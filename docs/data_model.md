@@ -258,3 +258,53 @@ same series would look like instead:
 Same `series_id`, same window bounds each flush — only `envelope` (or
 `value`) actually changes row to row; `series_id` itself is just a
 lookup key, never re-derived from `metric`/`labels`.
+
+## Open design questions
+
+### Control plane vs. data plane: where does SCHEMA come from?
+
+Everything above describes SCHEMA/DICTIONARY/RECORD as if they ride the
+same stream. In practice SCHEMA is not negotiated on the data path at
+all — the aggregation plan behind an `agg_id` (which `sketch_type`,
+`sketch_size`, `encoding`) is decided out of band by whatever configures
+the sketch processor. That's a control-plane concern, not a data-plane
+one.
+
+**OpAMP** is a natural fit for that control plane: it's already the
+mechanism the OTel ecosystem uses to remotely configure collector
+components. Under that model, an `agg_id`'s `SCHEMA` row is an
+OpAMP-managed config artifact, pushed to a processor before it ever
+emits a `RECORD` tagged with that `agg_id` — not something a receiver
+learns from the stream itself.
+
+That leaves the data plane (`SKETCH_STREAM → DICTIONARY → RECORD`)
+responsible only for carrying `agg_id` as a join key back to a `SCHEMA`
+the receiver is assumed to already have. Open question: should the data
+plane ever be able to carry `SCHEMA` inline (self-describing, no
+external config channel required), or is it acceptable to require the
+control plane to have distributed `SCHEMA` out of band before any
+`RECORD` referencing it can be interpreted?
+
+### Where the Schema/Dictionary statefulness guarantee actually comes from
+
+The reason "SCHEMA once, DICTIONARY incremental" saves anything is that
+Arrow's **IPC format** keeps state across a stream: a decoder retains
+the last Schema message and every Dictionary batch it has seen, and
+later RecordBatches lean on that retained state instead of repeating
+it. That's an IPC-level property — it is not something OTAP itself
+guarantees. OTAP's own protocol does carry schema/dictionary
+constructs, but nothing above the IPC layer guarantees a receiver
+treats a sequence of OTAP batches as one continuous stream with
+retained state; a batch can in principle be decoded independently, or
+land on a replica that never saw the earlier Schema/Dictionary
+messages.
+
+So the "established once, referenced by index thereafter" economics
+this doc leans on are inherited from Arrow IPC decode semantics, and
+only hold if whatever carries these envelopes between `asap_sketches`
+instances preserves that same continuous-stream contract (stable
+routing, no replica hand-off mid-stream) — it is not a guarantee OTAP
+provides for free at its own protocol level. Open question: does the
+transport between `asap_sketches` instances actually provide that
+guarantee today, or does `DICTIONARY`'s incremental-append design
+assume a stronger delivery contract than exists?
