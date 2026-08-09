@@ -39,3 +39,7 @@ default = []
 # (decode_batch / encode_batch over `arrow::RecordBatch`, plus the
 # `AsapSketchesPlugin` Tokio runtime).
 otap = ["dep:arrow-array", "dep:arrow-schema", "dep:tokio", "dep:futures"]
+
+[[example]]
+name = "sketch_pipeline_demo"
+required-features = ["otap"]

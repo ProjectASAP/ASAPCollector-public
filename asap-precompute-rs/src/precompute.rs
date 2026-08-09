@@ -327,6 +327,17 @@ pub trait Precompute: Send + Sync {
     /// are).
     fn update_config(&self, cs: &PrecomputeConfigSet);
 
+    /// Returns a clone of the active config, or `None` if unconfigured.
+    ///
+    /// Used by the OTAP encode layer
+    /// ([`crate::otap::dictionary::SeriesDictionary`]) to source
+    /// `SCHEMA`-tier facts (`sketch_params`, and eventually the hash
+    /// determinism contract) that live on the config rather than being
+    /// re-derived per envelope — those facts change at config-time,
+    /// not per-record, so they don't belong on
+    /// [`crate::envelope::SketchEnvelope`] itself.
+    fn active_config(&self) -> Option<PrecomputeConfig>;
+
     /// Returns the live counters; safe to call concurrently.
     fn stats(&self) -> StatsSnapshot;
 
@@ -729,6 +740,18 @@ impl Precompute for PrecomputeImpl {
             window.drain(&cfg)
         };
         self.finish_rotate(closed, rng, rng[1])
+    }
+
+    fn active_config(&self) -> Option<PrecomputeConfig> {
+        // Duplicated (rather than delegating to the inherent
+        // `PrecomputeImpl::active_config` above) so the trait method's
+        // body doesn't read as a same-name recursive call — inherent
+        // methods win method resolution over trait methods for the
+        // same receiver, so `self.active_config()` here would in fact
+        // call the inherent one and not recurse, but spelling out the
+        // two-line lock+clone directly is clearer than relying on that
+        // priority rule.
+        self.cfg.lock().expect("config lock poisoned").clone()
     }
 
     fn update_config(&self, cs: &PrecomputeConfigSet) {

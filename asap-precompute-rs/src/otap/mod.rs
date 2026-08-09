@@ -50,6 +50,36 @@
 //! codec's flat shape is also the easiest to round-trip in a unit
 //! test.
 //!
+//! # Schema / Dictionary / Record stream ([`dictionary`])
+//!
+//! [`encode_batch`] / [`decode_batch`] above are a *different* codec
+//! from [`dictionary::SeriesDictionary`] / [`dictionary::SeriesDictionaryDecoder`],
+//! not an earlier draft of it — they solve different problems:
+//!
+//! - `encode_batch` / `decode_batch` (+ [`records::flatten`] /
+//!   [`records::lift`]) make a `SketchEnvelope` **look like** a
+//!   generic OTAP-Metrics payload — one self-contained row per
+//!   envelope, `_asap_*` carrier keys lifted onto the per-row
+//!   attribute child batch — so it can transit an OTAP pipeline hop
+//!   that only knows how to move Logs/Metrics/Traces payloads.
+//! - [`dictionary::SeriesDictionary`] / [`dictionary::SeriesDictionaryDecoder`]
+//!   implement `docs/data_model.md`'s `SCHEMA` / `DICTIONARY` / `RECORD`
+//!   tiering for the hop that doc actually describes: sketch state
+//!   crossing a node boundary between two `asap_sketches` processor
+//!   instances (an ASAP-aware sender talking to an ASAP-aware
+//!   receiver — see [`Precompute::tick`](crate::precompute::Precompute::tick) /
+//!   `drain`, which is exactly that boundary). There, config-level
+//!   facts (`sketch_type`, `sketch_size`, `encoding`, …) are sent once
+//!   per `agg_id` and series identity (`metric` + labels) once per
+//!   distinct series — not repeated on every window's `RECORD` row —
+//!   because both ends are expected to retain that state across the
+//!   stream, the same way an Arrow IPC decoder retains Schema /
+//!   Dictionary state. [`AsapSketchesPlugin`] and [`StubPlugin`] both
+//!   use this codec for their tick/drain (encode) and inbound-envelope
+//!   (decode) paths; `encode_batch`/`decode_batch` remain for raw
+//!   (non-envelope) observation ingestion and for whatever still needs
+//!   OTAP-Metrics-payload compatibility.
+//!
 //! # Phase C — full plugin lifecycle
 //!
 //! Phase B shipped the stateless codec (`decode_batch` /
@@ -93,6 +123,7 @@
 //! Phase B's tests passing as a regression backstop.
 
 mod decode;
+mod dictionary;
 mod encode;
 mod plugin;
 mod schema;
@@ -102,6 +133,9 @@ pub mod lifecycle;
 pub mod records;
 
 pub use decode::{decode_batch, OtapDecodeError};
+pub use dictionary::{
+    SchemaSnapshot, SeriesDictionary, SeriesDictionaryDecoder, SketchStreamBatch,
+};
 pub use encode::{encode_batch, OtapEncodeError};
 pub use plugin::StubPlugin;
 pub use schema::{
