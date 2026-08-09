@@ -20,13 +20,19 @@
 //!
 //! 2. **Flush ticker** — modelled on OTAP's `NodeControlMsg::Wakeup`
 //!    (a Tokio `interval(window_size)` here). Each tick calls
-//!    `Precompute::tick(now_ms)`, encodes the resulting envelopes
-//!    via [`super::encode_batch`], lifts the Strategy-B carrier
-//!    columns onto the per-row attribute child batch via
-//!    [`super::records::lift`], and pushes the
-//!    [`super::records::OtapMetricRecords`] family onto the emit
-//!    channel. (Phase D wires this to OTAP's
-//!    `effect_handler.send_message`.)
+//!    `Precompute::tick(now_ms)` and encodes the resulting envelopes
+//!    against this plugin's [`super::dictionary::SeriesDictionary`]
+//!    state, pushing the resulting
+//!    [`super::dictionary::SketchStreamBatch`] onto the emit channel —
+//!    this is the node-to-node sketch-stream hop
+//!    `docs/data_model.md` describes, so `SCHEMA`/`DICTIONARY` rows
+//!    only ride the wire the first time an `agg_id`/series is seen.
+//!    (Phase D wires this to OTAP's `effect_handler.send_message`.)
+//!    The input task below is unrelated and keeps using the flat
+//!    OTAP-Metrics-shaped codec — it accepts arbitrary upstream OTAP
+//!    producers (raw telemetry, not necessarily another
+//!    `asap_sketches` node), which is exactly the compatibility
+//!    `encode_batch`/`decode_batch`/[`super::records`] exist for.
 //!
 //! 3. **Control-channel task** — polls the
 //!    [`crate::control_channel::ControlChannel`] every
@@ -52,8 +58,9 @@ use crate::envelope::SketchEnvelope;
 use crate::precompute::{Precompute, PrecomputeError, PrecomputeImpl, StatsSnapshot};
 
 use super::config::{resolve, ConfigError, PluginConfig};
-use super::records::{flatten, lift, OtapMetricRecords, OtapRecordsError};
-use super::{decode_batch, encode_batch, OtapDecodeError, OtapEncodeError};
+use super::dictionary::{SeriesDictionary, SketchStreamBatch};
+use super::records::{flatten, OtapMetricRecords, OtapRecordsError};
+use super::{decode_batch, OtapDecodeError, OtapEncodeError};
 
 /// Default poll cadence for the control-channel task. Fast enough
 /// that operators see plan
@@ -93,11 +100,11 @@ pub enum PluginError {
 
 /// Convenience type — the emit channel sender shared by the flush
 /// ticker and the drain path.
-pub type EmitSender = mpsc::UnboundedSender<OtapMetricRecords>;
+pub type EmitSender = mpsc::UnboundedSender<SketchStreamBatch>;
 
 /// Convenience type — the emit channel receiver returned to the
 /// caller (i.e. tests + the Phase D OTAP shell).
-pub type EmitReceiver = mpsc::UnboundedReceiver<OtapMetricRecords>;
+pub type EmitReceiver = mpsc::UnboundedReceiver<SketchStreamBatch>;
 
 /// `AsapSketchesPlugin` — the Layer-4 plugin lifecycle. Replaces
 /// Phase B's `StubPlugin<P>` with a real Tokio-based runtime around
@@ -117,6 +124,13 @@ pub type EmitReceiver = mpsc::UnboundedReceiver<OtapMetricRecords>;
 pub struct AsapSketchesPlugin {
     inner: Arc<dyn Precompute>,
     window_size: Duration,
+    /// Outbound `SCHEMA`/`DICTIONARY` state for this plugin's emit
+    /// stream — persists for the plugin's whole lifetime (across every
+    /// tick and the final drain) so repeat windows for an already-known
+    /// series cost only a `RECORD` row. `tokio::sync::Mutex` because
+    /// it's shared between the ticker task and the supervisor's final
+    /// drain.
+    dictionary: Arc<Mutex<SeriesDictionary>>,
 }
 
 impl AsapSketchesPlugin {
@@ -134,6 +148,7 @@ impl AsapSketchesPlugin {
         Ok(Self {
             inner: Arc::new(pc),
             window_size: pcfg.window.size,
+            dictionary: Arc::new(Mutex::new(SeriesDictionary::new())),
         })
     }
 
@@ -148,6 +163,7 @@ impl AsapSketchesPlugin {
         Self {
             inner: precompute,
             window_size,
+            dictionary: Arc::new(Mutex::new(SeriesDictionary::new())),
         }
     }
 
@@ -193,11 +209,13 @@ impl AsapSketchesPlugin {
 
         let precompute = self.inner.clone();
         let window_size = self.window_size;
+        let dictionary = self.dictionary.clone();
         let opts = Arc::new(opts);
 
         let input_task = spawn_input_task(precompute.clone(), input, cancellation.clone());
         let ticker_task = spawn_ticker_task(
             precompute.clone(),
+            dictionary.clone(),
             window_size,
             emit_tx.clone(),
             cancellation.clone(),
@@ -225,7 +243,9 @@ impl AsapSketchesPlugin {
             // Final drain — flush any in-flight window before exit.
             let envs = precompute.drain();
             if !envs.is_empty() {
-                let _ = emit_drain(&emit_tx, &envs);
+                let cfg = precompute.active_config();
+                let mut dict = dictionary.lock().await;
+                let _ = emit_drain(&emit_tx, &envs, &mut dict, cfg.as_ref());
             }
         });
 
@@ -345,6 +365,7 @@ fn ingest_one_batch(
 
 fn spawn_ticker_task(
     precompute: Arc<dyn Precompute>,
+    dictionary: Arc<Mutex<SeriesDictionary>>,
     window_size: Duration,
     emit_tx: EmitSender,
     cancel: Cancellation,
@@ -365,7 +386,9 @@ fn spawn_ticker_task(
                     if envs.is_empty() {
                         continue;
                     }
-                    let _ = emit_envelopes(&emit_tx, &envs);
+                    let cfg = precompute.active_config();
+                    let mut dict = dictionary.lock().await;
+                    let _ = emit_envelopes(&emit_tx, &envs, &mut dict, cfg.as_ref());
                 }
             }
         }
@@ -398,15 +421,24 @@ fn spawn_control_task(
     })
 }
 
-fn emit_envelopes(emit_tx: &EmitSender, envelopes: &[SketchEnvelope]) -> Result<(), PluginError> {
-    let flat = encode_batch(envelopes)?;
-    let lifted = lift(&flat)?;
-    let _ = emit_tx.send(lifted); // receiver may have been dropped on shutdown
+fn emit_envelopes(
+    emit_tx: &EmitSender,
+    envelopes: &[SketchEnvelope],
+    dictionary: &mut SeriesDictionary,
+    cfg: Option<&PrecomputeConfig>,
+) -> Result<(), PluginError> {
+    let batch = dictionary.encode(envelopes, cfg)?;
+    let _ = emit_tx.send(batch); // receiver may have been dropped on shutdown
     Ok(())
 }
 
-fn emit_drain(emit_tx: &EmitSender, envelopes: &[SketchEnvelope]) -> Result<(), PluginError> {
-    emit_envelopes(emit_tx, envelopes)
+fn emit_drain(
+    emit_tx: &EmitSender,
+    envelopes: &[SketchEnvelope],
+    dictionary: &mut SeriesDictionary,
+    cfg: Option<&PrecomputeConfig>,
+) -> Result<(), PluginError> {
+    emit_envelopes(emit_tx, envelopes, dictionary, cfg)
 }
 
 /// Wall-clock millisecond timestamp. Wraps `SystemTime::now()` so
