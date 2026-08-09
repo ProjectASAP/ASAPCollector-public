@@ -140,6 +140,35 @@ pub fn sketch_param_get(params: &SketchParams, key: &str, default: f64) -> f64 {
     params.get(key).copied().unwrap_or(default)
 }
 
+/// Renders `sketch_type`'s primary size/accuracy parameter(s) out of
+/// `params` as a human-readable string — the `SCHEMA.sketch_size`
+/// field in `docs/data_model.md`'s field reference, matching that
+/// doc's own worked examples (`0.01`, `200`, `12`, `2048 x 4`) rather
+/// than forcing every algorithm's parameter shape into one numeric
+/// type (CountSketch / CountMinSketch need two numbers, not one).
+///
+/// Returns `None` when the relevant key(s) for `sketch_type` aren't
+/// present in `params` — matches the field's "optional" status.
+pub fn sketch_size_string(sketch_type: SketchType, params: &SketchParams) -> Option<String> {
+    match sketch_type {
+        SketchType::DDSketch => params.get("relative_accuracy").map(f64::to_string),
+        SketchType::KLLSketch => params.get("k").map(|v| (*v as u64).to_string()),
+        SketchType::HLLSketch => params.get("precision").map(|v| (*v as u64).to_string()),
+        SketchType::CountSketch => match (params.get("width"), params.get("depth")) {
+            (Some(w), Some(d)) => Some(format!("{} x {}", *w as u64, *d as u64)),
+            _ => match (params.get("epsilon"), params.get("delta")) {
+                (Some(e), Some(d)) => Some(format!("epsilon={e}, delta={d}")),
+                _ => None,
+            },
+        },
+        SketchType::CountMinSketch => match (params.get("rows"), params.get("columns")) {
+            (Some(r), Some(c)) => Some(format!("{} x {}", *r as u64, *c as u64)),
+            _ => None,
+        },
+        SketchType::Unspecified => None,
+    }
+}
+
 /// Host-neutral form of today's per-OTel-processor `Config` struct,
 /// plus `max_series` / `on_overflow`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -427,5 +456,46 @@ mod tests {
         p.insert("precision".into(), 12.0);
         assert_eq!(sketch_param_get(&p, "precision", 4.0), 12.0);
         assert_eq!(sketch_param_get(&p, "missing", 4.0), 4.0);
+    }
+
+    #[test]
+    fn sketch_size_string_matches_doc_worked_examples() {
+        let mut dd = SketchParams::new();
+        dd.insert("relative_accuracy".into(), 0.01);
+        assert_eq!(
+            sketch_size_string(SketchType::DDSketch, &dd),
+            Some("0.01".to_string())
+        );
+
+        let mut kll = SketchParams::new();
+        kll.insert("k".into(), 200.0);
+        assert_eq!(
+            sketch_size_string(SketchType::KLLSketch, &kll),
+            Some("200".to_string())
+        );
+
+        let mut hll = SketchParams::new();
+        hll.insert("precision".into(), 12.0);
+        assert_eq!(
+            sketch_size_string(SketchType::HLLSketch, &hll),
+            Some("12".to_string())
+        );
+
+        let mut cs = SketchParams::new();
+        cs.insert("width".into(), 2048.0);
+        cs.insert("depth".into(), 4.0);
+        assert_eq!(
+            sketch_size_string(SketchType::CountSketch, &cs),
+            Some("2048 x 4".to_string())
+        );
+
+        assert_eq!(
+            sketch_size_string(SketchType::Unspecified, &SketchParams::new()),
+            None
+        );
+        assert_eq!(
+            sketch_size_string(SketchType::DDSketch, &SketchParams::new()),
+            None
+        );
     }
 }
