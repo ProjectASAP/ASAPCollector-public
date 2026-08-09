@@ -167,6 +167,86 @@ its own accumulation window independently, so the window bounds belong to
 that one `RECORD`, not to the series' `DICTIONARY` entry, which persists
 across many such windows.
 
+## Aside: OTAP's multivariate metrics — a different redundancy axis
+
+OTAP has no native multivariate metric representation today — its metrics
+table is literally named `UNIVARIATE_METRICS`
+([otel-arrow data model](https://github.com/open-telemetry/otel-arrow/blob/main/docs/data_model.md)),
+a name chosen to leave room for a `MULTIVARIATE_METRICS` counterpart that
+hasn't landed. The idea traces back to
+[OTEP 156](https://github.com/open-telemetry/oteps/blob/main/text/0156-columnar-encoding.md),
+the columnar-encoding proposal OTAP itself grew out of; a concrete schema
+for it was sketched — and closed as "not planned" — in
+[otel-arrow#14](https://github.com/open-telemetry/otel-arrow/issues/14).
+Nothing below is being adopted; it's worth spelling out because it names a
+real redundancy that is *not* the one Schema/Dictionary/Record above is
+built around.
+
+### What "multivariate" means
+
+OTEP 156 borrows the term from statistics: *"A multivariate time series has
+more than one time-dependent variable... A 3-axis accelerometer reporting 3
+metrics simultaneously; a mouse move that simultaneously reports the values
+of x and y; a meteorological weather station reporting temperature, cloud
+cover, dew point, humidity and wind speed; an HTTP transaction characterized
+by many interrelated metrics sharing the same attributes are all common
+examples of multivariate time-series."*
+
+That's a description of an **application-layer phenomenon** — several
+distinct, correlated measurements produced at the same instant, under the
+same attribute set — not a data structure OTLP or OTAP provides today. Each
+of those measurements has to become its own independent
+`UNIVARIATE_METRICS` row, repeating the same `attrs` and `time_unix_nano`
+once per metric name:
+
+| metric | attrs | ts | value |
+|---|---|---|---|
+| `cpu.idle` | `host=A, region=us-east` | 1000 | 80.0 |
+| `cpu.user` | `host=A, region=us-east` | 1000 | 15.0 |
+| `cpu.sys`  | `host=A, region=us-east` | 1000 | 5.0 |
+
+A hypothetical multivariate representation collapses that into one row keyed
+by `(attrs, ts)`, with one column per metric — "same dimension, same
+instant" merged into one wide row instead of each metric name opening a
+fully independent stream that each repeats `attrs`:
+
+| attrs | ts | `cpu.idle` | `cpu.user` | `cpu.sys` |
+|---|---|---|---|---|
+| `host=A, region=us-east` | 1000 | 80.0 | 15.0 | 5.0 |
+
+### Two different redundancy axes
+
+- **Multivariate's axis is cross-sectional**: at *one instant*, several
+  *different, independently-named* metrics share the same
+  `(attrs, timestamp)` pair. The waste is re-sending that identical pair
+  once per sibling metric.
+- **Schema/Dictionary/Record's axis is temporal, at two different rates**:
+  sketch configuration (`sketch_type`, size/hash params, `encoding`) recurs
+  across *every series and every window* an `agg_id` ever produces —
+  config-time reuse, deduplicated once into `SCHEMA`; series identity
+  (`metric` name + label combination) recurs across *every window that one
+  series* produces — series-lifetime reuse, deduplicated once into
+  `DICTIONARY`. Both are things that would otherwise repeat on every
+  `RECORD` row if not split out (see the timescale table earlier in this
+  doc); `RECORD` carries only what's actually unique to one instant
+  (`window_start_ms`/`window_end_ms`, `envelope`/`value`), and `agg_id`
+  / `series_id` are references back to identities that were only ever
+  sent once each.
+
+| | OTAP multivariate | ASAP Schema/Dictionary/Record |
+|---|---|---|
+| Axis of reuse | cross-sectional — same instant, different metrics | temporal — same config / same series, different instants |
+| What repeats today | `attrs` + `timestamp`, once per sibling metric name | sketch config metadata, once per series *and* per window; `metric` + `labels` (series identity), once per window |
+| Collapse mechanism | N rows → 1 row, N value columns | config repeated across series/windows → 1 `SCHEMA` row (`agg_id`); identity repeated across windows → 1 `DICTIONARY` row (`series_id`) |
+| Unit of a "row" | one observation instant, across several metrics | one sketch instance — one series' one window |
+
+So: this doc's design is squarely the temporal case — sketch config and
+series identity both recurring across time at their own rates, which is
+exactly what `SCHEMA`/`agg_id` and `DICTIONARY`/`series_id` exist to
+deduplicate. Whether some *other, differently-named* metric happens to
+share a timestamp and attribute set with a given sketch's series has no
+bearing on that design; the two axes are orthogonal.
+
 ## Field reference
 
 ### `SCHEMA` — one per `agg_id`
