@@ -38,16 +38,32 @@
 //!
 //! # Scope
 //!
-//! Only Gauge/Sum (`NumberDataPoints`) metrics are handled in either
-//! direction — the scalar-value shape `asap_precompute_rs::
-//! observation::Observation` itself supports, and the shape
-//! `OtapMetricRecords` (well-known `time_unix_nano`/`metric`/`value`
-//! columns) already assumes. Histogram / ExponentialHistogram /
-//! Summary data points are skipped on decode (counted, not silently
-//! dropped — see [`DecodeOutcome::skipped_non_scalar`]) rather than
-//! expanded to samples, since there's no single well-defined scalar to
-//! extract from a bucket/quantile set without picking a lossy
-//! expansion strategy this module doesn't want to own.
+//! What "handling a metric" means on decode splits into two cases,
+//! decided by content, not by which OTLP metric type carried it:
+//!
+//! - **A data point carrying `_asap_envelope`** (this module's own
+//!   encode output, or any other `asap_sketches` node's) — this
+//!   module doesn't special-case it at all. It round-trips into
+//!   `OtapMetricRecords` like any other attribute, and
+//!   `decode_batch` (unchanged, downstream of this module) already
+//!   recognizes `_asap_envelope` and produces an
+//!   `ObservationValueKind::Envelope`-kind `Observation`;
+//!   `Precompute::observe` already dispatches those internally to
+//!   `observe_envelope` (merge as a pre-aggregated sketch), never
+//!   expanding them to scalar samples. So "sketch as a binary inside
+//!   an OTAP metric" already gets sketch-side handling for free, by
+//!   construction, with no branching needed here.
+//! - **A genuine (non-envelope) OTLP metric** — real telemetry.
+//!   Gauge/Sum (`NumberDataPoints`) are handled normally: each data
+//!   point becomes a scalar `Observation`, the shape both
+//!   `Observation` and `OtapMetricRecords` (well-known
+//!   `time_unix_nano`/`metric`/`value` columns) already assume.
+//!   Histogram / ExponentialHistogram / Summary data points are
+//!   skipped (counted, not silently dropped — see
+//!   [`DecodeOutcome::skipped_non_scalar`]) rather than expanded,
+//!   since there's no single well-defined scalar to extract from a
+//!   bucket/quantile set without picking a lossy expansion strategy
+//!   this module doesn't want to own.
 //!
 //! On encode, every row is assumed to share one metric name — an
 //! `AsapSketchesProcessor` instance has exactly one

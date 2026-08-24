@@ -373,6 +373,18 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                     Err(_e) => return Ok(()),
                 };
                 for obs in &observations {
+                    // Note: `observe` here handles both "genuine OTLP
+                    // metric" and "sketch shipped as binary inside an
+                    // OTAP metric" (an upstream asap_sketches node's
+                    // `_asap_envelope`-tagged output) — no branching
+                    // needed at this call site. `decode_batch` already
+                    // tags the latter as `ObservationValueKind::Envelope`,
+                    // and `Precompute::observe` already routes those
+                    // internally to `observe_envelope` (merge as a
+                    // pre-aggregated sketch) instead of expanding them
+                    // to scalar samples. See otap_bridge.rs's module
+                    // doc ("Scope") for the full picture.
+                    //
                     // LateData / SeriesCapExceeded are expected,
                     // already-tallied-in-stats outcomes (mirrors
                     // `AsapSketchesPlugin`'s own ingest policy,
