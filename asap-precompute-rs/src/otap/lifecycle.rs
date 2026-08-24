@@ -63,6 +63,7 @@
 //! instead of re-emitting it), so its own emit channel carries
 //! whatever that config produces.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -148,6 +149,17 @@ pub struct AsapSketchesPlugin {
     /// it's shared between the ticker task and the supervisor's final
     /// drain.
     dictionary: Arc<Mutex<SeriesDictionary>>,
+    /// Count of lifecycle-task batches/windows dropped due to a
+    /// decode/encode/precompute error since this plugin started. The
+    /// input, ticker, and drain tasks all apply a "drop the bad batch,
+    /// keep the plugin alive" resilience policy (a single malformed
+    /// batch shouldn't take down the whole plugin) — this counter is
+    /// what keeps that policy from being completely silent. Phase D
+    /// routes these errors onto OTAP's real effect-handler error
+    /// channel instead; until then, the `dropped_batches()` accessor
+    /// is the only signal a caller has that batches are being
+    /// dropped.
+    dropped_batches: Arc<AtomicU64>,
 }
 
 impl AsapSketchesPlugin {
@@ -166,6 +178,7 @@ impl AsapSketchesPlugin {
             inner: Arc::new(pc),
             window_size: pcfg.window.size,
             dictionary: Arc::new(Mutex::new(SeriesDictionary::new())),
+            dropped_batches: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -181,6 +194,7 @@ impl AsapSketchesPlugin {
             inner: precompute,
             window_size,
             dictionary: Arc::new(Mutex::new(SeriesDictionary::new())),
+            dropped_batches: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -195,6 +209,20 @@ impl AsapSketchesPlugin {
     /// safe to call at any time, including after [`Self::start`].
     pub fn stats(&self) -> StatsSnapshot {
         self.inner.stats()
+    }
+
+    /// Borrow the shared dropped-batch counter — count of
+    /// batches/windows a lifecycle task dropped after a
+    /// decode/encode/precompute error, the observable counterpart to
+    /// the input/ticker/drain tasks' "drop the bad batch, keep the
+    /// plugin alive" policy. Like [`Self::precompute`], call this
+    /// *before* [`Self::start`] / [`Self::start_from_envelopes`]
+    /// (which consume `self`) and clone the returned `Arc` to retain
+    /// a handle — `.load(Ordering::Relaxed)` on the clone reports the
+    /// live count for the plugin's whole lifetime, including after
+    /// shutdown.
+    pub fn dropped_batches(&self) -> &Arc<AtomicU64> {
+        &self.dropped_batches
     }
 
     /// Launch the plugin's three lifecycle tasks against an OTAP
@@ -221,8 +249,9 @@ impl AsapSketchesPlugin {
         S: futures::Stream<Item = OtapMetricRecords> + Send + Unpin + 'static,
     {
         let precompute = self.inner.clone();
+        let dropped_batches = self.dropped_batches.clone();
         self.spawn_lifecycle(
-            move |cancel| spawn_input_task(precompute, input, cancel),
+            move |cancel| spawn_input_task(precompute, input, dropped_batches, cancel),
             control,
             opts,
         )
@@ -255,8 +284,11 @@ impl AsapSketchesPlugin {
     {
         let precompute = self.inner.clone();
         let decoder = Arc::new(Mutex::new(SeriesDictionaryDecoder::new()));
+        let dropped_batches = self.dropped_batches.clone();
         self.spawn_lifecycle(
-            move |cancel| spawn_envelope_input_task(precompute, decoder, input, cancel),
+            move |cancel| {
+                spawn_envelope_input_task(precompute, decoder, input, dropped_batches, cancel)
+            },
             control,
             opts,
         )
@@ -286,6 +318,7 @@ impl AsapSketchesPlugin {
         let precompute = self.inner.clone();
         let window_size = self.window_size;
         let dictionary = self.dictionary.clone();
+        let dropped_batches = self.dropped_batches.clone();
         let opts = Arc::new(opts);
 
         let input_task = spawn_input(cancellation.clone());
@@ -294,6 +327,7 @@ impl AsapSketchesPlugin {
             dictionary.clone(),
             window_size,
             emit_tx.clone(),
+            dropped_batches.clone(),
             cancellation.clone(),
         );
         let control_task = control.map(|cc| {
@@ -321,7 +355,9 @@ impl AsapSketchesPlugin {
             if !envs.is_empty() {
                 let cfg = precompute.active_config();
                 let mut dict = dictionary.lock().await;
-                let _ = emit_drain(&emit_tx, &envs, &mut dict, cfg.as_ref());
+                if emit_drain(&emit_tx, &envs, &mut dict, cfg.as_ref()).is_err() {
+                    dropped_batches.fetch_add(1, Ordering::Relaxed);
+                }
             }
         });
 
@@ -392,6 +428,7 @@ impl Drop for PluginHandle {
 fn spawn_input_task<S>(
     precompute: Arc<dyn Precompute>,
     mut input: S,
+    dropped_batches: Arc<AtomicU64>,
     cancel: Cancellation,
 ) -> JoinHandle<()>
 where
@@ -401,7 +438,16 @@ where
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => return,
+                // Biased: check `input.next()` before `cancel.cancelled()`.
+                // If a batch is already ready in the same poll that
+                // cancellation fires (e.g. a producer enqueues its
+                // final batch then immediately signals shutdown),
+                // unbiased selection could pick the cancel branch and
+                // drop that ready-but-unprocessed batch. Polling
+                // `input` first means a ready batch is always
+                // consumed before the next loop iteration observes
+                // cancellation.
+                biased;
                 next = input.next() => match next {
                     None => return,
                     Some(records) => {
@@ -410,10 +456,13 @@ where
                             // effect-handler error channel; for Phase C
                             // we drop the batch and continue so a
                             // single bad batch can't take down the
-                            // whole plugin.
+                            // whole plugin. `dropped_batches` keeps
+                            // this from being completely silent.
+                            dropped_batches.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 },
+                _ = cancel.cancelled() => return,
             }
         }
     })
@@ -443,6 +492,7 @@ fn spawn_envelope_input_task<S>(
     precompute: Arc<dyn Precompute>,
     decoder: Arc<Mutex<SeriesDictionaryDecoder>>,
     mut input: S,
+    dropped_batches: Arc<AtomicU64>,
     cancel: Cancellation,
 ) -> JoinHandle<()>
 where
@@ -452,7 +502,11 @@ where
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => return,
+                // Biased — see spawn_input_task's comment: without
+                // this, a batch that's already ready in the same poll
+                // as a shutdown signal could be dropped by an
+                // unbiased tie-break instead of processed.
+                biased;
                 next = input.next() => match next {
                     None => return,
                     Some(batch) => {
@@ -464,9 +518,13 @@ where
                             // `OtapDecodeError::UnknownSeriesId` /
                             // `UnknownAggId`) — Phase D routes this
                             // onto OTAP's effect-handler error channel.
+                            // `dropped_batches` keeps this from being
+                            // completely silent in the meantime.
+                            dropped_batches.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 },
+                _ = cancel.cancelled() => return,
             }
         }
     })
@@ -500,6 +558,7 @@ fn spawn_ticker_task(
     dictionary: Arc<Mutex<SeriesDictionary>>,
     window_size: Duration,
     emit_tx: EmitSender,
+    dropped_batches: Arc<AtomicU64>,
     cancel: Cancellation,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -520,7 +579,9 @@ fn spawn_ticker_task(
                     }
                     let cfg = precompute.active_config();
                     let mut dict = dictionary.lock().await;
-                    let _ = emit_envelopes(&emit_tx, &envs, &mut dict, cfg.as_ref());
+                    if emit_envelopes(&emit_tx, &envs, &mut dict, cfg.as_ref()).is_err() {
+                        dropped_batches.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
