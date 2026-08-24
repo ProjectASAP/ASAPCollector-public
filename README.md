@@ -1,8 +1,8 @@
-# ASAPCollector — OTAP Dataflow processor 
+# ASAPCollector — OTAP Dataflow processor
 
-This repository is a **standalone, buildable snapshot** of ASAP's
-[OTAP Dataflow](https://github.com/open-telemetry/otel-arrow/tree/main/rust/otap-dataflow)
-processor implementation.
+This repository is a **standalone, buildable** implementation of
+ASAP's [OTAP Dataflow](https://github.com/open-telemetry/otel-arrow/tree/main/rust/otap-dataflow)
+processor.
 
 It ports ASAP's edge **precompute + sketching** runtime (windowed
 DDSketch / KLL / HLL / CountSketch / CountMin-Sketch aggregation) onto
@@ -11,103 +11,111 @@ OTAP Dataflow's Arrow-native streaming model as a single unified
 
 ## Layout
 
-| Path | What it is | Builds standalone? |
+One crate: [`asap-precompute-rs/`](./asap-precompute-rs). Three feature
+levels, each `cargo build`-able on its own with no manual staging or
+overlay step:
+
+| Feature | What it adds | Extra dependency |
 |---|---|---|
-| [`asap-precompute-rs/`](./asap-precompute-rs) | The Rust crate: host-neutral precompute runtime **plus** the OTAP integration layer under the `otap` feature (`src/otap/`). | **Yes** — `cargo build --features otap` |
-| [`otap-patch/`](./otap-patch) | The overlay applied onto the upstream OTAP Dataflow workspace at build time: the actual `local::Processor<OtapPdata>` node + `linkme` registration. | No — depends on the OTAP workspace crates (`otap-df-engine`, `otap-df-otap`, …); included here as reference for how the crate plugs into OTAP. |
+| *(default, no features)* | Host-neutral precompute runtime — the five sketch types, windowing, overflow policy. No Arrow, no OTAP, no Tokio. | none |
+| `otap` | The Arrow codec (`encode_batch`/`decode_batch`, `OtapMetricRecords`), the legacy `SeriesDictionary`/`otap::wire` transport, and `AsapSketchesPlugin`'s Tokio-task lifecycle. | `arrow-*`, `tokio` |
+| `otap-engine` | The real OTAP node: `AsapSketchesProcessor` (a genuine `local::Processor<OtapPdata>`, `linkme`-registered) and its direct `SketchEnvelope <-> OtapPdata` binding (`otap::codec`). | the real `otel-arrow-dfe-*` crates, via a plain git dependency pinned to a specific `open-telemetry/otel-arrow` commit — see `Cargo.toml` |
 
-## The OTAP processor, in two layers
+`otap-engine`'s git dependency is what used to require staging this
+crate's files into a separately-checked-out copy of the OTAP Dataflow
+workspace (the old `otap-patch/` overlay). That's gone: Cargo resolves
+the named `otel-arrow-dfe-*` packages directly from a clone of that
+repo and unifies dependency versions across the whole build graph the
+same way it already does for the `asap_sketchlib` git dependency —
+`cargo build --features otap-engine` just works.
 
-**Layer A — the processor node** (`otap-patch/all/mod.rs`)
-The piece OTAP's runtime actually sees:
+## The real OTAP node (`otap::processor` / `otap::codec`)
 
-- `AsapSketchesProcessor` implements
+- [`processor.rs`](./asap-precompute-rs/src/otap/processor.rs) —
+  `AsapSketchesProcessor` implements
   `otel_arrow_dfe_engine::local::processor::Processor<OtapPdata>` — an
   `async fn process(msg: Message<OtapPdata>, effect_handler)` handling
   `Message::PData` and `NodeControlMsg::{TimerTick, Config, Shutdown, …}`.
-  (Crate prefix `otel-arrow-dfe-*`, not the older `otap-df-*` — upstream
-  renamed these very recently, otel-arrow issue #1848.)
-- Registered via `#[distributed_slice(OTAP_PROCESSOR_FACTORIES)]` under
-  the URN `urn:asap:processor:asap_sketches`, with a `ProcessorFactory`
-  (`create` + `validate_config` + `WiringContract::UNRESTRICTED`).
-- `AsapSketchesUserConfig` is the TOML/serde shape validated at
-  `--validate-and-exit` time (see
-  [`otap-patch/plugins/asap_sketches/sample.toml`](./otap-patch/plugins/asap_sketches/sample.toml)).
+  Registered via `#[distributed_slice(OTAP_PROCESSOR_FACTORIES)]` under
+  the URN `urn:asap:processor:asap_sketches`. `AsapSketchesUserConfig`
+  is the TOML/serde config shape validated at `--validate-and-exit`
+  time — see [`plugins/asap_sketches/sample.toml`](./asap-precompute-rs/plugins/asap_sketches/sample.toml).
+- [`codec.rs`](./asap-precompute-rs/src/otap/codec.rs) — the direct
+  `SketchEnvelope <-> OtapPdata` binding: implements OTAP's own
+  `MetricsView` trait family straight over `&[SketchEnvelope]`
+  (encode) and decodes a real `OtapPdata` straight into
+  `Vec<Observation>` (decode). No intermediate `RecordBatch` or
+  `OtapMetricRecords` two-batch hop — those exist as a general,
+  real-OTAP-free carrier format for other potential Strategy-B
+  adapters (Telegraf, Vector), but this repo only ever ships to OTAP,
+  so the OTAP-facing path skips straight to the real type.
 
-> Note: the `OtapPdata ↔ OtapMetricRecords` binding is now implemented
-> (`otap-patch/all/otap_bridge.rs`) — real OTLP metrics in,
-> sketch/estimate output back out as real OTLP metrics. The adapter
-> drives a bare `Precompute` instance directly rather than
-> `AsapSketchesPlugin`'s own Tokio-task lifecycle, whose emit shape
-> (`SketchStreamBatch`, PR #5/#6's dictionary economics) diverged from
-> what this binding needs.
->
-> **There is exactly one transport: the pipeline.** `AsapSketchesProcessor`
-> sends only via `effect_handler.send_message_with_source_node` — an
-> earlier revision also carried a direct-TCP "wire lane"
-> (`otap_wire.rs` + a standalone `AsapSketchesReceiver` node); that's
-> been removed. It turned out to be solving a problem OTAP's real Arrow
-> encoding already solves: the custom wire lane existed to give sketch
-> traffic dictionary/schema-reuse economics
-> (`asap_precompute_rs::otap::dictionary`'s SCHEMA/DICTIONARY/RECORD
-> tiering), but `otap_bridge`'s real `OtapPdata` gets that for free —
-> OTAP's own Arrow encoder dictionary-encodes the metric name and every
-> string-valued attribute key/value by construction. Confirmed against
-> the real workspace and guarded by a permanent test
-> (`otap_bridge.rs`'s
-> `real_otap_encoding_dictionary_encodes_metric_name_and_string_attributes`);
-> see `mod.rs`'s module doc, "There is exactly one transport: the
-> pipeline", for the full rationale and the real schema this produces.
->
-> **Build/lint/test-verified** against a real `open-telemetry/otel-arrow`
-> checkout (commit `3e85c346`, 2026-08-24) — this repo itself still has
-> no standalone build of `otap-patch/` (see Layer A/B split below), so
-> that verification happened by staging the files into a temporary,
-> separate checkout of the real workspace as a `crates/*` member; see
-> `otap_bridge.rs`'s module doc "Verification status" for exactly what
-> that covered.
+**There is exactly one transport: the pipeline.** `AsapSketchesProcessor`
+sends only via `effect_handler.send_message_with_source_node` — an
+earlier revision also carried a direct-TCP "wire lane" as a second
+transport; that's been removed. It turned out to be solving a problem
+OTAP's real Arrow encoding already solves: the custom wire lane
+existed to give sketch traffic dictionary/schema-reuse economics (the
+legacy `SeriesDictionary` SCHEMA/DICTIONARY/RECORD tiering), but
+`codec.rs`'s real `OtapPdata` gets that for free — OTAP's own Arrow
+encoder dictionary-encodes the metric name and every string-valued
+attribute key/value by construction. Confirmed against the real
+workspace and guarded by a permanent regression test
+(`codec.rs`'s `real_otap_encoding_dictionary_encodes_metric_name_and_string_attributes`);
+see `processor.rs`'s module doc, "There is exactly one transport: the
+pipeline", for the full rationale and the real schema this produces.
 
-**Layer B — the runtime lifecycle + Arrow codec** (`asap-precompute-rs/src/otap/`)
+**Build/lint/test-verified**, by this repo's own `cargo build
+--features otap-engine` / `cargo test --features otap-engine` /
+`cargo clippy --features otap-engine --all-targets -D warnings` /
+`cargo fmt --check`, against `open-telemetry/otel-arrow` commit
+`3e85c346` (2026-08-24, pinned in `Cargo.toml`).
+
+## The rest of the runtime lifecycle + Arrow codec
 
 | File | Responsibility |
 |---|---|
-| [`lifecycle.rs`](./asap-precompute-rs/src/otap/lifecycle.rs) | `AsapSketchesPlugin` — Tokio runtime with three tasks: **input** (`Stream<OtapMetricRecords>` → `flatten` → `decode_batch` → `observe`), **flush ticker** (modeled on `NodeControlMsg::Wakeup`; `tick` → `encode_batch` → `lift` → emit), **control-channel** poll (`update_config`), plus a graceful drain on shutdown. |
+| [`lifecycle.rs`](./asap-precompute-rs/src/otap/lifecycle.rs) | `AsapSketchesPlugin` — Tokio runtime with three tasks: **input** (`Stream<OtapMetricRecords>` → `flatten` → `decode_batch` → `observe`), **flush ticker** (modeled on `NodeControlMsg::Wakeup`; `tick` → `encode_batch` → `lift` → emit), **control-channel** poll (`update_config`), plus a graceful drain on shutdown. Also how `otap::processor` constructs its bare `Precompute`. |
 | [`config.rs`](./asap-precompute-rs/src/otap/config.rs) | `PluginConfig` + `resolve()` — the 5-sketch `sketch_type` dispatch table (factory + observer + `SketchType`). |
-| [`decode.rs`](./asap-precompute-rs/src/otap/decode.rs) / [`encode.rs`](./asap-precompute-rs/src/otap/encode.rs) | Arrow codec: `RecordBatch ↔ Vec<Observation>` / `[SketchEnvelope]`, keyed on well-known columns + Strategy-B `_asap_*` carrier keys ([`schema.rs`](./asap-precompute-rs/src/otap/schema.rs)). |
-| [`records.rs`](./asap-precompute-rs/src/otap/records.rs) | `OtapMetricRecords` + `flatten`/`lift` — projects OTAP's sibling-batch family (metrics + per-row attribute child batch joined by `parent_id`) ↔ flat `RecordBatch`, including the attribute-lift that keeps emitted batches passing OTAP's strict schema validator. |
+| [`decode.rs`](./asap-precompute-rs/src/otap/decode.rs) / [`encode.rs`](./asap-precompute-rs/src/otap/encode.rs) | Arrow codec: `RecordBatch ↔ Vec<Observation>` / `[SketchEnvelope]`, keyed on well-known columns + Strategy-B `_asap_*` carrier keys ([`schema.rs`](./asap-precompute-rs/src/otap/schema.rs)). Backs the legacy `dictionary`/`wire` transport below, not `otap::codec`. |
+| [`records.rs`](./asap-precompute-rs/src/otap/records.rs) | `OtapMetricRecords` + `flatten`/`lift` — projects an `OtapArrowRecords`-shaped sibling-batch family (metrics + per-row attribute child batch joined by `parent_id`) ↔ flat `RecordBatch`. Real-OTAP-free; same scope note as above. |
+| [`dictionary.rs`](./asap-precompute-rs/src/otap/dictionary.rs) / [`wire.rs`](./asap-precompute-rs/src/otap/wire.rs) | `SeriesDictionary`/`SketchStreamBatch` — the SCHEMA/DICTIONARY/RECORD wire economics, and its Arrow-IPC/TCP transport. Tested, but not part of the `otap-engine` path — kept for the standalone `sketch_producer_node`/`sketch_receiver_node` example binaries. |
 
-Both layers sit on the host-neutral runtime in the same crate
-(`precompute`, `window`, `snapshot_cache`, `sketches/*`) — ASAP's
-host-neutral edge precompute runtime.
+All of this sits on the host-neutral runtime in the same crate
+(`precompute`, `window`, `snapshot_cache`, `sketches/*`).
 
 ## Build & test
 
 ```sh
 cd asap-precompute-rs
-cargo build --features otap
-cargo test  --features otap        # 156 tests: runtime + OTAP codec + lifecycle
-cargo clippy --all-targets --features otap -- -D warnings
+cargo build --features otap-engine
+cargo test  --features otap-engine       # 169 tests: runtime + OTAP codec + lifecycle + real OTAP node
+cargo clippy --all-targets --features otap-engine -- -D warnings
 cargo fmt --check
 ```
 
 The default (no-feature) build excludes Arrow/Tokio and compiles the
-row-oriented runtime only; the `otap` feature turns on the OTAP codec +
-plugin lifecycle.
+row-oriented runtime only; `otap` turns on the Arrow codec + legacy
+transport + plugin lifecycle; `otap-engine` additionally turns on the
+real OTAP node (and pulls in the real OTAP Dataflow crates — a heavier,
+slower build: datafusion, tonic, and the rest of that dependency tree).
 
 ## Dependency note
 
 [`asap_sketchlib`](https://github.com/ProjectASAP/asap_sketchlib) is a
-public dependency.
+public dependency. `otap-engine` additionally depends on
+`open-telemetry/otel-arrow`'s `otel-arrow-dfe-*` crates, git-pinned to
+a specific commit in `Cargo.toml`.
 
 ## Status
 
 Phases **B** (Arrow codec) and **C** (full 5-sketch plugin lifecycle)
-are complete and tested here. Phase **D** (the `linkme` registration +
-OTAP submodule build wiring, plus the `OtapPdata` binding) is present
-as the `otap-patch/` overlay — the producer role (`AsapSketchesProcessor`,
-`otap_bridge.rs`) is implemented and build/lint/test-verified against a
-real OTAP Dataflow workspace checkout, though not by this repo's own
-build (see the Layer A note above). The receiver role — ingesting
+are complete and tested. Phase **D** (the `linkme` registration + the
+real `OtapPdata` binding) is complete and build/lint/test-verified by
+this repo's own build — the producer role (`AsapSketchesProcessor`,
+`otap::codec`) is implemented; no test yet exercises it inside a real
+running pipeline end to end (no `Message::PData` sent through
+`process()` against a live `df_engine`). The receiver role — ingesting
 another `asap_sketches` node's *legacy* `SketchStreamBatch` output —
 isn't addressed by this adapter; that format has its own standalone
 example binaries. Cross-host byte-parity (Phase **E**) is the

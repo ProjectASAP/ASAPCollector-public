@@ -19,7 +19,7 @@ thiserror = "1"
 # Pinned to 58.3 to match the OTAP Dataflow workspace's own pin
 # (rust/otap-dataflow/Cargo.toml as of otel-arrow@3e85c34, 2026-08-24)
 # rather than an independently-chosen version: `RecordBatch` built here
-# must be the literal same type `otap-patch/`'s upstream-facing binding
+# must be the literal same type `otap::codec`'s upstream-facing binding
 # code hands to OTAP's engine, which only holds if both sides resolve
 # to one canonical `arrow-array` version. An older/newer pin here would
 # make that binding a type mismatch even though both are "Arrow".
@@ -38,6 +38,27 @@ arrow-ipc = { version = "58.3", optional = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util"], optional = true }
 futures = { version = "0.3", optional = true }
 
+# Real OTAP Dataflow engine + pdata crates, for `otap::processor` /
+# `otap::codec` (the `AsapSketchesProcessor` node + its direct
+# `SketchEnvelope <-> OtapPdata` binding). Plain git dependencies on
+# named packages inside `open-telemetry/otel-arrow`'s own Cargo
+# workspace — Cargo clones the whole repo and resolves each named
+# package's own `workspace = true` deps against *that* clone's
+# workspace root, so this crate does NOT need to be staged as a member
+# of that workspace itself (unlike the old `otap-patch/` overlay this
+# replaced, which did). Pinned to the same rev as every other real-OTAP
+# reference in this crate (otel-arrow issue #1848's very recent
+# `otap_df_*` -> `otel_arrow_dfe_*` rename is already reflected here).
+otel-arrow-dfe-engine = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-engine", optional = true }
+otel-arrow-dfe-otap = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-otap", optional = true }
+otel-arrow-dfe-config = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-config", optional = true }
+otel-arrow-dfe-pdata = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-pdata", optional = true }
+otel-arrow-dfe-pdata-views = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-pdata-views", optional = true }
+linkme = { version = "0.3", optional = true }
+async-trait = { version = "0.1", optional = true }
+humantime-serde = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
+
 [dev-dependencies]
 proptest = "1"
 serde_json = "1"
@@ -54,8 +75,30 @@ tokio-stream = "0.1"
 default = []
 # Enables the OTAP codec + plugin lifecycle at `crate::otap`
 # (decode_batch / encode_batch over `arrow::RecordBatch`, plus the
-# `AsapSketchesPlugin` Tokio runtime).
+# `AsapSketchesPlugin` Tokio runtime, plus the legacy
+# `SeriesDictionary` / `otap::wire` transport). No dependency on real
+# OTAP Dataflow crates — this is the standalone-buildable half.
 otap = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tokio", "dep:futures"]
+# Enables `otap::processor`/`otap::codec` — the real
+# `local::Processor<OtapPdata>` node (`AsapSketchesProcessor`) and its
+# direct `SketchEnvelope <-> OtapPdata` binding, registered via
+# `linkme` under `urn:asap:processor:asap_sketches`. Pulls in the real
+# OTAP Dataflow engine/pdata crates (via git, see the dependency
+# comments above) — heavier and slower to build than plain `otap`
+# (datafusion, tonic, the works), so it's its own feature rather than
+# folded into `otap`.
+otap-engine = [
+    "otap",
+    "dep:otel-arrow-dfe-engine",
+    "dep:otel-arrow-dfe-otap",
+    "dep:otel-arrow-dfe-config",
+    "dep:otel-arrow-dfe-pdata",
+    "dep:otel-arrow-dfe-pdata-views",
+    "dep:linkme",
+    "dep:async-trait",
+    "dep:humantime-serde",
+    "dep:serde_json",
+]
 
 [[example]]
 name = "sketch_pipeline_demo"
