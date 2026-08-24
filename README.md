@@ -44,10 +44,13 @@ The piece OTAP's runtime actually sees:
 > instance directly rather than `AsapSketchesPlugin`'s own Tokio-task
 > lifecycle, whose emit shape (`SketchStreamBatch`, PR #5/#6's
 > dictionary economics) diverged from what this binding needs.
-> **Unverified**: `otap-patch/` has no standalone build in this repo
-> (see Layer A/B split below), so this binding has been checked
-> against upstream source reads, not a compiler — see
-> `otap_bridge.rs`'s module doc for exactly what's confirmed.
+> **Build/lint/test-verified** against a real `open-telemetry/otel-arrow`
+> checkout (commit `3e85c346`, 2026-08-24) — this repo itself still has
+> no standalone build of `otap-patch/` (see Layer A/B split below), so
+> that verification happened by staging both files into a temporary,
+> separate checkout of the real workspace as a `crates/*` member; see
+> `otap_bridge.rs`'s module doc "Verification status" for exactly what
+> that covered.
 
 **Layer B — the runtime lifecycle + Arrow codec** (`asap-precompute-rs/src/otap/`)
 
@@ -87,10 +90,11 @@ Phases **B** (Arrow codec) and **C** (full 5-sketch plugin lifecycle)
 are complete and tested here. Phase **D** (the `linkme` registration +
 OTAP submodule build wiring, plus the `OtapPdata` binding) is present
 as the `otap-patch/` overlay — the producer-role binding is now
-implemented (`otap_bridge.rs`) but **unverified** (no standalone build
-of `otap-patch/` in this repo — see the Layer A note above). The
-receiver-role `OtapPdata` binding and cross-host byte-parity
-(Phase **E**) are the remaining work.
+implemented (`otap_bridge.rs`) and build/lint/test-verified against a
+real OTAP Dataflow workspace checkout, though not by this repo's own
+build (see the Layer A note above). The receiver-role `OtapPdata`
+binding and cross-host byte-parity (Phase **E**) are the remaining
+work.
 
 ---
 

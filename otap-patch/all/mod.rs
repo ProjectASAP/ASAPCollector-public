@@ -23,9 +23,10 @@
 //! current emit shape, `SketchStreamBatch`, diverged from what this
 //! adapter needs after PR #5/#6's dictionary-economics work). The
 //! actual `OtapPdata` <-> `OtapMetricRecords` conversion lives in
-//! `otap_bridge` — **that module has not been build-verified against
-//! a real OTAP Dataflow workspace**; see its own module doc for
-//! exactly what's confirmed vs. assumed.
+//! `otap_bridge` — build/lint/test-verified by staging both files into
+//! a real `open-telemetry/otel-arrow` checkout (commit `3e85c346`,
+//! 2026-08-24) as a workspace member; see its own module doc's
+//! "Verification status" for exactly what that covered.
 //!
 //! **(3)** Validates the user-facing TOML config against
 //! [`asap_precompute_rs::otap::PluginConfig`]'s shape — the
@@ -61,8 +62,8 @@
 
 mod otap_bridge;
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -75,6 +76,7 @@ use serde::{Deserialize, Serialize};
 // otap_bridge.rs) if the actual pinned commit predates it.
 use otel_arrow_dfe_config::error::Error as OtapConfigError;
 use otel_arrow_dfe_config::node::NodeUserConfig;
+use otel_arrow_dfe_engine::ProcessorFactory;
 use otel_arrow_dfe_engine::config::ProcessorConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
 use otel_arrow_dfe_engine::control::NodeControlMsg;
@@ -83,13 +85,14 @@ use otel_arrow_dfe_engine::local::processor as local;
 use otel_arrow_dfe_engine::message::Message;
 use otel_arrow_dfe_engine::node::NodeId;
 use otel_arrow_dfe_engine::processor::ProcessorWrapper;
-use otel_arrow_dfe_engine::ProcessorFactory;
-use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
+use otel_arrow_dfe_otap::pdata::OtapPdata;
 
 use asap_precompute_rs::config::PrecomputeConfigSet;
 use asap_precompute_rs::otap::config::resolve as resolve_plugin_config;
-use asap_precompute_rs::otap::{decode_batch, encode_batch, flatten, lift, AsapSketchesPlugin, PluginConfig};
+use asap_precompute_rs::otap::{
+    AsapSketchesPlugin, PluginConfig, decode_batch, encode_batch, flatten, lift,
+};
 use asap_precompute_rs::precompute::Precompute;
 
 use otap_bridge::{otap_metric_records_to_pdata, pdata_to_otap_metric_records};
@@ -188,11 +191,10 @@ pub static ASAP_SKETCHES_PROCESSOR_FACTORY: ProcessorFactory<OtapPdata> = Proces
 /// Static config validation hook. Surfaces `--validate-and-exit`
 /// errors for typos in the user's TOML before any runtime allocation.
 fn validate_asap_sketches_config(config: &serde_json::Value) -> Result<(), OtapConfigError> {
-    let user: AsapSketchesUserConfig = serde_json::from_value(config.clone()).map_err(|e| {
-        OtapConfigError::InvalidUserConfig {
+    let user: AsapSketchesUserConfig =
+        serde_json::from_value(config.clone()).map_err(|e| OtapConfigError::InvalidUserConfig {
             error: format!("asap_sketches: {e}"),
-        }
-    })?;
+        })?;
     let _ = user.into_plugin_config()?;
     Ok(())
 }
@@ -209,6 +211,7 @@ pub fn create_asap_sketches_processor(
     node: NodeId,
     node_config: Arc<NodeUserConfig>,
     processor_config: &ProcessorConfig,
+    _capabilities: &otel_arrow_dfe_engine::capability::registry::Capabilities,
 ) -> Result<ProcessorWrapper<OtapPdata>, OtapConfigError> {
     let user: AsapSketchesUserConfig =
         serde_json::from_value(node_config.config.clone()).map_err(|e| {
@@ -259,9 +262,14 @@ pub fn create_asap_sketches_processor(
 ///
 /// # Verification status
 ///
-/// See `otap_bridge.rs`'s module doc — the `OtapPdata` conversions
-/// this adapter calls have not been build-verified against a real
-/// OTAP Dataflow workspace.
+/// See `otap_bridge.rs`'s module doc "Verification status" — the
+/// `OtapPdata` conversions this adapter calls have been build/lint/
+/// test-verified against a real OTAP Dataflow workspace checkout.
+/// This adapter's own OTAP-facing surface (`ProcessorFactory`,
+/// `local::Processor` impl, `NodeControlMsg` handling) compiles and
+/// passes its config-shape unit tests there too, but has no test
+/// exercising it inside a real running pipeline yet (no
+/// `Message::PData` sent through `process()` end to end).
 pub struct AsapSketchesProcessor {
     precompute: Arc<dyn Precompute>,
     window_size: Duration,
@@ -512,7 +520,10 @@ mod tests {
         });
         let err = validate_asap_sketches_config(&cfg).expect_err("zero window rejected");
         let msg = format!("{err}");
-        assert!(msg.contains("window_size"), "error should mention window: {msg}");
+        assert!(
+            msg.contains("window_size"),
+            "error should mention window: {msg}"
+        );
     }
 
     #[test]
@@ -545,7 +556,13 @@ mod tests {
     fn registered_factory_carries_expected_urn() {
         // Sanity check: the registry static the binary discovers via
         // linkme exposes the canonical URN.
-        assert_eq!(ASAP_SKETCHES_PROCESSOR_FACTORY.name, ASAP_SKETCHES_PROCESSOR_URN);
-        assert_eq!(ASAP_SKETCHES_PROCESSOR_URN, "urn:asap:processor:asap_sketches");
+        assert_eq!(
+            ASAP_SKETCHES_PROCESSOR_FACTORY.name,
+            ASAP_SKETCHES_PROCESSOR_URN
+        );
+        assert_eq!(
+            ASAP_SKETCHES_PROCESSOR_URN,
+            "urn:asap:processor:asap_sketches"
+        );
     }
 }

@@ -18,23 +18,27 @@
 //!
 //! # Provenance / verification status
 //!
-//! Written against upstream `open-telemetry/otel-arrow` commit
-//! `3e85c3460361446ebfce99e9f35fffd2dd5ab740` (2026-08-24), reading
-//! `rust/otap-dataflow/crates/pdata/src/{payload.rs,otap.rs,lib.rs,
-//! encode/mod.rs}` and `rust/otap-dataflow/crates/pdata-views/src/
-//! views/{metrics.rs,common.rs,resource.rs}` directly for every type
-//! and function signature referenced below. The OTAP Dataflow crates
-//! were renamed `otap_df_*` -> `otel_arrow_dfe_*` very recently and
-//! unreleased as of that commit (`.chloggen/otel-arrow-dfe-crate-
-//! prefix.yaml`, issue #1848); this file targets the new names.
-//!
-//! **This file has not been build-verified against a real OTAP
-//! Dataflow workspace checkout** — `otap-patch/` isn't standalone-
-//! buildable in the environment this was written in (see the repo
-//! README's "No — depends on the OTAP workspace crates" note on this
-//! directory). Treat every signature here as "read from source, not
-//! compiled" and expect a build pass to shake out mismatches against
-//! whatever commit this repo's own build script actually pins.
+//! Written against, and **build/lint/test-verified against**, upstream
+//! `open-telemetry/otel-arrow` commit
+//! `3e85c3460361446ebfce99e9f35fffd2dd5ab740` (2026-08-24): this file
+//! plus `mod.rs` were staged as a real `crates/*` workspace member
+//! (`asap-sketches-registry`, path-depping back to `asap-precompute-rs`
+//! exactly as `Cargo.toml`'s own doc describes) inside a real clone of
+//! that commit, and `cargo build` / `cargo clippy -D warnings` /
+//! `cargo fmt --check` / `cargo test` (10/10, including two round-trip
+//! tests through the real `encode_metrics_otap_batch`/`OtapMetricsView`
+//! machinery — one of them the `_asap_envelope`-carrying "sketch as
+//! binary inside a metric" case) all passed there. `otap-patch/`
+//! itself still has no standalone build *in this repo* (no OTAP
+//! Dataflow workspace checked out here by default — see the repo
+//! README's note on this directory); the verification above happened
+//! by staging into a separate, temporary checkout of the real
+//! workspace, not by anything this repo's own build wires up. The
+//! OTAP Dataflow crates were renamed `otap_df_*` -> `otel_arrow_dfe_*`
+//! very recently and unreleased as of that commit
+//! (`.chloggen/otel-arrow-dfe-crate-prefix.yaml`, issue #1848); this
+//! file targets the new names — re-verify against whatever commit this
+//! repo's own build script actually pins if that differs.
 //!
 //! # Scope
 //!
@@ -79,7 +83,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arrow_array::{Array, BinaryArray, Float64Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
+use arrow_array::{
+    Array, BinaryArray, Float64Array, RecordBatch, StringArray, UInt32Array, UInt64Array,
+};
 use arrow_schema::{DataType, Field, Schema};
 use thiserror::Error;
 
@@ -87,7 +93,7 @@ use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_pdata::encode::encode_metrics_otap_batch;
 use otel_arrow_dfe_pdata::otap::OtapArrowRecords;
 use otel_arrow_dfe_pdata::views::otap::OtapMetricsView;
-use otel_arrow_dfe_pdata::{OtapPayload, TryFromWithOptions, TryIntoWithOptions};
+use otel_arrow_dfe_pdata::{OtapPayload, TryIntoWithOptions};
 use otel_arrow_dfe_pdata_views::views::common::{
     AnyValueView, AttributeView, InstrumentationScopeView, Str, ValueType,
 };
@@ -104,7 +110,7 @@ use asap_precompute_rs::otap::records::{
     ATTR_BATCH_BYTES, ATTR_BATCH_INT, ATTR_BATCH_KEY, ATTR_BATCH_PARENT_ID, ATTR_BATCH_STR,
 };
 use asap_precompute_rs::otap::{
-    OtapMetricRecords, COLUMN_METRIC, COLUMN_TIME_UNIX_NANO, COLUMN_VALUE,
+    COLUMN_METRIC, COLUMN_TIME_UNIX_NANO, COLUMN_VALUE, OtapMetricRecords,
 };
 
 /// Failure modes for [`otap_metric_records_to_pdata`] / [`pdata_to_otap_metric_records`].
@@ -210,8 +216,10 @@ impl<'a> AsapMetricsView {
         let value_col = require_float64(&records.metrics, "metrics", COLUMN_VALUE)?.clone();
         let parent_col = require_uint32(&records.metrics, "metrics", ATTR_BATCH_PARENT_ID)?;
 
-        let attr_parent_col = require_uint32(&records.attributes, "attributes", ATTR_BATCH_PARENT_ID)?;
-        let attr_key_col = require_string(&records.attributes, "attributes", ATTR_BATCH_KEY)?.clone();
+        let attr_parent_col =
+            require_uint32(&records.attributes, "attributes", ATTR_BATCH_PARENT_ID)?;
+        let attr_key_col =
+            require_string(&records.attributes, "attributes", ATTR_BATCH_KEY)?.clone();
         let attr_bytes_col = optional_binary(&records.attributes, ATTR_BATCH_BYTES)?;
         let attr_str_col = optional_string(&records.attributes, ATTR_BATCH_STR)?;
         let attr_int_col = optional_uint64(&records.attributes, ATTR_BATCH_INT)?;
@@ -505,9 +513,7 @@ impl<'a> NumberDataPointView for AsapNumberDataPointView<'a> {
         // `encode_batch`'s own convention: the metrics row's ordinal
         // index doubles as the parent_id its attribute rows join
         // against (see records.rs's `ATTR_BATCH_PARENT_ID` doc).
-        self.view
-            .attributes_for_row(self.row as u32)
-            .into_iter()
+        self.view.attributes_for_row(self.row as u32).into_iter()
     }
 
     fn exemplars(&self) -> Self::ExemplarIter<'_> {
@@ -999,6 +1005,94 @@ pub struct DecodeOutcome {
     pub skipped_non_scalar: usize,
 }
 
+/// Accumulates flat rows across every resource/scope/metric/data-point
+/// while walking the real `OtapMetricsView` — factored out of
+/// [`pdata_to_otap_metric_records`] so the Gauge and Sum branches
+/// (whose `NumberDataPointView` implementations are different
+/// concrete types, both borrowing from the `gauge`/`sum` view that
+/// produced them) can share one push method via a generic function
+/// instead of duplicating the per-data-point body twice, or trying
+/// (and failing to borrow-check) to collect both into one `Vec<_>`
+/// before `gauge`/`sum` go out of scope.
+#[derive(Default)]
+struct DecodeAccumulator {
+    time_unix_nano: Vec<u64>,
+    metric_names: Vec<String>,
+    values: Vec<f64>,
+    attr_parent_ids: Vec<u32>,
+    attr_keys: Vec<String>,
+    attr_strs: Vec<Option<String>>,
+    attr_ints: Vec<Option<u64>>,
+    attr_bytes: Vec<Option<Vec<u8>>>,
+    next_parent_id: u32,
+}
+
+impl DecodeAccumulator {
+    /// Appends one data point's row (and its attribute rows, if any)
+    /// — skipped (not pushed at all) if it carries no value.
+    fn push_data_point<D: NumberDataPointView>(&mut self, dp: D, metric_name: &str) {
+        let Some(value) = dp.value() else { return };
+        let value = match value {
+            DpValue::Double(v) => v,
+            DpValue::Integer(v) => v as f64,
+        };
+
+        let parent_id = self.next_parent_id;
+        self.next_parent_id += 1;
+
+        self.time_unix_nano.push(dp.time_unix_nano());
+        self.metric_names.push(metric_name.to_string());
+        self.values.push(value);
+
+        for attr in dp.attributes() {
+            let Some(val) = attr.value() else { continue };
+            self.attr_parent_ids.push(parent_id);
+            self.attr_keys
+                .push(String::from_utf8_lossy(attr.key()).into_owned());
+            let (mut s, mut i, mut b) = (None, None, None);
+            match val.value_type() {
+                ValueType::String => {
+                    s = val
+                        .as_string()
+                        .map(|v| String::from_utf8_lossy(v).into_owned());
+                }
+                ValueType::Bytes => {
+                    b = val.as_bytes().map(|v| v.to_vec());
+                }
+                ValueType::Int64 => {
+                    // ASAP's int attribute column is unsigned; a
+                    // genuinely negative int attribute (rare for
+                    // label-shaped data) isn't representable, so it's
+                    // stringified instead of silently reinterpreted
+                    // as a huge positive value.
+                    match val.as_int64() {
+                        Some(v) if v >= 0 => i = Some(v as u64),
+                        Some(v) => s = Some(v.to_string()),
+                        None => {}
+                    }
+                }
+                ValueType::Double => {
+                    s = val.as_double().map(|v| v.to_string());
+                }
+                ValueType::Bool => {
+                    s = val.as_bool().map(|v| v.to_string());
+                }
+                ValueType::Empty | ValueType::Array | ValueType::KeyValueList => {
+                    // Not representable in ASAP's flat label model;
+                    // drop this one attribute (the data point itself
+                    // is still kept).
+                    self.attr_parent_ids.pop();
+                    self.attr_keys.pop();
+                    continue;
+                }
+            }
+            self.attr_strs.push(s);
+            self.attr_ints.push(i);
+            self.attr_bytes.push(b);
+        }
+    }
+}
+
 /// Converts a real `OtapPdata` into ASAP's flat [`OtapMetricRecords`]
 /// shape (feeding `decode_batch` on the producer role's ingest path).
 ///
@@ -1018,19 +1112,11 @@ pub fn pdata_to_otap_metric_records(pdata: OtapPdata) -> Result<DecodeOutcome, B
         });
     };
 
-    let view =
-        OtapMetricsView::try_from(&arrow_records).map_err(|e| BridgeError::Decode(format!("{e}")))?;
+    let view = OtapMetricsView::try_from(&arrow_records)
+        .map_err(|e| BridgeError::Decode(format!("{e}")))?;
 
-    let mut time_unix_nano: Vec<u64> = Vec::new();
-    let mut metric_names: Vec<String> = Vec::new();
-    let mut values: Vec<f64> = Vec::new();
-    let mut attr_parent_ids: Vec<u32> = Vec::new();
-    let mut attr_keys: Vec<String> = Vec::new();
-    let mut attr_strs: Vec<Option<String>> = Vec::new();
-    let mut attr_ints: Vec<Option<u64>> = Vec::new();
-    let mut attr_bytes: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut acc = DecodeAccumulator::default();
     let mut skipped_non_scalar = 0usize;
-    let mut next_parent_id: u32 = 0;
 
     for resource in view.resources() {
         for scope in resource.scopes() {
@@ -1039,10 +1125,21 @@ pub fn pdata_to_otap_metric_records(pdata: OtapPdata) -> Result<DecodeOutcome, B
                 let Some(data) = metric.data() else {
                     continue;
                 };
-                let number_dps: Vec<_> = if let Some(gauge) = data.as_gauge() {
-                    gauge.data_points().collect()
+                // Gauge/Sum each expose their own concrete
+                // `NumberDataPointView` implementation (different
+                // types, both borrowing from `gauge`/`sum`) — walked
+                // inline per branch via a generic helper rather than
+                // collected into one `Vec<_>` first, since collecting
+                // would need `gauge`/`sum` to outlive the branch that
+                // produced them.
+                if let Some(gauge) = data.as_gauge() {
+                    for dp in gauge.data_points() {
+                        acc.push_data_point(dp, &name);
+                    }
                 } else if let Some(sum) = data.as_sum() {
-                    sum.data_points().collect()
+                    for dp in sum.data_points() {
+                        acc.push_data_point(dp, &name);
+                    }
                 } else {
                     // Histogram / ExponentialHistogram / Summary: no
                     // single well-defined scalar — count, don't expand.
@@ -1055,87 +1152,25 @@ pub fn pdata_to_otap_metric_records(pdata: OtapPdata) -> Result<DecodeOutcome, B
                             .as_exponential_histogram()
                             .map(|h| h.data_points().count())
                             .unwrap_or(0),
-                        MetricKind::Summary => {
-                            data.as_summary().map(|s| s.data_points().count()).unwrap_or(0)
-                        }
+                        MetricKind::Summary => data
+                            .as_summary()
+                            .map(|s| s.data_points().count())
+                            .unwrap_or(0),
                         _ => 0,
                     };
-                    continue;
-                };
-
-                for dp in number_dps {
-                    let Some(value) = dp.value() else { continue };
-                    let value = match value {
-                        DpValue::Double(v) => v,
-                        DpValue::Integer(v) => v as f64,
-                    };
-
-                    let parent_id = next_parent_id;
-                    next_parent_id += 1;
-
-                    time_unix_nano.push(dp.time_unix_nano());
-                    metric_names.push(name.clone());
-                    values.push(value);
-
-                    for attr in dp.attributes() {
-                        let Some(val) = attr.value() else { continue };
-                        attr_parent_ids.push(parent_id);
-                        attr_keys.push(String::from_utf8_lossy(attr.key()).into_owned());
-                        let (mut s, mut i, mut b) = (None, None, None);
-                        match val.value_type() {
-                            ValueType::String => {
-                                s = val.as_string().map(|v| String::from_utf8_lossy(v).into_owned());
-                            }
-                            ValueType::Bytes => {
-                                b = val.as_bytes().map(|v| v.to_vec());
-                            }
-                            ValueType::Int64 => {
-                                // ASAP's int attribute column is
-                                // unsigned; a genuinely negative int
-                                // attribute (rare for label-shaped
-                                // data) isn't representable, so it's
-                                // stringified instead of silently
-                                // reinterpreted as a huge positive
-                                // value.
-                                match val.as_int64() {
-                                    Some(v) if v >= 0 => i = Some(v as u64),
-                                    Some(v) => s = Some(v.to_string()),
-                                    None => {}
-                                }
-                            }
-                            ValueType::Double => {
-                                s = val.as_double().map(|v| v.to_string());
-                            }
-                            ValueType::Bool => {
-                                s = val.as_bool().map(|v| v.to_string());
-                            }
-                            ValueType::Empty | ValueType::Array | ValueType::KeyValueList => {
-                                // Not representable in ASAP's flat
-                                // label model; drop this one
-                                // attribute (the data point itself is
-                                // still kept).
-                                attr_parent_ids.pop();
-                                attr_keys.pop();
-                                continue;
-                            }
-                        }
-                        attr_strs.push(s);
-                        attr_ints.push(i);
-                        attr_bytes.push(b);
-                    }
                 }
             }
         }
     }
 
-    if time_unix_nano.is_empty() {
+    if acc.time_unix_nano.is_empty() {
         return Ok(DecodeOutcome {
             records: None,
             skipped_non_scalar,
         });
     }
 
-    let parent_ids: Vec<u32> = (0..time_unix_nano.len() as u32).collect();
+    let parent_ids: Vec<u32> = (0..acc.time_unix_nano.len() as u32).collect();
     let metrics = RecordBatch::try_new(
         Arc::new(Schema::new(vec![
             Field::new(COLUMN_TIME_UNIX_NANO, DataType::UInt64, false),
@@ -1144,9 +1179,9 @@ pub fn pdata_to_otap_metric_records(pdata: OtapPdata) -> Result<DecodeOutcome, B
             Field::new(ATTR_BATCH_PARENT_ID, DataType::UInt32, false),
         ])),
         vec![
-            Arc::new(UInt64Array::from(time_unix_nano)),
-            Arc::new(StringArray::from(metric_names)),
-            Arc::new(Float64Array::from(values)),
+            Arc::new(UInt64Array::from(acc.time_unix_nano)),
+            Arc::new(StringArray::from(acc.metric_names)),
+            Arc::new(Float64Array::from(acc.values)),
             Arc::new(UInt32Array::from(parent_ids)),
         ],
     )?;
@@ -1160,18 +1195,21 @@ pub fn pdata_to_otap_metric_records(pdata: OtapPdata) -> Result<DecodeOutcome, B
             Field::new(ATTR_BATCH_BYTES, DataType::Binary, true),
         ])),
         vec![
-            Arc::new(UInt32Array::from(attr_parent_ids)),
-            Arc::new(StringArray::from(attr_keys)),
-            Arc::new(StringArray::from(attr_strs)),
-            Arc::new(UInt64Array::from(attr_ints)),
+            Arc::new(UInt32Array::from(acc.attr_parent_ids)),
+            Arc::new(StringArray::from(acc.attr_keys)),
+            Arc::new(StringArray::from(acc.attr_strs)),
+            Arc::new(UInt64Array::from(acc.attr_ints)),
             Arc::new(BinaryArray::from_opt_vec(
-                attr_bytes.iter().map(|b| b.as_deref()).collect(),
+                acc.attr_bytes.iter().map(|b| b.as_deref()).collect(),
             )),
         ],
     )?;
 
     Ok(DecodeOutcome {
-        records: Some(OtapMetricRecords { metrics, attributes }),
+        records: Some(OtapMetricRecords {
+            metrics,
+            attributes,
+        }),
         skipped_non_scalar,
     })
 }
@@ -1234,7 +1272,10 @@ fn require_float64<'a>(
         })
 }
 
-fn optional_string(batch: &RecordBatch, column: &'static str) -> Result<Option<StringArray>, BridgeError> {
+fn optional_string(
+    batch: &RecordBatch,
+    column: &'static str,
+) -> Result<Option<StringArray>, BridgeError> {
     match batch.column_by_name(column) {
         None => Ok(None),
         Some(c) => c
@@ -1249,7 +1290,10 @@ fn optional_string(batch: &RecordBatch, column: &'static str) -> Result<Option<S
     }
 }
 
-fn optional_uint64(batch: &RecordBatch, column: &'static str) -> Result<Option<UInt64Array>, BridgeError> {
+fn optional_uint64(
+    batch: &RecordBatch,
+    column: &'static str,
+) -> Result<Option<UInt64Array>, BridgeError> {
     match batch.column_by_name(column) {
         None => Ok(None),
         Some(c) => c
@@ -1264,7 +1308,10 @@ fn optional_uint64(batch: &RecordBatch, column: &'static str) -> Result<Option<U
     }
 }
 
-fn optional_binary(batch: &RecordBatch, column: &'static str) -> Result<Option<BinaryArray>, BridgeError> {
+fn optional_binary(
+    batch: &RecordBatch,
+    column: &'static str,
+) -> Result<Option<BinaryArray>, BridgeError> {
     match batch.column_by_name(column) {
         None => Ok(None),
         Some(c) => c
@@ -1276,5 +1323,211 @@ fn optional_binary(batch: &RecordBatch, column: &'static str) -> Result<Option<B
                 batch: "attributes",
                 column,
             }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{BinaryArray, Float64Array, StringArray, UInt32Array, UInt64Array};
+    use arrow_schema::{DataType, Field, Schema};
+
+    /// One-row `OtapMetricRecords`: `metric_name` at `value`, one
+    /// string attribute (`key` = `value`) and, if `envelope_bytes` is
+    /// `Some`, a second attribute carrying it under `_asap_envelope`
+    /// (Bytes-typed) — the "sketch shipped as binary inside an OTAP
+    /// metric" case this bridge's whole "Scope" doc section is about.
+    fn one_row_records(
+        metric_name: &str,
+        value: f64,
+        attr_key: &str,
+        attr_value: &str,
+        envelope_bytes: Option<&[u8]>,
+    ) -> OtapMetricRecords {
+        let metrics = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(COLUMN_TIME_UNIX_NANO, DataType::UInt64, false),
+                Field::new(COLUMN_METRIC, DataType::Utf8, false),
+                Field::new(COLUMN_VALUE, DataType::Float64, false),
+                Field::new(ATTR_BATCH_PARENT_ID, DataType::UInt32, false),
+            ])),
+            vec![
+                Arc::new(UInt64Array::from(vec![1_000_000_000_u64])),
+                Arc::new(StringArray::from(vec![metric_name])),
+                Arc::new(Float64Array::from(vec![value])),
+                Arc::new(UInt32Array::from(vec![0_u32])),
+            ],
+        )
+        .expect("metrics batch");
+
+        let n_attr_rows = if envelope_bytes.is_some() { 2 } else { 1 };
+        let mut parent_ids = vec![0_u32; n_attr_rows];
+        let mut keys = vec![attr_key.to_string()];
+        let mut strs: Vec<Option<String>> = vec![Some(attr_value.to_string())];
+        let mut ints: Vec<Option<u64>> = vec![None];
+        let mut bytes: Vec<Option<&[u8]>> = vec![None];
+        if let Some(env) = envelope_bytes {
+            keys.push("_asap_envelope".to_string());
+            strs.push(None);
+            ints.push(None);
+            bytes.push(Some(env));
+        }
+        parent_ids.truncate(keys.len());
+
+        let attributes = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(ATTR_BATCH_PARENT_ID, DataType::UInt32, false),
+                Field::new(ATTR_BATCH_KEY, DataType::Utf8, false),
+                Field::new(ATTR_BATCH_STR, DataType::Utf8, true),
+                Field::new(ATTR_BATCH_INT, DataType::UInt64, true),
+                Field::new(ATTR_BATCH_BYTES, DataType::Binary, true),
+            ])),
+            vec![
+                Arc::new(UInt32Array::from(parent_ids)),
+                Arc::new(StringArray::from(keys)),
+                Arc::new(StringArray::from(strs)),
+                Arc::new(UInt64Array::from(ints)),
+                Arc::new(BinaryArray::from_opt_vec(bytes)),
+            ],
+        )
+        .expect("attributes batch");
+
+        OtapMetricRecords {
+            metrics,
+            attributes,
+        }
+    }
+
+    #[test]
+    fn encode_then_decode_round_trips_a_scalar_metric() {
+        let records = one_row_records("http_request_duration_ms", 42.5, "path", "/api", None);
+
+        let pdata = otap_metric_records_to_pdata(&records).expect("encode to real OtapPdata");
+        assert_eq!(
+            pdata.signal_type(),
+            otel_arrow_dfe_config::SignalType::Metrics
+        );
+
+        let outcome = pdata_to_otap_metric_records(pdata).expect("decode real OtapPdata");
+        assert_eq!(outcome.skipped_non_scalar, 0);
+        let decoded = outcome.records.expect("one row decoded back");
+        assert_eq!(decoded.metrics.num_rows(), 1);
+
+        let metric_col = decoded
+            .metrics
+            .column_by_name(COLUMN_METRIC)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(metric_col.value(0), "http_request_duration_ms");
+
+        let value_col = decoded
+            .metrics
+            .column_by_name(COLUMN_VALUE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(value_col.value(0), 42.5);
+
+        assert_eq!(decoded.attributes.num_rows(), 1);
+        let key_col = decoded
+            .attributes
+            .column_by_name(ATTR_BATCH_KEY)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(key_col.value(0), "path");
+        let str_col = decoded
+            .attributes
+            .column_by_name(ATTR_BATCH_STR)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(str_col.value(0), "/api");
+    }
+
+    #[test]
+    fn encode_then_decode_round_trips_a_sketch_envelope_carried_as_a_metric_attribute() {
+        // The "self-describing sketch binary inside an OTAP metric"
+        // case: an `_asap_envelope`-tagged Bytes attribute must
+        // survive the round trip byte-for-byte, alongside an ordinary
+        // string label on the same data point.
+        let envelope_bytes: Vec<u8> = vec![1, 2, 3, 4, 250, 251, 252, 253];
+        let records = one_row_records(
+            "http_request_duration_ms",
+            0.0,
+            "path",
+            "/api",
+            Some(&envelope_bytes),
+        );
+
+        let pdata = otap_metric_records_to_pdata(&records).expect("encode to real OtapPdata");
+        let outcome = pdata_to_otap_metric_records(pdata).expect("decode real OtapPdata");
+        let decoded = outcome.records.expect("one row decoded back");
+
+        assert_eq!(decoded.attributes.num_rows(), 2);
+        let keys = decoded
+            .attributes
+            .column_by_name(ATTR_BATCH_KEY)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let bytes_col = decoded
+            .attributes
+            .column_by_name(ATTR_BATCH_BYTES)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+
+        let envelope_row = (0..decoded.attributes.num_rows())
+            .find(|&row| keys.value(row) == "_asap_envelope")
+            .expect("_asap_envelope attribute present");
+        assert!(!bytes_col.is_null(envelope_row));
+        assert_eq!(bytes_col.value(envelope_row), envelope_bytes.as_slice());
+    }
+
+    #[test]
+    fn decode_returns_none_records_for_zero_rows() {
+        let records = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(COLUMN_TIME_UNIX_NANO, DataType::UInt64, false),
+                Field::new(COLUMN_METRIC, DataType::Utf8, false),
+                Field::new(COLUMN_VALUE, DataType::Float64, false),
+                Field::new(ATTR_BATCH_PARENT_ID, DataType::UInt32, false),
+            ])),
+            vec![
+                Arc::new(UInt64Array::from(Vec::<u64>::new())),
+                Arc::new(StringArray::from(Vec::<&str>::new())),
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(UInt32Array::from(Vec::<u32>::new())),
+            ],
+        )
+        .expect("empty metrics batch");
+        let attributes = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new(ATTR_BATCH_PARENT_ID, DataType::UInt32, false),
+                Field::new(ATTR_BATCH_KEY, DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(UInt32Array::from(Vec::<u32>::new())),
+                Arc::new(StringArray::from(Vec::<&str>::new())),
+            ],
+        )
+        .expect("empty attributes batch");
+        let empty = OtapMetricRecords {
+            metrics: records,
+            attributes,
+        };
+
+        let pdata = otap_metric_records_to_pdata(&empty).expect("encode empty");
+        let outcome = pdata_to_otap_metric_records(pdata).expect("decode empty");
+        assert!(outcome.records.is_none());
+        assert_eq!(outcome.skipped_non_scalar, 0);
     }
 }
