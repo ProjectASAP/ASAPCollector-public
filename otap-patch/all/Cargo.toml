@@ -83,3 +83,6 @@ thiserror = { workspace = true }
 # deps do (both pinned "58.3") — see otap_bridge.rs's module doc.
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
+# For otap_wire.rs's Arrow IPC framing (real OtapPdata over TCP).
+arrow-ipc = { workspace = true }
+tokio = { workspace = true }

@@ -61,6 +61,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod otap_bridge;
+mod otap_wire;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
