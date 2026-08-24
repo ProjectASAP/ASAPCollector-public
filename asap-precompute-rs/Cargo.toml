@@ -24,6 +24,7 @@ thiserror = "1"
 # to one canonical `arrow-array` version. An older/newer pin here would
 # make that binding a type mismatch even though both are "Arrow".
 arrow-array = { version = "58.3", optional = true }
+arrow-buffer = { version = "58.3", optional = true }
 arrow-schema = { version = "58.3", optional = true }
 # Only pulled in for otap::wire's Arrow IPC serialization of
 # SketchStreamBatch across a real transport (see docs/data_model.md's
@@ -55,7 +56,7 @@ default = []
 # Enables the OTAP codec + plugin lifecycle at `crate::otap`
 # (decode_batch / encode_batch over `arrow::RecordBatch`, plus the
 # `AsapSketchesPlugin` Tokio runtime).
-otap = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tokio", "dep:futures"]
+otap = ["dep:arrow-array", "dep:arrow-buffer", "dep:arrow-schema", "dep:arrow-ipc", "dep:tokio", "dep:futures"]
 
 [[example]]
 name = "sketch_pipeline_demo"

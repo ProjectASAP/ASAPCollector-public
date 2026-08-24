@@ -27,16 +27,16 @@
 //!
 //! [`WireWriter`]/[`WireReader`] are this module's one send/receive
 //! API — there is deliberately no separate one-shot alternative. Each
-//! holds one [`arrow_ipc::writer::StreamWriter`] / one accumulated-
-//! bytes reader per role (schema, dictionary, labels, record) for the
+//! holds one [`arrow_ipc::writer::StreamWriter`] / one incremental
+//! decoder per role (schema, dictionary, labels, record) for the
 //! whole life of a connection, rather than starting a fresh self-
 //! contained IPC stream every window: a role's Arrow IPC **Schema
 //! message** goes out exactly once per connection — the first
 //! [`WireWriter::send`] call establishes it via `try_new`, and every
 //! later call appends only a new RecordBatch message to that same
 //! ongoing stream. [`WireReader`] mirrors this on the receive side: it
-//! accumulates each role's bytes across the connection and re-derives
-//! newly-available batches from that retained state.
+//! retains each role's decoder state across the connection without
+//! retaining or re-parsing bytes from completed batches.
 //!
 //! This module used to also offer a pure, session-independent one-shot
 //! codec (`encode_stream_batch`/`decode_stream_batch`,
@@ -55,6 +55,8 @@
 use std::io;
 
 use arrow_array::RecordBatch;
+use arrow_buffer::Buffer;
+use arrow_ipc::reader::StreamDecoder;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -88,6 +90,13 @@ pub enum WireError {
     #[error("otap wire: sub-batch {which:?} had no new record batch this frame")]
     EmptyRecordBatch {
         /// Which of the four sub-batches was empty.
+        which: &'static str,
+    },
+
+    /// A role delta contained more than the protocol's one record batch.
+    #[error("otap wire: sub-batch {which:?} had more than one record batch this frame")]
+    ExtraRecordBatch {
+        /// Which of the four sub-batches contained extra data.
         which: &'static str,
     },
 
@@ -242,19 +251,9 @@ impl RoleWriter {
     /// RecordBatch message on the first call for this role; just a
     /// RecordBatch message on every call after).
     fn write_delta(&mut self, batch: &RecordBatch) -> Result<Vec<u8>, WireError> {
-        // Captured *before* establishing the writer: `StreamWriter::
-        // try_new` itself writes the Schema message as part of
-        // construction ("write the schema, set the written bytes to
-        // the schema" — arrow-ipc's own doc), so on the first call
-        // `before` must be 0 to include that message in the delta.
-        // Capturing it after `try_new` would silently drop the Schema
-        // message from window 0's delta, leaving every later delta
-        // for this role un-parseable (no schema ever reached the
-        // wire).
-        let before = match &self.0 {
-            Some(w) => w.get_ref().len(),
-            None => 0,
-        };
+        // `try_new` writes the Schema message into the sink, so the
+        // first drained delta includes it. Later calls start with an
+        // empty sink and contain only the newly written batch.
         if self.0.is_none() {
             self.0 = Some(arrow_ipc::writer::StreamWriter::try_new(
                 Vec::new(),
@@ -266,27 +265,26 @@ impl RoleWriter {
             .as_mut()
             .expect("just initialized above if it was None");
         writer.write(batch)?;
-        Ok(writer.get_ref()[before..].to_vec())
+        // StreamWriter keeps the Arrow schema/dictionary bookkeeping;
+        // it does not require its output sink to retain bytes already
+        // delivered to the transport. Drain the sink after every batch
+        // so a long-lived connection retains only encoder state, not its
+        // complete traffic history.
+        Ok(std::mem::take(writer.get_mut()))
     }
 }
 
-/// One role's ongoing Arrow IPC stream on the receive side: the
-/// cumulative bytes received for this role since the connection
-/// opened, plus how many RecordBatch messages have already been
-/// yielded — so [`RoleReader::ingest`] only ever returns genuinely new
-/// ones, re-deriving them from the retained Schema/Dictionary state
-/// the accumulated bytes carry rather than assuming each delta is
-/// independently parseable.
+/// One role's incremental Arrow IPC decoder. It retains schema and
+/// dictionary state, but releases bytes belonging to completed
+/// messages as soon as they are decoded.
 struct RoleReader {
-    accumulated: Vec<u8>,
-    yielded: usize,
+    decoder: StreamDecoder,
 }
 
 impl RoleReader {
-    const fn new() -> Self {
+    fn new() -> Self {
         Self {
-            accumulated: Vec::new(),
-            yielded: 0,
+            decoder: StreamDecoder::new(),
         }
     }
 
@@ -301,25 +299,20 @@ impl RoleReader {
         delta: &[u8],
         which: &'static str,
     ) -> Result<Option<RecordBatch>, WireError> {
-        self.accumulated.extend_from_slice(delta);
-        if self.accumulated.is_empty() {
+        if delta.is_empty() {
             return Ok(None);
         }
-        let mut reader =
-            arrow_ipc::reader::StreamReader::try_new(self.accumulated.as_slice(), None)?;
-        for _ in 0..self.yielded {
-            let _ = reader.next();
-        }
-        match reader.next() {
-            Some(batch) => {
-                self.yielded += 1;
-                Ok(Some(batch?))
-            }
-            None => {
-                let _ = which; // reserved for a future richer error on genuine desync
-                Ok(None)
+        let mut bytes = Buffer::from(delta.to_vec());
+        let mut decoded = None;
+        while !bytes.is_empty() {
+            if let Some(batch) = self.decoder.decode(&mut bytes)? {
+                if decoded.is_some() {
+                    return Err(WireError::ExtraRecordBatch { which });
+                }
+                decoded = Some(batch);
             }
         }
+        Ok(decoded)
     }
 }
 
@@ -338,7 +331,7 @@ pub struct WireWriter {
 impl WireWriter {
     /// Constructs a writer with no established IPC streams yet — the
     /// first [`Self::send`] call establishes all four.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             schema: RoleWriter::new(),
             dictionary: RoleWriter::new(),
@@ -385,7 +378,7 @@ pub struct WireReader {
 
 impl WireReader {
     /// Constructs a reader with no retained IPC state yet.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             schema: RoleReader::new(),
             dictionary: RoleReader::new(),
