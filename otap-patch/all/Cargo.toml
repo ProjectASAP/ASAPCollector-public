@@ -70,6 +70,9 @@ humantime-serde = { workspace = true }
 otel-arrow-dfe-engine = { workspace = true }
 otel-arrow-dfe-otap = { workspace = true }
 otel-arrow-dfe-config = { workspace = true }
+# For otap_receiver.rs's TerminalState::new::<[MetricSetSnapshot; 0]>(...)
+# on the no-metrics shutdown/drain path.
+otel-arrow-dfe-telemetry = { workspace = true }
 
 # For otap_bridge.rs's OtapMetricRecords <-> real OtapArrowRecords
 # conversion: reading real metric batches (otel-arrow-dfe-pdata-views'
@@ -86,3 +89,9 @@ arrow-schema = { workspace = true }
 # For otap_wire.rs's Arrow IPC framing (real OtapPdata over TCP).
 arrow-ipc = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+# For otap_receiver.rs's end-to-end test: picks a free loopback port
+# instead of racing a hardcoded one (same helper the in-tree
+# `otap_receiver`/`otlp_receiver` tests use).
+otel-arrow-dfe-test-net = { workspace = true }

@@ -47,22 +47,40 @@
 //! identically for the others — no per-platform translation in the
 //! controller.
 //!
+//! **(4)** `otap_receiver` implements the wire lane's receive side as
+//! a real OTAP `local::Receiver<OtapPdata>` node
+//! ([`otap_receiver::AsapSketchesReceiver`]) — it listens on a TCP
+//! address, decodes each connection with `otap_wire::OtapWireReader`,
+//! and hands the resulting `OtapPdata` into the pipeline like any
+//! other receiver. [`AsapSketchesProcessor`] is the send-side
+//! counterpart: when its config carries `peer_addr`, emitted envelopes
+//! go out over `otap_wire::OtapWireWriter` directly to that peer
+//! instead of via the generic pipeline hop — see
+//! [`AsapSketchesProcessor::emit_envelopes`]'s doc for exactly how the
+//! two transports are chosen between.
+//!
 //! ## Scope not covered here
 //!
-//! This adapter only handles the **producer role** — real OTLP
-//! metrics in, sketch envelopes (or, in `transmit_sketch = false`
-//! estimate mode, quantile/cardinality gauges) out, both as ordinary
-//! OTAP metric traffic. The **receiver role** — ingesting another
-//! `asap_sketches` node's `SketchStreamBatch` output
-//! (`AsapSketchesPlugin::start_from_envelopes`) as `OtapPdata` — needs
-//! a different binding (that format doesn't fit OTAP's metrics shape
-//! at all) and isn't addressed by this file.
+//! Ingesting another `asap_sketches` node's *legacy* `SketchStreamBatch`
+//! wire format (`AsapSketchesPlugin::start_from_envelopes`,
+//! `asap_precompute_rs::otap::wire`) isn't addressed here — that format
+//! predates the unification `otap_wire.rs` describes and has its own
+//! standalone example binaries (`examples/sketch_producer_node.rs` /
+//! `sketch_receiver_node.rs`) as its home. What *is* covered: a real
+//! `OtapPdata`, produced and consumed by real OTAP nodes
+//! (`AsapSketchesProcessor` / `AsapSketchesReceiver`), sent directly
+//! over TCP via `otap_wire` — the same encoding the generic pipeline
+//! hop uses, just a different transport for topologies where two
+//! `asap_sketches` nodes are paired directly rather than routed
+//! through other OTAP pipeline components.
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
 mod otap_bridge;
+mod otap_receiver;
 mod otap_wire;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -70,6 +88,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use linkme::distributed_slice;
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpStream;
 
 // NOTE: `otel_arrow_dfe_*` is the current (2026-08-24) upstream naming
 // — see otap_bridge.rs's module doc for the very recent `otap_df_*`
@@ -97,6 +116,7 @@ use asap_precompute_rs::otap::{
 use asap_precompute_rs::precompute::Precompute;
 
 use otap_bridge::{otap_metric_records_to_pdata, pdata_to_otap_metric_records};
+use otap_wire::OtapWireWriter;
 
 /// Public URN for the unified ASAP `asap_sketches` processor. Survives
 /// across hosts unchanged so a controller plan addressed at this URN
@@ -133,6 +153,15 @@ pub struct AsapSketchesUserConfig {
     /// Bootstrap agent identifier reported to the controller.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// When set, emitted envelopes go out over the wire lane
+    /// (`otap_wire::OtapWireWriter`) directly to this peer instead of
+    /// via the generic pipeline hop (`effect_handler.send_message_with_source_node`).
+    /// Pairs with an `AsapSketchesReceiver` (`otap_receiver.rs`)
+    /// listening at this address on the peer. `None` (the default)
+    /// keeps the generic-pipeline path, unchanged from before this
+    /// field existed.
+    #[serde(default)]
+    pub peer_addr: Option<SocketAddr>,
 }
 
 impl AsapSketchesUserConfig {
@@ -220,6 +249,7 @@ pub fn create_asap_sketches_processor(
                 error: format!("asap_sketches: failed to parse config: {e}"),
             }
         })?;
+    let peer_addr = user.peer_addr;
     let plugin_config = user.into_plugin_config()?;
     let window_size = plugin_config.window_size;
 
@@ -243,7 +273,7 @@ pub fn create_asap_sketches_processor(
     drop(plugin);
 
     Ok(ProcessorWrapper::local(
-        AsapSketchesProcessor::new(precompute, window_size),
+        AsapSketchesProcessor::new(precompute, window_size, peer_addr),
         node,
         node_config,
         processor_config,
@@ -284,15 +314,32 @@ pub struct AsapSketchesProcessor {
     /// of any external controller's own versioning since this
     /// adapter's `Precompute` never talks to a `ControlChannel`.
     next_config_version: Arc<AtomicU64>,
+    /// When `Some`, `emit_envelopes` forwards over the wire lane to
+    /// this peer instead of the generic pipeline hop. See
+    /// [`AsapSketchesUserConfig::peer_addr`].
+    peer_addr: Option<SocketAddr>,
+    /// Lazily-established, persistent wire-lane connection to
+    /// `peer_addr` — held across ticks so `OtapWireWriter`'s per-role
+    /// Arrow IPC Schema message goes out once per connection, not once
+    /// per window (see `otap_wire.rs`'s module doc). Reset to `None`
+    /// on any send failure so the next window's `emit_envelopes`
+    /// reconnects rather than reusing a dead socket.
+    wire_conn: Option<(TcpStream, OtapWireWriter)>,
 }
 
 impl AsapSketchesProcessor {
-    fn new(precompute: Arc<dyn Precompute>, window_size: Duration) -> Self {
+    fn new(
+        precompute: Arc<dyn Precompute>,
+        window_size: Duration,
+        peer_addr: Option<SocketAddr>,
+    ) -> Self {
         Self {
             precompute,
             window_size,
             timer_started: false,
             next_config_version: Arc::new(AtomicU64::new(1)),
+            peer_addr,
+            wire_conn: None,
         }
     }
 
@@ -300,8 +347,35 @@ impl AsapSketchesProcessor {
     /// shared by the `TimerTick` (regular flush) and `Shutdown`
     /// (final drain) paths. `envs` empty is a no-op, matching
     /// `Precompute::tick`/`drain`'s own "nothing to flush" contract.
+    ///
+    /// # Transport choice: wire lane vs. generic pipeline hop
+    ///
+    /// Both transports carry the *same* encoding (SketchEnvelopes ->
+    /// flat RecordBatch (`encode_batch`) -> OTAP-validator-safe
+    /// two-batch family (`lift`) -> real `OtapPdata`
+    /// (`otap_bridge`) — deliberately NOT `SeriesDictionary::encode`,
+    /// the SCHEMA/DICTIONARY/RECORD wire economics from PR #5/#6,
+    /// which is the older `asap_precompute_rs::otap::wire` format).
+    /// What differs is only how that `OtapPdata` gets to the next
+    /// hop:
+    ///
+    /// - `peer_addr` is `Some`: sent directly over a persistent TCP
+    ///   connection via `otap_wire::OtapWireWriter`, to a peer running
+    ///   `otap_receiver::AsapSketchesReceiver` at that address. This is
+    ///   the wire lane — for topologies where two `asap_sketches`
+    ///   nodes are paired directly rather than routed through other
+    ///   OTAP pipeline components.
+    /// - `peer_addr` is `None` (the default): sent via
+    ///   `effect_handler.send_message_with_source_node`, i.e. whatever
+    ///   this node's own pipeline wiring connects it to.
+    ///
+    /// A connect/send failure on the wire lane drops the window (log
+    /// via `effect_handler.info`, matching every other decode/encode
+    /// failure path in this adapter) and resets `wire_conn` so the
+    /// *next* window's call attempts a fresh connection — a transient
+    /// peer outage self-heals without this processor needing restart.
     async fn emit_envelopes(
-        &self,
+        &mut self,
         envs: &[asap_precompute_rs::envelope::SketchEnvelope],
         effect_handler: &mut local::EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
@@ -310,14 +384,6 @@ impl AsapSketchesProcessor {
         if envs.is_empty() {
             return Ok(());
         }
-        // The documented Phase-B path: SketchEnvelopes -> flat
-        // RecordBatch (encode_batch) -> OTAP-validator-safe two-batch
-        // family (lift) -> real OtapPdata (otap_bridge). Deliberately
-        // NOT `SeriesDictionary::encode` (the SCHEMA/DICTIONARY/RECORD
-        // wire economics from PR #5/#6) — that format is for the
-        // asap_sketches -> asap_sketches transport hop
-        // (`otap::wire`), not for riding inside an arbitrary OTAP
-        // pipeline as a generic metric.
         let flat = match encode_batch(envs) {
             Ok(flat) => flat,
             Err(_e) => return Ok(()), // drop the bad window, keep the processor alive
@@ -330,7 +396,37 @@ impl AsapSketchesProcessor {
             Ok(pdata) => pdata,
             Err(_e) => return Ok(()),
         };
-        effect_handler.send_message_with_source_node(pdata).await?;
+
+        let Some(peer_addr) = self.peer_addr else {
+            effect_handler.send_message_with_source_node(pdata).await?;
+            return Ok(());
+        };
+
+        if self.wire_conn.is_none() {
+            match TcpStream::connect(peer_addr).await {
+                Ok(stream) => self.wire_conn = Some((stream, OtapWireWriter::new())),
+                Err(e) => {
+                    effect_handler
+                        .info(&format!(
+                            "asap_sketches: wire-lane connect to {peer_addr} failed: {e}"
+                        ))
+                        .await;
+                    return Ok(()); // drop this window; retry connecting next window
+                }
+            }
+        }
+        let (stream, writer) = self
+            .wire_conn
+            .as_mut()
+            .expect("just established above if it was None");
+        if let Err(e) = writer.send(stream, pdata).await {
+            effect_handler
+                .info(&format!(
+                    "asap_sketches: wire-lane send to {peer_addr} failed: {e}"
+                ))
+                .await;
+            self.wire_conn = None; // reconnect (fresh IPC streams too) next window
+        }
         Ok(())
     }
 }

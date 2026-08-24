@@ -45,28 +45,18 @@
 //! `crates/*` workspace member; see this module's own tests for what
 //! that covered.
 //!
-//! # Not wired into `AsapSketchesProcessor` yet
+//! # Wired into the running pipeline
 //!
-//! This module is a complete, tested transport layer with no consumer
-//! yet inside this crate (`#[allow(dead_code)]` below reflects that
-//! honestly rather than hiding it) — analogous to how
-//! `asap_precompute_rs::otap::wire::{WireWriter,WireReader}` is used
-//! by standalone example binaries
-//! (`examples/sketch_producer_node.rs`/`sketch_receiver_node.rs`),
-//! not baked into the generic plugin lifecycle. The natural next
-//! consumer here is the same shape: either a standalone binary pairing
-//! two `AsapSketchesProcessor`-equivalent instances directly (this
-//! module's own tests already prove that shape works, just with
-//! synthetic single-row fixtures instead of a full running
-//! `Precompute`), or — more in the spirit of "ride OTAP's real
-//! transport" — routing through OTAP's own gRPC exporter/receiver
-//! pair instead of this module at all, since that already solves "get
-//! `OtapPdata` to another node" as a first-class pipeline component.
-//! Either way, wiring a *config-driven* choice of transport into
-//! `AsapSketchesProcessor` itself (a `peer_addr` option, connection
-//! lifecycle, reconnect behavior) is real follow-up work this module
-//! doesn't attempt.
-#![allow(dead_code)]
+//! [`OtapWireWriter`] is `AsapSketchesProcessor`'s send-side transport
+//! (`mod.rs`'s `emit_envelopes`) whenever its config carries
+//! `peer_addr` — a persistent connection is opened lazily and reused
+//! across windows so each role's Arrow IPC Schema message goes out
+//! once per connection, not once per window. [`OtapWireReader`] is
+//! `otap_receiver::AsapSketchesReceiver`'s decode step: it listens on
+//! a TCP address, decodes each connection with this reader, and hands
+//! the resulting `OtapPdata` into the pipeline like any other
+//! receiver. See both modules' own docs for the transport-choice and
+//! receiver-vs-processor rationale respectively.
 
 use std::collections::BTreeMap;
 use std::io;
