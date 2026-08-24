@@ -1,17 +1,18 @@
 // Copyright The ASAP Authors
 // SPDX-License-Identifier: MIT
 
-//! `asap_sketches_registry` — OTAP-Rust `linkme` distributed-slice
-//! registration for the unified ASAP `asap_sketches` processor.
+//! `linkme` distributed-slice registration for the unified ASAP
+//! `asap_sketches` processor, and the real
+//! `local::Processor<OtapPdata>` adapter itself.
 //!
 //! ## What this file does
 //!
 //! **(1)** Declares an [`OTAP_PROCESSOR_FACTORIES`] entry for
 //! `urn:asap:processor:asap_sketches`. This is the
 //! `#[distributed_slice]` static that puts the plugin into the
-//! binary's link scope at compile time — the OTAP runtime
-//! discovers it via `system_info()` at startup (the function that
-//! produces the binary's "Available Component URNs:" banner).
+//! binary's link scope at compile time — the OTAP runtime discovers
+//! it via `system_info()` at startup (the function that produces the
+//! binary's "Available Component URNs:" banner).
 //!
 //! **(2)** Implements a real [`local::Processor<OtapPdata>`] adapter —
 //! [`AsapSketchesProcessor`] — that ingests real OTAP metric traffic,
@@ -22,15 +23,12 @@
 //! [`create_asap_sketches_processor`]'s doc for why (that lifecycle's
 //! current emit shape, `SketchStreamBatch`, diverged from what this
 //! adapter needs after PR #5/#6's dictionary-economics work). The
-//! actual `OtapPdata` <-> `OtapMetricRecords` conversion lives in
-//! `otap_bridge` — **that module has not been build-verified against
-//! a real OTAP Dataflow workspace**; see its own module doc for
-//! exactly what's confirmed vs. assumed.
+//! actual `OtapPdata <-> Vec<Observation>` conversion lives in
+//! [`super::codec`].
 //!
 //! **(3)** Validates the user-facing TOML config against
-//! [`asap_precompute_rs::otap::PluginConfig`]'s shape — the
-//! `validate_config` hook lets `df_engine --validate-and-exit`
-//! catch typos before runtime.
+//! [`crate::otap::PluginConfig`]'s shape — the `validate_config` hook
+//! lets `df_engine --validate-and-exit` catch typos before runtime.
 //!
 //! ## URN
 //!
@@ -46,20 +44,51 @@
 //! identically for the others — no per-platform translation in the
 //! controller.
 //!
+//! ## There is exactly one transport: the pipeline
+//!
+//! [`AsapSketchesProcessor`] only ever sends via
+//! `effect_handler.send_message_with_source_node` — whatever this
+//! node's own pipeline wiring connects it to. An earlier revision also
+//! carried a direct-TCP "wire lane" (a hand-rolled
+//! `OtapWireWriter`/`OtapWireReader` pair, plus a standalone
+//! `AsapSketchesReceiver` node) as an alternative transport; that's
+//! gone.
+//!
+//! It's gone because it turned out to be solving a problem OTAP's real
+//! Arrow-native metrics protocol already solves. The custom wire lane
+//! existed to give sketch traffic real dictionary/schema-reuse
+//! economics — the SCHEMA-once-per-`agg_id`, DICTIONARY-once-per-series
+//! design in [`super::dictionary`] (`SeriesDictionary` /
+//! `SketchStreamBatch`). But [`super::codec`]'s real `OtapPdata`
+//! already gets that for free, without any hand-rolled scheme: OTAP's
+//! Arrow encoder (`encode_metrics_otap_batch`) dictionary-encodes the
+//! metric name and every string-valued attribute key/value by
+//! construction — see `codec.rs`'s
+//! `real_otap_encoding_dictionary_encodes_metric_name_and_string_attributes`
+//! test. `SeriesDictionary` / `SketchStreamBatch` stay in the tree —
+//! tested, and still the transport for the legacy
+//! `crate::otap::wire` example binaries — but they aren't part of this
+//! adapter's path.
+//!
 //! ## Scope not covered here
 //!
-//! This adapter only handles the **producer role** — real OTLP
-//! metrics in, sketch envelopes (or, in `transmit_sketch = false`
-//! estimate mode, quantile/cardinality gauges) out, both as ordinary
-//! OTAP metric traffic. The **receiver role** — ingesting another
-//! `asap_sketches` node's `SketchStreamBatch` output
-//! (`AsapSketchesPlugin::start_from_envelopes`) as `OtapPdata` — needs
-//! a different binding (that format doesn't fit OTAP's metrics shape
-//! at all) and isn't addressed by this file.
-
-#![deny(unsafe_op_in_unsafe_fn)]
-
-mod otap_bridge;
+//! Ingesting another `asap_sketches` node's *legacy* `SketchStreamBatch`
+//! wire format (`AsapSketchesPlugin::start_from_envelopes`,
+//! `crate::otap::wire`) isn't addressed here — that's a different,
+//! ASAP-native hop with its own standalone example binaries
+//! (`examples/sketch_producer_node.rs` / `sketch_receiver_node.rs`) as
+//! its home, not something this OTAP-facing adapter needs to speak.
+//!
+//! ## Provenance / verification status
+//!
+//! Build/lint/test-verified against upstream `open-telemetry/otel-arrow`
+//! commit `3e85c3460361446ebfce99e9f35fffd2dd5ab740` (2026-08-24) via
+//! the plain git dependency this module's crate carries under the
+//! `otap-engine` feature (see `Cargo.toml`) — `cargo build --features
+//! otap-engine` / `cargo clippy --features otap-engine --all-targets
+//! -D warnings` / `cargo fmt --check` / `cargo test --features
+//! otap-engine` all pass without any manual staging into a local
+//! checkout of that repo.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -69,15 +98,12 @@ use async_trait::async_trait;
 use linkme::distributed_slice;
 use serde::{Deserialize, Serialize};
 
-// NOTE: `otel_arrow_dfe_*` is the current (2026-08-24) upstream naming
-// — see otap_bridge.rs's module doc for the very recent `otap_df_*`
-// rename this assumes. Revert to `otap_df_*` throughout this file (and
-// otap_bridge.rs) if the actual pinned commit predates it.
 use otel_arrow_dfe_config::error::Error as OtapConfigError;
 use otel_arrow_dfe_config::node::NodeUserConfig;
 use otel_arrow_dfe_engine::config::ProcessorConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
 use otel_arrow_dfe_engine::control::NodeControlMsg;
+use otel_arrow_dfe_engine::effect_handler::TimerCancelHandle;
 use otel_arrow_dfe_engine::error::Error;
 use otel_arrow_dfe_engine::local::processor as local;
 use otel_arrow_dfe_engine::message::Message;
@@ -87,12 +113,13 @@ use otel_arrow_dfe_engine::ProcessorFactory;
 use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 
-use asap_precompute_rs::config::PrecomputeConfigSet;
-use asap_precompute_rs::otap::config::resolve as resolve_plugin_config;
-use asap_precompute_rs::otap::{decode_batch, encode_batch, flatten, lift, AsapSketchesPlugin, PluginConfig};
-use asap_precompute_rs::precompute::Precompute;
+use crate::config::PrecomputeConfigSet;
+use crate::envelope::SketchEnvelope;
+use crate::otap::config::resolve as resolve_plugin_config;
+use crate::otap::{AsapSketchesPlugin, PluginConfig};
+use crate::precompute::{Precompute, PrecomputeError};
 
-use otap_bridge::{otap_metric_records_to_pdata, pdata_to_otap_metric_records};
+use super::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata};
 
 /// Public URN for the unified ASAP `asap_sketches` processor. Survives
 /// across hosts unchanged so a controller plan addressed at this URN
@@ -100,7 +127,7 @@ use otap_bridge::{otap_metric_records_to_pdata, pdata_to_otap_metric_records};
 pub const ASAP_SKETCHES_PROCESSOR_URN: &str = "urn:asap:processor:asap_sketches";
 
 /// User-facing TOML / YAML config for the OTAP `asap_sketches` plugin.
-/// Mirrors `otap-patch/plugins/asap_sketches/sample.toml` 1:1.
+/// Mirrors `plugins/asap_sketches/sample.toml` 1:1.
 ///
 /// Field-by-field documentation lives in the plugin's `README.md`;
 /// this struct is the deserialization shape OTAP's loader hands the
@@ -132,11 +159,11 @@ pub struct AsapSketchesUserConfig {
 }
 
 impl AsapSketchesUserConfig {
-    /// Translate the user-facing config into Phase C's runtime config.
-    /// `sketch_params` deserializes lazily — the runtime walks the JSON
-    /// map per sketch type.
+    /// Translate the user-facing config into the runtime config.
+    /// `sketch_params` deserializes lazily — the runtime walks the
+    /// JSON map per sketch type.
     fn into_plugin_config(self) -> Result<PluginConfig, OtapConfigError> {
-        use asap_precompute_rs::config::SketchParams;
+        use crate::config::SketchParams;
 
         let mut params = SketchParams::new();
         for (k, v) in self.sketch_params {
@@ -156,16 +183,19 @@ impl AsapSketchesUserConfig {
             sketch_params: params,
             ..PluginConfig::default()
         };
-        // Bounce the config through the Phase C resolver so config
-        // mistakes (unsupported sketch_type, zero window) surface here
-        // rather than at first observe().
-        let _ = asap_precompute_rs::otap::config::resolve(&cfg).map_err(|e| {
-            OtapConfigError::InvalidUserConfig {
-                error: format!("asap_sketches: {e}"),
-            }
+        // Bounce the config through the resolver so config mistakes
+        // (unsupported sketch_type, zero window) surface here rather
+        // than at first observe().
+        let _ = resolve_plugin_config(&cfg).map_err(|e| OtapConfigError::InvalidUserConfig {
+            error: format!("asap_sketches: {e}"),
         })?;
         Ok(cfg)
     }
+}
+
+fn requires_precompute_rebuild(current: &PluginConfig, next: &PluginConfig) -> bool {
+    !current.sketch_type.eq_ignore_ascii_case(&next.sketch_type)
+        || current.sketch_params != next.sketch_params
 }
 
 /// `linkme` registration entry — the static the OTAP runtime walks at
@@ -188,18 +218,17 @@ pub static ASAP_SKETCHES_PROCESSOR_FACTORY: ProcessorFactory<OtapPdata> = Proces
 /// Static config validation hook. Surfaces `--validate-and-exit`
 /// errors for typos in the user's TOML before any runtime allocation.
 fn validate_asap_sketches_config(config: &serde_json::Value) -> Result<(), OtapConfigError> {
-    let user: AsapSketchesUserConfig = serde_json::from_value(config.clone()).map_err(|e| {
-        OtapConfigError::InvalidUserConfig {
+    let user: AsapSketchesUserConfig =
+        serde_json::from_value(config.clone()).map_err(|e| OtapConfigError::InvalidUserConfig {
             error: format!("asap_sketches: {e}"),
-        }
-    })?;
+        })?;
     let _ = user.into_plugin_config()?;
     Ok(())
 }
 
 /// Factory function — invoked once per pipeline instance at startup.
-/// Translates the user-supplied TOML into Phase C's [`PluginConfig`],
-/// resolves it to a `Precompute` instance via
+/// Translates the user-supplied TOML into [`PluginConfig`], resolves
+/// it to a `Precompute` instance via
 /// [`AsapSketchesPlugin::from_plugin_config`] (reusing its validated
 /// construction path), and wraps the bare `Precompute` in OTAP's
 /// `local::Processor` adapter — **not** the plugin's own Tokio-task
@@ -209,6 +238,7 @@ pub fn create_asap_sketches_processor(
     node: NodeId,
     node_config: Arc<NodeUserConfig>,
     processor_config: &ProcessorConfig,
+    _capabilities: &otel_arrow_dfe_engine::capability::registry::Capabilities,
 ) -> Result<ProcessorWrapper<OtapPdata>, OtapConfigError> {
     let user: AsapSketchesUserConfig =
         serde_json::from_value(node_config.config.clone()).map_err(|e| {
@@ -217,7 +247,6 @@ pub fn create_asap_sketches_processor(
             }
         })?;
     let plugin_config = user.into_plugin_config()?;
-    let window_size = plugin_config.window_size;
 
     // `from_plugin_config` is pure (no Tokio) — it just validates and
     // resolves. Grab the `Arc<dyn Precompute>` it constructs and
@@ -225,11 +254,11 @@ pub fn create_asap_sketches_processor(
     // spawns Tokio tasks around a `Stream<Item = OtapMetricRecords>`
     // and currently emits `SketchStreamBatch` (the asap_sketches ->
     // asap_sketches wire-transport shape from PR #6, dictionary
-    // economics) — not the OTAP-Metrics-shaped `OtapMetricRecords`
-    // this adapter needs for `effect_handler.send_message`. OTAP's
-    // own per-message `process()` + `effect_handler.start_periodic_timer`
-    // is a better-fitting host for a callback-driven `Precompute`
-    // than bridging that Stream-based lifecycle would be.
+    // economics) — not what this adapter needs for
+    // `effect_handler.send_message`. OTAP's own per-message
+    // `process()` + `effect_handler.start_periodic_timer` is a
+    // better-fitting host for a callback-driven `Precompute` than
+    // bridging that Stream-based lifecycle would be.
     let plugin = AsapSketchesPlugin::from_plugin_config(&plugin_config).map_err(|e| {
         OtapConfigError::InvalidUserConfig {
             error: format!("asap_sketches: plugin construction: {e}"),
@@ -239,37 +268,35 @@ pub fn create_asap_sketches_processor(
     drop(plugin);
 
     Ok(ProcessorWrapper::local(
-        AsapSketchesProcessor::new(precompute, window_size),
+        AsapSketchesProcessor::new(precompute, plugin_config),
         node,
         node_config,
         processor_config,
     ))
 }
 
-/// OTAP `local::Processor<OtapPdata>` adapter — the real
-/// `OtapPdata` <-> `OtapMetricRecords` binding (`otap_bridge`) driving
-/// a bare [`Precompute`] instance directly, rather than through
-/// [`AsapSketchesPlugin`]'s own Tokio-task lifecycle (see
-/// [`create_asap_sketches_processor`]'s doc for why: that lifecycle's
-/// emit shape and this adapter's needed shape have diverged since
-/// PR #5/#6). `Precompute::observe`/`tick`/`drain` are themselves
-/// callback-style, not stream-based, so driving them directly from
-/// OTAP's own per-message/per-timer `process()` calls needs no
-/// bridging machinery at all.
+/// OTAP `local::Processor<OtapPdata>` adapter — the real `OtapPdata`
+/// binding ([`super::codec`]) driving a bare [`Precompute`] instance
+/// directly, rather than through [`AsapSketchesPlugin`]'s own
+/// Tokio-task lifecycle (see [`create_asap_sketches_processor`]'s doc
+/// for why: that lifecycle's emit shape and this adapter's needed
+/// shape have diverged since PR #5/#6). `Precompute::observe`/`tick`/
+/// `drain` are themselves callback-style, not stream-based, so driving
+/// them directly from OTAP's own per-message/per-timer `process()`
+/// calls needs no bridging machinery at all.
 ///
-/// # Verification status
-///
-/// See `otap_bridge.rs`'s module doc — the `OtapPdata` conversions
-/// this adapter calls have not been build-verified against a real
-/// OTAP Dataflow workspace.
+/// Sends exclusively via `effect_handler.send_message_with_source_node`
+/// — see this module's doc, "There is exactly one transport: the
+/// pipeline", for why there's no second, direct-TCP transport here.
 pub struct AsapSketchesProcessor {
     precompute: Arc<dyn Precompute>,
+    plugin_config: PluginConfig,
     window_size: Duration,
     /// `effect_handler.start_periodic_timer` is `async` and OTAP has
     /// no dedicated "processor started" hook — armed on the first
     /// `process()` call instead (`Message::PData` or any control
     /// message) rather than at construction time.
-    timer_started: bool,
+    timer: Option<TimerCancelHandle<OtapPdata>>,
     /// `PrecomputeConfigSet::version` for the next `NodeControlMsg::Config`
     /// this processor applies — monotonically increasing, independent
     /// of any external controller's own versioning since this
@@ -278,11 +305,13 @@ pub struct AsapSketchesProcessor {
 }
 
 impl AsapSketchesProcessor {
-    fn new(precompute: Arc<dyn Precompute>, window_size: Duration) -> Self {
+    fn new(precompute: Arc<dyn Precompute>, plugin_config: PluginConfig) -> Self {
+        let window_size = plugin_config.window_size;
         Self {
             precompute,
+            plugin_config,
             window_size,
-            timer_started: false,
+            timer: None,
             next_config_version: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -291,9 +320,17 @@ impl AsapSketchesProcessor {
     /// shared by the `TimerTick` (regular flush) and `Shutdown`
     /// (final drain) paths. `envs` empty is a no-op, matching
     /// `Precompute::tick`/`drain`'s own "nothing to flush" contract.
+    ///
+    /// [`encode_envelopes_to_pdata`] builds the real `OtapPdata`
+    /// directly from `envs` — no flat-`RecordBatch`/`OtapMetricRecords`
+    /// hop, and deliberately not `SeriesDictionary::encode` (the
+    /// SCHEMA/DICTIONARY/RECORD wire economics from PR #5/#6, the
+    /// older `crate::otap::wire` format) — see this module's doc,
+    /// "There is exactly one transport: the pipeline", for why that
+    /// scheme is redundant on this path.
     async fn emit_envelopes(
         &self,
-        envs: &[asap_precompute_rs::envelope::SketchEnvelope],
+        envs: &[SketchEnvelope],
         effect_handler: &mut local::EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
         use otel_arrow_dfe_engine::MessageSourceLocalEffectHandlerExtension as _;
@@ -301,25 +338,9 @@ impl AsapSketchesProcessor {
         if envs.is_empty() {
             return Ok(());
         }
-        // The documented Phase-B path: SketchEnvelopes -> flat
-        // RecordBatch (encode_batch) -> OTAP-validator-safe two-batch
-        // family (lift) -> real OtapPdata (otap_bridge). Deliberately
-        // NOT `SeriesDictionary::encode` (the SCHEMA/DICTIONARY/RECORD
-        // wire economics from PR #5/#6) — that format is for the
-        // asap_sketches -> asap_sketches transport hop
-        // (`otap::wire`), not for riding inside an arbitrary OTAP
-        // pipeline as a generic metric.
-        let flat = match encode_batch(envs) {
-            Ok(flat) => flat,
-            Err(_e) => return Ok(()), // drop the bad window, keep the processor alive
-        };
-        let records = match lift(&flat) {
-            Ok(records) => records,
-            Err(_e) => return Ok(()),
-        };
-        let pdata = match otap_metric_records_to_pdata(&records) {
+        let pdata = match encode_envelopes_to_pdata(envs) {
             Ok(pdata) => pdata,
-            Err(_e) => return Ok(()),
+            Err(_e) => return Ok(()), // drop the bad window, keep the processor alive
         };
         effect_handler.send_message_with_source_node(pdata).await?;
         Ok(())
@@ -333,23 +354,20 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
         msg: Message<OtapPdata>,
         effect_handler: &mut local::EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
-        if !self.timer_started {
-            self.timer_started = true;
+        if self.timer.is_none() {
             // Best-effort: if this fails, the processor still ingests
             // and observes correctly, it just never flushes a window
-            // on its own — degraded, not broken. `TimerCancelHandle`
-            // is dropped immediately: the timer keeps firing for this
-            // processor's lifetime rather than being cancellable
-            // (there's currently no shutdown-adjacent place to hold
-            // the handle across `process()` calls without adding
-            // another `Option<...>` field for a cancellation this
-            // adapter never actually exercises).
-            let _ = effect_handler.start_periodic_timer(self.window_size).await;
+            // on its own. Retaining the handle lets a later config push
+            // cancel and recreate the timer when window_size changes.
+            self.timer = effect_handler
+                .start_periodic_timer(self.window_size)
+                .await
+                .ok();
         }
 
         match msg {
             Message::PData(pdata) => {
-                let outcome = match pdata_to_otap_metric_records(pdata) {
+                let outcome = match decode_pdata_to_observations(pdata) {
                     Ok(outcome) => outcome,
                     Err(_e) => return Ok(()), // drop the bad batch, keep the processor alive
                 };
@@ -361,29 +379,19 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                         ))
                         .await;
                 }
-                let Some(records) = outcome.records else {
-                    return Ok(());
-                };
-                let flat = match flatten(&records) {
-                    Ok(flat) => flat,
-                    Err(_e) => return Ok(()),
-                };
-                let observations = match decode_batch(&flat) {
-                    Ok(observations) => observations,
-                    Err(_e) => return Ok(()),
-                };
-                for obs in &observations {
+                for obs in &outcome.observations {
                     // Note: `observe` here handles both "genuine OTLP
                     // metric" and "sketch shipped as binary inside an
                     // OTAP metric" (an upstream asap_sketches node's
                     // `_asap_envelope`-tagged output) — no branching
-                    // needed at this call site. `decode_batch` already
-                    // tags the latter as `ObservationValueKind::Envelope`,
-                    // and `Precompute::observe` already routes those
+                    // needed at this call site. `decode_pdata_to_observations`
+                    // already tags the latter as
+                    // `ObservationValueKind::Envelope`, and
+                    // `Precompute::observe` already routes those
                     // internally to `observe_envelope` (merge as a
                     // pre-aggregated sketch) instead of expanding them
-                    // to scalar samples. See otap_bridge.rs's module
-                    // doc ("Scope") for the full picture.
+                    // to scalar samples. See `codec.rs`'s module doc
+                    // ("Scope") for the full picture.
                     //
                     // LateData / SeriesCapExceeded are expected,
                     // already-tallied-in-stats outcomes (mirrors
@@ -394,7 +402,6 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                     // and is at least surfaced via `effect_handler.info`
                     // — a real error channel is follow-up work, but
                     // this keeps it from being completely invisible.
-                    use asap_precompute_rs::precompute::PrecomputeError;
                     match self.precompute.observe(obs) {
                         Ok(())
                         | Err(PrecomputeError::LateData)
@@ -428,11 +435,44 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 let Ok((pcfg, _dispatch)) = resolve_plugin_config(&plugin_config) else {
                     return Ok(());
                 };
-                let version = self.next_config_version.fetch_add(1, Ordering::Relaxed);
-                self.precompute.update_config(&PrecomputeConfigSet {
-                    version,
-                    configs: vec![pcfg],
-                });
+
+                // The sketch factory and observer are fixed when a
+                // PrecomputeImpl is constructed. If a push changes the
+                // algorithm or its construction parameters, updating only
+                // PrecomputeConfig would stamp the new type onto sketches
+                // still produced by the old implementation. Flush the old
+                // instance and replace it with a consistently constructed
+                // one instead.
+                let factory_changed =
+                    requires_precompute_rebuild(&self.plugin_config, &plugin_config);
+                if factory_changed {
+                    let replacement = match AsapSketchesPlugin::from_plugin_config(&plugin_config) {
+                        Ok(plugin) => plugin.precompute().clone(),
+                        Err(_) => return Ok(()),
+                    };
+                    let pending = self.precompute.drain();
+                    self.emit_envelopes(&pending, effect_handler).await?;
+                    self.precompute = replacement;
+                } else {
+                    let version = self.next_config_version.fetch_add(1, Ordering::Relaxed);
+                    self.precompute.update_config(&PrecomputeConfigSet {
+                        version,
+                        configs: vec![pcfg],
+                    });
+                }
+
+                if plugin_config.window_size != self.window_size {
+                    if let Some(timer) = self.timer.take() {
+                        let _ = timer.cancel().await;
+                    }
+                    self.timer = Some(
+                        effect_handler
+                            .start_periodic_timer(plugin_config.window_size)
+                            .await?,
+                    );
+                    self.window_size = plugin_config.window_size;
+                }
+                self.plugin_config = plugin_config;
                 Ok(())
             }
             Message::Control(NodeControlMsg::CollectTelemetry { .. }) => Ok(()),
@@ -442,8 +482,8 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
 }
 
 /// Wall-clock millisecond timestamp — mirrors
-/// `asap_precompute_rs::otap::lifecycle`'s private `wall_clock_ms`
-/// (not exported for reuse across the crate boundary).
+/// `crate::otap::lifecycle`'s private `wall_clock_ms` (not exported
+/// for reuse across the module boundary).
 fn asap_wall_clock_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -454,9 +494,8 @@ fn asap_wall_clock_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests for the registration crate. Confined to config-shape
-    //! validation — full lifecycle tests live in
-    //! `asap-precompute-rs/tests/otap_lifecycle.rs` (Phase C).
+    //! Unit tests confined to config-shape validation — full lifecycle
+    //! tests live in `tests/otap_lifecycle.rs`.
 
     use super::*;
     use serde_json::json;
@@ -512,7 +551,10 @@ mod tests {
         });
         let err = validate_asap_sketches_config(&cfg).expect_err("zero window rejected");
         let msg = format!("{err}");
-        assert!(msg.contains("window_size"), "error should mention window: {msg}");
+        assert!(
+            msg.contains("window_size"),
+            "error should mention window: {msg}"
+        );
     }
 
     #[test]
@@ -545,7 +587,33 @@ mod tests {
     fn registered_factory_carries_expected_urn() {
         // Sanity check: the registry static the binary discovers via
         // linkme exposes the canonical URN.
-        assert_eq!(ASAP_SKETCHES_PROCESSOR_FACTORY.name, ASAP_SKETCHES_PROCESSOR_URN);
-        assert_eq!(ASAP_SKETCHES_PROCESSOR_URN, "urn:asap:processor:asap_sketches");
+        assert_eq!(
+            ASAP_SKETCHES_PROCESSOR_FACTORY.name,
+            ASAP_SKETCHES_PROCESSOR_URN
+        );
+        assert_eq!(
+            ASAP_SKETCHES_PROCESSOR_URN,
+            "urn:asap:processor:asap_sketches"
+        );
+    }
+
+    #[test]
+    fn algorithm_and_factory_parameter_changes_require_rebuild() {
+        let current = PluginConfig::default();
+
+        let mut algorithm_change = current.clone();
+        algorithm_change.sketch_type = "hll".to_string();
+        assert!(requires_precompute_rebuild(&current, &algorithm_change));
+
+        let mut parameter_change = current.clone();
+        parameter_change
+            .sketch_params
+            .insert("relative_accuracy".to_string(), 0.005);
+        assert!(requires_precompute_rebuild(&current, &parameter_change));
+
+        let mut runtime_only_change = current.clone();
+        runtime_only_change.output_metric_name = "renamed".to_string();
+        runtime_only_change.window_size = Duration::from_secs(60);
+        assert!(!requires_precompute_rebuild(&current, &runtime_only_change));
     }
 }
