@@ -45,7 +45,25 @@
 //! boundary silently drops in-flight observations. The drain runs on
 //! the same emit channel as the flush ticker, so the consumer sees
 //! exactly one final batch carrying the residue.
+//!
+//! # The other role: [`AsapSketchesPlugin::start_from_envelopes`]
+//!
+//! Everything above is the *producer* role — raw observations in,
+//! `SketchStreamBatch`es out. A node receiving from another
+//! `asap_sketches` node instead needs the *receiver* role:
+//! [`AsapSketchesPlugin::start_from_envelopes`] swaps the input task
+//! for one that consumes `Stream<Item = SketchStreamBatch>`, decodes
+//! each via a [`super::dictionary::SeriesDictionaryDecoder`], and
+//! routes the reconstructed envelopes through
+//! `Precompute::observe_envelope` (merge, never expand to samples).
+//! It reuses the exact same flush ticker / control-channel task /
+//! graceful-drain machinery as the producer role — a receiver is
+//! still free to have its own `Precompute` config (e.g.
+//! `transmit_sketch = false` to *query* the merged sketch every window
+//! instead of re-emitting it), so its own emit channel carries
+//! whatever that config produces.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,7 +76,7 @@ use crate::envelope::SketchEnvelope;
 use crate::precompute::{Precompute, PrecomputeError, PrecomputeImpl, StatsSnapshot};
 
 use super::config::{resolve, ConfigError, PluginConfig};
-use super::dictionary::{SeriesDictionary, SketchStreamBatch};
+use super::dictionary::{SeriesDictionary, SeriesDictionaryDecoder, SketchStreamBatch};
 use super::records::{flatten, OtapMetricRecords, OtapRecordsError};
 use super::{decode_batch, OtapDecodeError, OtapEncodeError};
 
@@ -131,6 +149,17 @@ pub struct AsapSketchesPlugin {
     /// it's shared between the ticker task and the supervisor's final
     /// drain.
     dictionary: Arc<Mutex<SeriesDictionary>>,
+    /// Count of lifecycle-task batches/windows dropped due to a
+    /// decode/encode/precompute error since this plugin started. The
+    /// input, ticker, and drain tasks all apply a "drop the bad batch,
+    /// keep the plugin alive" resilience policy (a single malformed
+    /// batch shouldn't take down the whole plugin) — this counter is
+    /// what keeps that policy from being completely silent. Phase D
+    /// routes these errors onto OTAP's real effect-handler error
+    /// channel instead; until then, the `dropped_batches()` accessor
+    /// is the only signal a caller has that batches are being
+    /// dropped.
+    dropped_batches: Arc<AtomicU64>,
 }
 
 impl AsapSketchesPlugin {
@@ -149,6 +178,7 @@ impl AsapSketchesPlugin {
             inner: Arc::new(pc),
             window_size: pcfg.window.size,
             dictionary: Arc::new(Mutex::new(SeriesDictionary::new())),
+            dropped_batches: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -164,6 +194,7 @@ impl AsapSketchesPlugin {
             inner: precompute,
             window_size,
             dictionary: Arc::new(Mutex::new(SeriesDictionary::new())),
+            dropped_batches: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -180,8 +211,23 @@ impl AsapSketchesPlugin {
         self.inner.stats()
     }
 
+    /// Borrow the shared dropped-batch counter — count of
+    /// batches/windows a lifecycle task dropped after a
+    /// decode/encode/precompute error, the observable counterpart to
+    /// the input/ticker/drain tasks' "drop the bad batch, keep the
+    /// plugin alive" policy. Like [`Self::precompute`], call this
+    /// *before* [`Self::start`] / [`Self::start_from_envelopes`]
+    /// (which consume `self`) and clone the returned `Arc` to retain
+    /// a handle — `.load(Ordering::Relaxed)` on the clone reports the
+    /// live count for the plugin's whole lifetime, including after
+    /// shutdown.
+    pub fn dropped_batches(&self) -> &Arc<AtomicU64> {
+        &self.dropped_batches
+    }
+
     /// Launch the plugin's three lifecycle tasks against an OTAP
-    /// input stream.
+    /// input stream — the **producer** role (raw observations in,
+    /// `SketchStreamBatch`es out).
     ///
     /// `input` is the host-supplied stream of `OtapMetricRecords`
     /// — the OTAP shell wraps the runtime's `Stream<OtapPdata>` to
@@ -202,6 +248,68 @@ impl AsapSketchesPlugin {
     where
         S: futures::Stream<Item = OtapMetricRecords> + Send + Unpin + 'static,
     {
+        let precompute = self.inner.clone();
+        let dropped_batches = self.dropped_batches.clone();
+        self.spawn_lifecycle(
+            move |cancel| spawn_input_task(precompute, input, dropped_batches, cancel),
+            control,
+            opts,
+        )
+    }
+
+    /// Launch the plugin's three lifecycle tasks against a stream of
+    /// pre-aggregated envelopes — the **receiver** role: another
+    /// `asap_sketches` node's `SketchStreamBatch` output in, this
+    /// plugin's own `SketchStreamBatch` output out (which, depending
+    /// on this plugin's own `Precompute` config, might carry
+    /// re-emitted sketch state, or — with `transmit_sketch = false` —
+    /// query-mode estimates of the merged sketch).
+    ///
+    /// Decodes each batch through a fresh
+    /// [`SeriesDictionaryDecoder`] retained for the life of this
+    /// plugin instance, and routes every reconstructed envelope
+    /// through `Precompute::observe_envelope` (merge, never expand to
+    /// samples — see the module doc's "The other role" section).
+    /// Otherwise identical to [`Self::start`]: same ticker / control /
+    /// graceful-drain machinery, same [`PluginHandle`] /
+    /// [`EmitReceiver`] return shape.
+    pub fn start_from_envelopes<S>(
+        self,
+        input: S,
+        control: Option<Arc<dyn ControlChannel>>,
+        opts: StartOptions,
+    ) -> (PluginHandle, EmitReceiver)
+    where
+        S: futures::Stream<Item = SketchStreamBatch> + Send + Unpin + 'static,
+    {
+        let precompute = self.inner.clone();
+        let decoder = Arc::new(Mutex::new(SeriesDictionaryDecoder::new()));
+        let dropped_batches = self.dropped_batches.clone();
+        self.spawn_lifecycle(
+            move |cancel| {
+                spawn_envelope_input_task(precompute, decoder, input, dropped_batches, cancel)
+            },
+            control,
+            opts,
+        )
+    }
+
+    /// Shared tail of [`Self::start`] / [`Self::start_from_envelopes`]:
+    /// wires up the emit channel, shutdown signal, ticker task,
+    /// optional control task, and the graceful-drain supervisor —
+    /// everything except *which* input task to spawn, which the two
+    /// public entry points supply as `spawn_input` (given the shared
+    /// [`Cancellation`] token so the input task honors shutdown the
+    /// same way the others do).
+    fn spawn_lifecycle<F>(
+        self,
+        spawn_input: F,
+        control: Option<Arc<dyn ControlChannel>>,
+        opts: StartOptions,
+    ) -> (PluginHandle, EmitReceiver)
+    where
+        F: FnOnce(Cancellation) -> JoinHandle<()>,
+    {
         let (emit_tx, emit_rx) = mpsc::unbounded_channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let shutdown_rx = Arc::new(Mutex::new(Some(shutdown_rx)));
@@ -210,14 +318,16 @@ impl AsapSketchesPlugin {
         let precompute = self.inner.clone();
         let window_size = self.window_size;
         let dictionary = self.dictionary.clone();
+        let dropped_batches = self.dropped_batches.clone();
         let opts = Arc::new(opts);
 
-        let input_task = spawn_input_task(precompute.clone(), input, cancellation.clone());
+        let input_task = spawn_input(cancellation.clone());
         let ticker_task = spawn_ticker_task(
             precompute.clone(),
             dictionary.clone(),
             window_size,
             emit_tx.clone(),
+            dropped_batches.clone(),
             cancellation.clone(),
         );
         let control_task = control.map(|cc| {
@@ -245,7 +355,9 @@ impl AsapSketchesPlugin {
             if !envs.is_empty() {
                 let cfg = precompute.active_config();
                 let mut dict = dictionary.lock().await;
-                let _ = emit_drain(&emit_tx, &envs, &mut dict, cfg.as_ref());
+                if emit_drain(&emit_tx, &envs, &mut dict, cfg.as_ref()).is_err() {
+                    dropped_batches.fetch_add(1, Ordering::Relaxed);
+                }
             }
         });
 
@@ -316,6 +428,7 @@ impl Drop for PluginHandle {
 fn spawn_input_task<S>(
     precompute: Arc<dyn Precompute>,
     mut input: S,
+    dropped_batches: Arc<AtomicU64>,
     cancel: Cancellation,
 ) -> JoinHandle<()>
 where
@@ -325,7 +438,16 @@ where
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = cancel.cancelled() => return,
+                // Biased: check `input.next()` before `cancel.cancelled()`.
+                // If a batch is already ready in the same poll that
+                // cancellation fires (e.g. a producer enqueues its
+                // final batch then immediately signals shutdown),
+                // unbiased selection could pick the cancel branch and
+                // drop that ready-but-unprocessed batch. Polling
+                // `input` first means a ready batch is always
+                // consumed before the next loop iteration observes
+                // cancellation.
+                biased;
                 next = input.next() => match next {
                     None => return,
                     Some(records) => {
@@ -334,10 +456,13 @@ where
                             // effect-handler error channel; for Phase C
                             // we drop the batch and continue so a
                             // single bad batch can't take down the
-                            // whole plugin.
+                            // whole plugin. `dropped_batches` keeps
+                            // this from being completely silent.
+                            dropped_batches.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                 },
+                _ = cancel.cancelled() => return,
             }
         }
     })
@@ -363,11 +488,77 @@ fn ingest_one_batch(
     Ok(())
 }
 
+fn spawn_envelope_input_task<S>(
+    precompute: Arc<dyn Precompute>,
+    decoder: Arc<Mutex<SeriesDictionaryDecoder>>,
+    mut input: S,
+    dropped_batches: Arc<AtomicU64>,
+    cancel: Cancellation,
+) -> JoinHandle<()>
+where
+    S: futures::Stream<Item = SketchStreamBatch> + Send + Unpin + 'static,
+{
+    use futures::StreamExt;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                // Biased — see spawn_input_task's comment: without
+                // this, a batch that's already ready in the same poll
+                // as a shutdown signal could be dropped by an
+                // unbiased tie-break instead of processed.
+                biased;
+                next = input.next() => match next {
+                    None => return,
+                    Some(batch) => {
+                        if let Err(_e) = ingest_one_stream_batch(&*precompute, &decoder, &batch).await {
+                            // Same "drop the bad batch, keep the
+                            // plugin alive" policy as ingest_one_batch.
+                            // A decode error here means this stream's
+                            // continuity contract was violated (see
+                            // `OtapDecodeError::UnknownSeriesId` /
+                            // `UnknownAggId`) — Phase D routes this
+                            // onto OTAP's effect-handler error channel.
+                            // `dropped_batches` keeps this from being
+                            // completely silent in the meantime.
+                            dropped_batches.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                },
+                _ = cancel.cancelled() => return,
+            }
+        }
+    })
+}
+
+async fn ingest_one_stream_batch(
+    precompute: &dyn Precompute,
+    decoder: &Mutex<SeriesDictionaryDecoder>,
+    batch: &SketchStreamBatch,
+) -> Result<(), PluginError> {
+    let envelopes = {
+        let mut d = decoder.lock().await;
+        d.decode(batch)?
+    };
+    for env in &envelopes {
+        // Merge only — the runtime never expands envelope bytes back
+        // into scalar samples (the bandwidth invariant).
+        match precompute.observe_envelope(env) {
+            Ok(()) => {}
+            Err(PrecomputeError::LateData) | Err(PrecomputeError::SeriesCapExceeded) => {
+                continue;
+            }
+            Err(e) => return Err(PluginError::Precompute(e)),
+        }
+    }
+    Ok(())
+}
+
 fn spawn_ticker_task(
     precompute: Arc<dyn Precompute>,
     dictionary: Arc<Mutex<SeriesDictionary>>,
     window_size: Duration,
     emit_tx: EmitSender,
+    dropped_batches: Arc<AtomicU64>,
     cancel: Cancellation,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -388,7 +579,9 @@ fn spawn_ticker_task(
                     }
                     let cfg = precompute.active_config();
                     let mut dict = dictionary.lock().await;
-                    let _ = emit_envelopes(&emit_tx, &envs, &mut dict, cfg.as_ref());
+                    if emit_envelopes(&emit_tx, &envs, &mut dict, cfg.as_ref()).is_err() {
+                        dropped_batches.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -531,5 +724,99 @@ mod tests {
         assert_eq!(plugin.precompute().stats(), StatsSnapshot::default());
         // And that the SketchType enum landed correctly via update_config.
         let _ = SketchType::KLLSketch;
+    }
+
+    #[tokio::test]
+    async fn receiver_role_smoke_test_drop_aborts_supervisor() {
+        // Mirrors handle_drop_aborts_supervisor for the receiver role:
+        // start_from_envelopes must compile and run against an empty
+        // SketchStreamBatch stream without deadlocking or panicking.
+        let cfg = PluginConfig {
+            sketch_type: "ddsketch".into(),
+            window_size: Duration::from_millis(50),
+            ..Default::default()
+        };
+        let plugin = AsapSketchesPlugin::from_plugin_config(&cfg).expect("config");
+        let input = futures::stream::empty::<SketchStreamBatch>();
+        let (handle, _rx) = plugin.start_from_envelopes(input, None, StartOptions::default());
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn receiver_role_merges_producer_role_output_end_to_end() {
+        // Full producer -> receiver chain, both AsapSketchesPlugin,
+        // connected by an in-process channel (the network-transport
+        // version of this same chain lives in
+        // examples/sketch_producer_node.rs /
+        // examples/sketch_receiver_node.rs).
+        use crate::observation::{KeyValue, Observation, ObservationValue};
+        use tokio_stream::wrappers::UnboundedReceiverStream;
+
+        let producer_cfg = PluginConfig {
+            sketch_type: "ddsketch".into(),
+            window_size: Duration::from_secs(60), // drained explicitly below.
+            output_metric_name: "latency_ms".into(),
+            agg_id: 1,
+            ..Default::default()
+        };
+        let producer =
+            AsapSketchesPlugin::from_plugin_config(&producer_cfg).expect("producer config");
+        for v in [1.0_f64, 2.0, 3.0, 4.0, 5.0] {
+            let obs = Observation::new(
+                1_000,
+                "latency_ms",
+                vec![],
+                vec![KeyValue::new("host", "h1")],
+                ObservationValue::float(v),
+            );
+            producer.precompute().observe(&obs).expect("observe");
+        }
+        let (producer_handle, producer_rx) = producer.start(
+            futures::stream::pending::<OtapMetricRecords>(),
+            None,
+            StartOptions::default(),
+        );
+
+        let receiver_cfg = PluginConfig {
+            sketch_type: "ddsketch".into(),
+            window_size: Duration::from_secs(60),
+            output_metric_name: "latency_ms_p99".into(),
+            agg_id: 1,
+            transmit_sketch: false,
+            quantiles: vec![0.99],
+            ..Default::default()
+        };
+        let receiver =
+            AsapSketchesPlugin::from_plugin_config(&receiver_cfg).expect("receiver config");
+        let (receiver_handle, mut receiver_rx) = receiver.start_from_envelopes(
+            UnboundedReceiverStream::new(producer_rx),
+            None,
+            StartOptions::default(),
+        );
+
+        // Shut the producer down first: its final drain pushes the
+        // one window it accumulated onto producer_rx, which the
+        // receiver's envelope-input task picks up and merges.
+        producer_handle.shutdown().await.expect("producer shutdown");
+        // Now shut the receiver down: its final drain (transmit_sketch
+        // = false) turns the merged sketch into a p99 estimate batch.
+        receiver_handle.shutdown().await.expect("receiver shutdown");
+
+        let mut decoder = SeriesDictionaryDecoder::new();
+        let mut saw_estimate = false;
+        while let Ok(Some(batch)) =
+            tokio::time::timeout(Duration::from_secs(2), receiver_rx.recv()).await
+        {
+            for env in decoder.decode(&batch).expect("decode") {
+                assert_eq!(env.metric_name, "latency_ms_p99");
+                assert!(
+                    env.payload.is_empty(),
+                    "estimate mode carries no sketch bytes"
+                );
+                assert!(env.value > 0.0, "p99 of {{1..5}} must be positive");
+                saw_estimate = true;
+            }
+        }
+        assert!(saw_estimate, "receiver never emitted a p99 estimate");
     }
 }

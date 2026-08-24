@@ -131,6 +131,7 @@ mod schema;
 pub mod config;
 pub mod lifecycle;
 pub mod records;
+pub mod wire;
 
 pub use decode::{decode_batch, OtapDecodeError};
 pub use dictionary::{

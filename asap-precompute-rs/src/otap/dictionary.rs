@@ -89,6 +89,16 @@ impl SketchStreamBatch {
     }
 }
 
+/// Appends `s` to `buf` as a length-prefixed segment (`"<len>:<s>"`)
+/// — used by [`SeriesDictionary::identity_key`] so joining several
+/// caller-controlled strings can never let one segment's content be
+/// mistaken for a delimiter or for the start of the next segment.
+fn push_len_prefixed(buf: &mut String, s: &str) {
+    buf.push_str(&s.len().to_string());
+    buf.push(':');
+    buf.push_str(s);
+}
+
 /// Sender-side dictionary state: assigns stable `series_id`s and
 /// tracks which `agg_id`s / series have already had a `SCHEMA` /
 /// `DICTIONARY` row emitted, so repeat windows for the same series
@@ -130,19 +140,24 @@ impl SeriesDictionary {
     /// canonicalization is private to this dictionary and never
     /// crosses a process boundary itself, only the `series_id` it
     /// produces does.
+    ///
+    /// Each segment is length-prefixed (`"<len>:<bytes>"`) rather than
+    /// joined with a bare `|`/`=`/`;` delimiter — those separator
+    /// characters are otherwise legal inside a label key/value (e.g.
+    /// an HTTP path label containing `;`), and an unescaped join lets
+    /// two genuinely different label sets collide onto the same
+    /// string (`{"a": "1;b=2"}` vs. `{"a": "1", "b": "2"}` both used
+    /// to produce `"...|a=1;b=2;"`). A length prefix makes each
+    /// segment's boundary unambiguous regardless of its contents.
     fn identity_key(env: &SketchEnvelope) -> String {
         let mut labels: Vec<&KeyValue> = env.labels.iter().collect();
         labels.sort_by(|a, b| a.key.cmp(&b.key));
         let mut buf = String::new();
-        buf.push_str(&env.agg_id.to_string());
-        buf.push('|');
-        buf.push_str(&env.metric_name);
-        buf.push('|');
+        push_len_prefixed(&mut buf, &env.agg_id.to_string());
+        push_len_prefixed(&mut buf, &env.metric_name);
         for kv in labels {
-            buf.push_str(&kv.key);
-            buf.push('=');
-            buf.push_str(&kv.value);
-            buf.push(';');
+            push_len_prefixed(&mut buf, &kv.key);
+            push_len_prefixed(&mut buf, &kv.value);
         }
         buf
     }
@@ -212,7 +227,7 @@ impl SeriesDictionary {
                     cfg.filter(|c| c.agg_id == env.agg_id)
                         .and_then(|c| sketch_size_string(env.sketch_type, &c.sketch_params)),
                 );
-                let (seed, function) = resolve_hash_seed(env.hash_spec.as_ref());
+                let (seed, function) = resolve_hash_seed(env.sketch_type, env.hash_spec.as_ref());
                 schema_hash_seed.push(seed);
                 schema_hash_function.push(function);
                 schema_encoding.push(env.encoding.name());
@@ -341,25 +356,39 @@ impl SeriesDictionary {
 /// sketch families at once. `SCHEMA_COLUMN_HASH_SEED` doesn't need
 /// that generality: one `SCHEMA` row already describes exactly one
 /// `agg_id`'s one `sketch_type`, so there's exactly one seed position
-/// that matters — `canonical_seed_index` is the one both libraries use
-/// by default, and the field `HashSpec` actually exposes on this proto
-/// message (`docs/data_model.md`'s `hash_seed` field is deliberately
-/// this single resolved value, not the whole table).
+/// that matters — but *which* position depends on `sketch_type`.
+/// `asap_sketchlib`'s matrix-family sketches (`CountSketch` /
+/// `CountMinSketch`) always hash on the packed hot path via
+/// `HashSpec::matrix_seed()`, i.e. `seed_list[0]`, regardless of
+/// `canonical_seed_index` — `canonical_seed_index` only governs
+/// `CanonicalHash`/`hh_keys` lookups, a different code path. Every
+/// other sketch type here uses the canonical position,
+/// `seed_list[canonical_seed_index]`. Reporting the wrong one would
+/// silently mismatch a receiver's determinism/compatibility check
+/// against the seed the bytes were actually hashed with.
 ///
 /// Returns `(None, None)` when `spec` is absent (nothing upstream
-/// populates [`SketchEnvelope::hash_spec`] yet) or when
-/// `canonical_seed_index` is out of bounds for `seed_list` (a
-/// malformed spec — better to omit the seed than fabricate one).
+/// populates [`SketchEnvelope::hash_spec`] yet) or when the resolved
+/// index is out of bounds for `seed_list` (a malformed spec — better
+/// to omit the seed than fabricate one).
 fn resolve_hash_seed(
+    sketch_type: SketchType,
     spec: Option<&asap_sketchlib::proto::sketchlib::HashSpec>,
 ) -> (Option<u64>, Option<String>) {
     let Some(spec) = spec else {
         return (None, None);
     };
-    let seed = spec
-        .seed_list
-        .get(spec.canonical_seed_index as usize)
-        .copied();
+    let is_matrix_family = matches!(
+        sketch_type,
+        SketchType::CountSketch | SketchType::CountMinSketch
+    );
+    let seed = if is_matrix_family {
+        spec.seed_list.first().copied()
+    } else {
+        spec.seed_list
+            .get(spec.canonical_seed_index as usize)
+            .copied()
+    };
     let function = asap_sketchlib::proto::sketchlib::HashAlgorithm::try_from(spec.algorithm)
         .ok()
         .map(|a| a.as_str_name().to_string());
@@ -504,14 +533,28 @@ impl SeriesDictionaryDecoder {
         let metric = col_str(batch, "dictionary", DICT_COLUMN_METRIC)?;
         for row in 0..batch.num_rows() {
             let sid = series_id.value(row);
-            self.series.insert(
-                sid,
-                SeriesFacts {
+            // A DICTIONARY row for a series_id is only ever supposed
+            // to arrive once, paired with LABELS rows in that same
+            // batch (`SeriesDictionary::encode` never re-emits either
+            // for a series it already considers known). If one
+            // arrives for a series_id this decoder already has facts
+            // for — a duplicate/replayed batch, or a sender that lost
+            // its own dictionary state and resent it — preserve the
+            // labels already learned instead of resetting them to
+            // empty and hoping a fresh LABELS batch refills them
+            // (which `SeriesDictionary` won't send, since it still
+            // considers this series known).
+            self.series
+                .entry(sid)
+                .and_modify(|facts| {
+                    facts.agg_id = agg_id.value(row);
+                    facts.metric = metric.value(row).to_string();
+                })
+                .or_insert_with(|| SeriesFacts {
                     agg_id: agg_id.value(row),
                     metric: metric.value(row).to_string(),
                     labels: Vec::new(),
-                },
-            );
+                });
         }
         Ok(())
     }
