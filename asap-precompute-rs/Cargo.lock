@@ -328,6 +328,8 @@ dependencies = [
  "otel-arrow-dfe-otap",
  "otel-arrow-dfe-pdata",
  "otel-arrow-dfe-pdata-views",
+ "otel-arrow-dfe-state",
+ "otel-arrow-dfe-telemetry",
  "proptest",
  "prost 0.13.5",
  "serde",

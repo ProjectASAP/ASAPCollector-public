@@ -54,6 +54,8 @@ otel-arrow-dfe-otap = { git = "https://github.com/open-telemetry/otel-arrow", re
 otel-arrow-dfe-config = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-config", optional = true }
 otel-arrow-dfe-pdata = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-pdata", optional = true }
 otel-arrow-dfe-pdata-views = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-pdata-views", optional = true }
+otel-arrow-dfe-state = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-state", optional = true }
+otel-arrow-dfe-telemetry = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-telemetry", optional = true }
 linkme = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 humantime-serde = { version = "1", optional = true }
@@ -94,6 +96,8 @@ otap-engine = [
     "dep:otel-arrow-dfe-config",
     "dep:otel-arrow-dfe-pdata",
     "dep:otel-arrow-dfe-pdata-views",
+    "dep:otel-arrow-dfe-state",
+    "dep:otel-arrow-dfe-telemetry",
     "dep:linkme",
     "dep:async-trait",
     "dep:humantime-serde",

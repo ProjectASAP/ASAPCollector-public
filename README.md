@@ -89,7 +89,7 @@ All of this sits on the host-neutral runtime in the same crate
 ```sh
 cd asap-precompute-rs
 cargo build --features otap-engine
-cargo test  --features otap-engine       # 169 tests: runtime + OTAP codec + lifecycle + real OTAP node
+cargo test  --features otap-engine       # runtime + codec + lifecycle + real pipeline tests
 cargo clippy --all-targets --features otap-engine -- -D warnings
 cargo fmt --check
 ```
@@ -112,10 +112,10 @@ a specific commit in `Cargo.toml`.
 Phases **B** (Arrow codec) and **C** (full 5-sketch plugin lifecycle)
 are complete and tested. Phase **D** (the `linkme` registration + the
 real `OtapPdata` binding) is complete and build/lint/test-verified by
-this repo's own build — the producer role (`AsapSketchesProcessor`,
-`otap::codec`) is implemented; no test yet exercises it inside a real
-running pipeline end to end (no `Message::PData` sent through
-`process()` against a live `df_engine`). The receiver role — ingesting
+this repo's own build. `tests/otap_pipeline_e2e.rs` parses a genuine
+OTAP pipeline YAML, builds it through `OTAP_PIPELINE_FACTORY`, runs the
+resulting `RuntimePipeline`, injects a real `OtapPdata`, and verifies
+the sketch emitted through the configured exporter. The receiver role — ingesting
 another `asap_sketches` node's *legacy* `SketchStreamBatch` output —
 isn't addressed by this adapter; that format has its own standalone
 example binaries. Cross-host byte-parity (Phase **E**) is the
