@@ -33,18 +33,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow_array::{
-    Array, BinaryArray, Float64Array, RecordBatch, StringArray, UInt32Array, UInt64Array,
-};
+use arrow_array::{BinaryArray, Float64Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 
 use asap_precompute_rs::config::{PrecomputeConfig, PrecomputeConfigSet, WindowSpec};
 use asap_precompute_rs::control_channel::ControlChannel;
-use asap_precompute_rs::envelope::{Encoding, SketchType};
+use asap_precompute_rs::envelope::{Encoding, SketchEnvelope, SketchType};
 use asap_precompute_rs::otap::{
-    AsapSketchesPlugin, OtapMetricRecords, PluginConfig, PluginHandle, StartOptions, ATTR_AGG_ID,
-    ATTR_ENCODING, ATTR_ENVELOPE, ATTR_SCHEMA_VERSION, ATTR_SKETCH_TYPE, ATTR_WINDOW_END_MS,
-    ATTR_WINDOW_START_MS, COLUMN_METRIC, COLUMN_TIME_UNIX_NANO, COLUMN_VALUE,
+    AsapSketchesPlugin, OtapMetricRecords, PluginConfig, PluginHandle, SeriesDictionaryDecoder,
+    SketchStreamBatch, StartOptions, COLUMN_METRIC, COLUMN_TIME_UNIX_NANO, COLUMN_VALUE,
 };
 
 const PARENT_ID_COL: &str = "parent_id";
@@ -101,7 +98,7 @@ fn scalar_records(metric: &str, value: f64, timestamp_ms: u64, host: &str) -> Ot
 /// Drain an [`asap_precompute_rs::otap::EmitReceiver`] with a
 /// generous timeout. The lifecycle tasks emit eagerly on shutdown,
 /// so 5s is far more than needed in practice.
-async fn drain_emit(rx: &mut asap_precompute_rs::otap::EmitReceiver) -> Vec<OtapMetricRecords> {
+async fn drain_emit(rx: &mut asap_precompute_rs::otap::EmitReceiver) -> Vec<SketchStreamBatch> {
     let mut out = Vec::new();
     let timeout = Duration::from_secs(5);
     let deadline = tokio::time::Instant::now() + timeout;
@@ -111,7 +108,7 @@ async fn drain_emit(rx: &mut asap_precompute_rs::otap::EmitReceiver) -> Vec<Otap
             break;
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
-            Ok(Some(records)) => out.push(records),
+            Ok(Some(batch)) => out.push(batch),
             Ok(None) => break,
             Err(_) => break,
         }
@@ -119,61 +116,36 @@ async fn drain_emit(rx: &mut asap_precompute_rs::otap::EmitReceiver) -> Vec<Otap
     out
 }
 
-/// Walk the emitted records family looking for an envelope-bearing
-/// attribute row carrying the right `_asap_sketch_type` tag. Returns
-/// the payload bytes; panics if not exactly one envelope is found.
-fn extract_envelope_payload(records: &OtapMetricRecords, expected_type: &str) -> Vec<u8> {
-    let attrs = &records.attributes;
-    let key_col = attrs
-        .column_by_name(ATTR_KEY_COL)
-        .expect("attr key column")
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("key Utf8");
-    let bytes_col = attrs
-        .column_by_name(ATTR_BYTES_COL)
-        .expect("attr bytes column")
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .expect("bytes Binary");
-    let str_col = attrs
-        .column_by_name(ATTR_STR_COL)
-        .expect("attr str column")
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("str Utf8");
-    let parent_col = attrs
-        .column_by_name(PARENT_ID_COL)
-        .expect("attr parent_id column")
-        .as_any()
-        .downcast_ref::<UInt32Array>()
-        .expect("parent_id UInt32");
-
-    // Pair parent_id with envelope payload + sketch_type by walking
-    // attribute rows and grouping by parent_id.
-    let mut payload_by_parent: std::collections::BTreeMap<u32, Vec<u8>> = Default::default();
-    let mut type_by_parent: std::collections::BTreeMap<u32, String> = Default::default();
-    for row in 0..attrs.num_rows() {
-        let pid = parent_col.value(row);
-        let key = key_col.value(row);
-        match key {
-            ATTR_ENVELOPE if !bytes_col.is_null(row) => {
-                payload_by_parent.insert(pid, bytes_col.value(row).to_vec());
-            }
-            ATTR_SKETCH_TYPE if !str_col.is_null(row) => {
-                type_by_parent.insert(pid, str_col.value(row).to_string());
-            }
-            _ => {}
-        }
+/// Decode every emitted [`SketchStreamBatch`] through one shared
+/// [`SeriesDictionaryDecoder`], in order — matching the
+/// continuous-stream contract `docs/data_model.md` assumes (a `RECORD`
+/// row past the first window carries no `metric`/labels of its own,
+/// only a `series_id` referencing a `DICTIONARY` row an earlier batch
+/// in this same sequence carried).
+fn decode_all(batches: &[SketchStreamBatch]) -> Vec<SketchEnvelope> {
+    let mut decoder = SeriesDictionaryDecoder::new();
+    let mut out = Vec::new();
+    for batch in batches {
+        out.extend(decoder.decode(batch).expect("decode stream batch"));
     }
-    let mut matched: Vec<Vec<u8>> = payload_by_parent
-        .into_iter()
-        .filter_map(|(pid, bytes)| {
-            type_by_parent
-                .get(&pid)
-                .filter(|t| t.as_str() == expected_type)
-                .map(|_| bytes)
-        })
+    out
+}
+
+/// Finds the one envelope of `expected_type` among `envelopes` and
+/// returns its payload bytes; panics if not exactly one is found.
+fn extract_envelope_payload(envelopes: &[SketchEnvelope], expected_type: &str) -> Vec<u8> {
+    let expected = match expected_type {
+        "DDSketch" => SketchType::DDSketch,
+        "KLLSketch" => SketchType::KLLSketch,
+        "HLLSketch" => SketchType::HLLSketch,
+        "CountSketch" => SketchType::CountSketch,
+        "CountMinSketch" => SketchType::CountMinSketch,
+        other => panic!("unknown sketch type in test helper: {other}"),
+    };
+    let mut matched: Vec<Vec<u8>> = envelopes
+        .iter()
+        .filter(|e| e.sketch_type == expected && !e.payload.is_empty())
+        .map(|e| e.payload.clone())
         .collect();
     assert_eq!(
         matched.len(),
@@ -184,39 +156,15 @@ fn extract_envelope_payload(records: &OtapMetricRecords, expected_type: &str) ->
     matched.remove(0)
 }
 
-/// Assert the metrics-side schema of the emitted records does NOT
-/// carry any `_asap_*` top-level columns — this is the Strategy-B
-/// attribute-lift contract. OTAP's strict validator
-/// (`crates/pdata/src/schema/payloads.rs::check_match`) rejects
-/// extension columns, so the lift step on emit must remove them
-/// from the metrics batch.
-fn assert_no_strategy_b_top_level_columns(records: &OtapMetricRecords) {
-    for name in [
-        ATTR_ENVELOPE,
-        ATTR_SKETCH_TYPE,
-        ATTR_AGG_ID,
-        ATTR_SCHEMA_VERSION,
-        ATTR_WINDOW_START_MS,
-        ATTR_WINDOW_END_MS,
-        ATTR_ENCODING,
-    ] {
-        assert!(
-            records.metrics.column_by_name(name).is_none(),
-            "metrics batch must NOT carry top-level column {name}"
-        );
-    }
-    // The lift step adds parent_id; sanity-check it is present.
-    assert!(records.metrics.column_by_name(PARENT_ID_COL).is_some());
-}
-
 /// Run a full `Start → N inputs → Shutdown → drain` cycle for one
-/// sketch type. Returns the emitted records batch (post-lift) so
-/// the per-sketch test can introspect the envelope payload.
+/// sketch type. Returns the emitted `SketchStreamBatch`es so the
+/// per-sketch test can decode them (via [`decode_all`]) and introspect
+/// the envelope payload.
 async fn run_lifecycle(
     sketch_type: &str,
     metric: &str,
     inputs: &[(f64, &str)],
-) -> Vec<OtapMetricRecords> {
+) -> Vec<SketchStreamBatch> {
     let cfg = PluginConfig {
         sketch_type: sketch_type.into(),
         // Long enough that the natural ticker doesn't fire during
@@ -257,9 +205,8 @@ async fn lifecycle_ddsketch_emits_envelope_with_correct_sketch_type() {
     )
     .await;
     assert!(!records.is_empty(), "no records emitted on drain");
-    let last = records.last().expect("at least one batch");
-    assert_no_strategy_b_top_level_columns(last);
-    let payload = extract_envelope_payload(last, "DDSketch");
+    let envelopes = decode_all(&records);
+    let payload = extract_envelope_payload(&envelopes, "DDSketch");
     assert!(!payload.is_empty(), "DDSketch payload must not be empty");
 }
 
@@ -271,9 +218,8 @@ async fn lifecycle_kll_emits_envelope_with_correct_sketch_type() {
         &[(10.0, "h1"), (20.0, "h1"), (30.0, "h1")],
     )
     .await;
-    let last = records.last().expect("at least one batch");
-    assert_no_strategy_b_top_level_columns(last);
-    let payload = extract_envelope_payload(last, "KLLSketch");
+    let envelopes = decode_all(&records);
+    let payload = extract_envelope_payload(&envelopes, "KLLSketch");
     assert!(!payload.is_empty());
 }
 
@@ -289,9 +235,8 @@ async fn lifecycle_hll_emits_envelope_with_correct_sketch_type() {
         &[(1.0, "h1"), (2.0, "h1"), (3.0, "h1"), (4.0, "h1")],
     )
     .await;
-    let last = records.last().expect("at least one batch");
-    assert_no_strategy_b_top_level_columns(last);
-    let payload = extract_envelope_payload(last, "HLLSketch");
+    let envelopes = decode_all(&records);
+    let payload = extract_envelope_payload(&envelopes, "HLLSketch");
     assert!(!payload.is_empty());
 }
 
@@ -306,9 +251,8 @@ async fn lifecycle_countsketch_emits_envelope_with_correct_sketch_type() {
         &[(1.0, "h1"), (1.0, "h1"), (1.0, "h1"), (1.0, "h1")],
     )
     .await;
-    let last = records.last().expect("at least one batch");
-    assert_no_strategy_b_top_level_columns(last);
-    let payload = extract_envelope_payload(last, "CountSketch");
+    let envelopes = decode_all(&records);
+    let payload = extract_envelope_payload(&envelopes, "CountSketch");
     assert!(!payload.is_empty());
 }
 
@@ -326,9 +270,8 @@ async fn lifecycle_countminsketch_emits_envelope_with_correct_sketch_type() {
         &[(1.0, "h1"), (1.0, "h1"), (1.0, "h1"), (1.0, "h1")],
     )
     .await;
-    let last = records.last().expect("at least one batch");
-    assert_no_strategy_b_top_level_columns(last);
-    let payload = extract_envelope_payload(last, "CountMinSketch");
+    let envelopes = decode_all(&records);
+    let payload = extract_envelope_payload(&envelopes, "CountMinSketch");
     assert!(
         !payload.is_empty(),
         "CountMinSketch payload must not be empty"
@@ -347,8 +290,9 @@ async fn drain_flushes_in_flight_observations_before_window_boundary() {
         &[(1.0, "h1"), (2.0, "h1"), (3.0, "h1"), (4.0, "h1")],
     )
     .await;
-    let last = records.last().expect("drain must emit at least one batch");
-    let payload = extract_envelope_payload(last, "DDSketch");
+    assert!(!records.is_empty(), "drain must emit at least one batch");
+    let envelopes = decode_all(&records);
+    let payload = extract_envelope_payload(&envelopes, "DDSketch");
     assert!(!payload.is_empty());
 }
 
@@ -452,17 +396,13 @@ async fn control_channel_plan_change_acks_after_apply() {
 
     handle.shutdown().await.expect("shutdown");
     let records = drain_emit(&mut emit_rx).await;
-    let last = records.last().expect("drain emit");
-    // Verify the metric_name column reflects the applied plan.
-    let metric_col = last
-        .metrics
-        .column_by_name(COLUMN_METRIC)
-        .expect("metric col")
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("Utf8");
+    assert!(!records.is_empty(), "drain emit");
+    // Verify every decoded envelope's metric_name reflects the applied
+    // plan (sourced from DICTIONARY.metric, not repeated per RECORD).
+    let envelopes = decode_all(&records);
+    assert!(!envelopes.is_empty(), "drain emit");
     assert!(
-        (0..metric_col.len()).all(|i| !metric_col.is_null(i) && metric_col.value(i) == "after"),
+        envelopes.iter().all(|e| e.metric_name == "after"),
         "post-plan-change emit should carry metric_name=after"
     );
 }
