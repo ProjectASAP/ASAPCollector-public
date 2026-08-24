@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use asap_precompute_rs::envelope::SketchEnvelope;
 use asap_precompute_rs::otap::config::PluginConfig;
-use asap_precompute_rs::otap::wire::recv_stream_batch;
+use asap_precompute_rs::otap::wire::WireReader;
 use asap_precompute_rs::otap::{
     AsapSketchesPlugin, SeriesDictionaryDecoder, SketchStreamBatch, StartOptions,
 };
@@ -48,8 +48,13 @@ async fn main() {
     // Stream<Item = SketchStreamBatch> start_from_envelopes wants.
     let (batch_tx, batch_rx) = mpsc::unbounded_channel::<SketchStreamBatch>();
     let socket_task = tokio::spawn(async move {
+        // One WireReader for the whole connection, matching the
+        // producer's one WireWriter — its retained per-role IPC state
+        // is what lets a later window's delta (schema/dictionary/
+        // labels genuinely absent) still resolve correctly.
+        let mut wire_reader = WireReader::new();
         loop {
-            match recv_stream_batch(&mut socket).await {
+            match wire_reader.recv(&mut socket).await {
                 Ok(Some(batch)) => {
                     println!(
                         "[receiver] received over the wire: schema={} dictionary={} labels={} record={} row(s)",

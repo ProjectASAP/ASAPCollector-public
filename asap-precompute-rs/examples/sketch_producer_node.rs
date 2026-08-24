@@ -38,7 +38,7 @@ use asap_precompute_rs::otap::records::{
     OtapMetricRecords, ATTR_BATCH_BYTES, ATTR_BATCH_INT, ATTR_BATCH_KEY, ATTR_BATCH_PARENT_ID,
     ATTR_BATCH_STR,
 };
-use asap_precompute_rs::otap::wire::send_stream_batch;
+use asap_precompute_rs::otap::wire::WireWriter;
 use asap_precompute_rs::otap::{
     AsapSketchesPlugin, StartOptions, COLUMN_METRIC, COLUMN_TIME_UNIX_NANO, COLUMN_VALUE,
 };
@@ -105,8 +105,12 @@ async fn main() {
     );
 
     // Forward every emitted SketchStreamBatch over the socket as it
-    // arrives, concurrently with the feed task still running.
+    // arrives, concurrently with the feed task still running. One
+    // WireWriter for the whole connection: its ongoing per-role Arrow
+    // IPC streams mean each role's Schema message goes out on window
+    // 0 only, not re-sent every window.
     let forward_task = tokio::spawn(async move {
+        let mut wire_writer = WireWriter::new();
         let mut window_idx = 0;
         while let Some(batch) = emit_rx.recv().await {
             println!(
@@ -116,7 +120,8 @@ async fn main() {
                 batch.labels.num_rows(),
                 batch.record.num_rows(),
             );
-            send_stream_batch(&mut socket, &batch)
+            wire_writer
+                .send(&mut socket, &batch)
                 .await
                 .expect("send over socket");
             window_idx += 1;
