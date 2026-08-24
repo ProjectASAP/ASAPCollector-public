@@ -25,36 +25,32 @@
 //!
 //! # One ongoing IPC stream per role, per connection
 //!
-//! [`WireWriter`]/[`WireReader`] hold one [`arrow_ipc::writer::StreamWriter`]
-//! / one accumulated-bytes reader per role (schema, dictionary, labels,
-//! record) for the whole life of a connection, rather than starting a
-//! fresh self-contained IPC stream every window. Concretely: a role's
-//! Arrow IPC **Schema message** goes out exactly once per connection —
-//! the first `WireWriter::send` call establishes it via `try_new`, and
-//! every later call appends only a new RecordBatch message to that
-//! same ongoing stream. `WireReader` mirrors this: it accumulates each
-//! role's bytes across the connection and re-derives newly-available
-//! batches from that retained state, rather than re-parsing a
-//! standalone stream per window.
+//! [`WireWriter`]/[`WireReader`] are this module's one send/receive
+//! API — there is deliberately no separate one-shot alternative. Each
+//! holds one [`arrow_ipc::writer::StreamWriter`] / one accumulated-
+//! bytes reader per role (schema, dictionary, labels, record) for the
+//! whole life of a connection, rather than starting a fresh self-
+//! contained IPC stream every window: a role's Arrow IPC **Schema
+//! message** goes out exactly once per connection — the first
+//! [`WireWriter::send`] call establishes it via `try_new`, and every
+//! later call appends only a new RecordBatch message to that same
+//! ongoing stream. [`WireReader`] mirrors this on the receive side: it
+//! accumulates each role's bytes across the connection and re-derives
+//! newly-available batches from that retained state.
 //!
-//! This is the fix for a real cost the previous one-shot-stream-per-
-//! window design had: even a genuinely empty (0-row) sub-batch still
-//! paid a full Arrow IPC Schema message every window under that
-//! design, on top of whatever [`crate::otap::dictionary::SeriesDictionary`]
-//! itself already dedupes at the row level. It also means that if any
-//! role's columns become Arrow-dictionary-encoded in the future (per
-//! `docs/data_model.md`'s closing "Open design question" about IPC
-//! statefulness), that economics holds for the connection's whole
-//! lifetime for free — Arrow's own dictionary-batch mechanism, not a
-//! bespoke ASAP one.
-//!
-//! [`encode_stream_batch`]/[`decode_stream_batch`] remain as pure,
-//! session-independent one-shot codecs — useful for framing a single
-//! `SketchStreamBatch` on its own (e.g. writing one to a file, or a
-//! single-message exchange with no ongoing connection to amortize
-//! schema cost over). [`WireWriter`]/[`WireReader`] are the connection-
-//! oriented API and are what `send_stream_batch`/`recv_stream_batch`
-//! used to be before this module gained persistent-connection support.
+//! This module used to also offer a pure, session-independent one-shot
+//! codec (`encode_stream_batch`/`decode_stream_batch`,
+//! `send_stream_batch`/`recv_stream_batch`) alongside this
+//! persistent-connection API. It's gone, on purpose: keeping two ways
+//! to move a `SketchStreamBatch` over the wire — one that pays a full
+//! Arrow IPC Schema message every window, one that doesn't — meant
+//! every caller had to know which one actually delivered the
+//! dictionary economics this whole module exists for, and a genuinely
+//! empty (0-row) sub-batch still paid that Schema-message cost every
+//! window under the one-shot path even though
+//! [`crate::otap::dictionary::SeriesDictionary`] had already reduced
+//! its row count to zero. One path, and it's the one with the real
+//! economics.
 
 use std::io;
 
@@ -65,18 +61,18 @@ use tokio::net::TcpStream;
 
 use super::dictionary::SketchStreamBatch;
 
-/// Hard cap [`WireReader::recv`] (and [`recv_stream_batch`]) applies
-/// to the untrusted `total_len` prefix **before** allocating a buffer
-/// for it. Not a wire-format constraint (the framing itself allows up
-/// to `u32::MAX`, ~4 GiB) — without this cap, a malformed or hostile
-/// peer's 4-byte length prefix alone could force an allocation of up
-/// to ~4 GiB before a single content byte is validated, a trivial
-/// single-connection memory-exhaustion vector against any node acting
-/// as a receiver. Chosen well above any single-window
-/// `SketchStreamBatch` this crate emits today.
+/// Hard cap [`WireReader::recv`] applies to the untrusted `total_len`
+/// prefix **before** allocating a buffer for it. Not a wire-format
+/// constraint (the framing itself allows up to `u32::MAX`, ~4 GiB) —
+/// without this cap, a malformed or hostile peer's 4-byte length
+/// prefix alone could force an allocation of up to ~4 GiB before a
+/// single content byte is validated, a trivial single-connection
+/// memory-exhaustion vector against any node acting as a receiver.
+/// Chosen well above any single-window `SketchStreamBatch` this crate
+/// emits today.
 pub const MAX_FRAME_LEN: usize = 256 * 1024 * 1024; // 256 MiB
 
-/// Failure modes for this module's encode/decode/send/recv surface.
+/// Failure modes for [`WireWriter::send`] / [`WireReader::recv`].
 #[derive(Debug, Error)]
 pub enum WireError {
     /// Arrow IPC encode/decode failed (malformed batch, schema
@@ -84,10 +80,12 @@ pub enum WireError {
     #[error("otap wire: arrow ipc error: {0}")]
     Arrow(#[from] arrow_schema::ArrowError),
 
-    /// A sub-stream decoded to zero record batches (`StreamReader`
-    /// yielded nothing) — a well-formed IPC stream always carries
-    /// exactly one, even for zero rows.
-    #[error("otap wire: sub-batch {which:?} decoded no record batches")]
+    /// A role's retained IPC state didn't yield a new batch after
+    /// ingesting this frame's delta for it — a well-formed connection
+    /// always has exactly one new RecordBatch message per role per
+    /// `WireWriter::send` call, so this signals a genuine desync with
+    /// the peer's `WireWriter` state.
+    #[error("otap wire: sub-batch {which:?} had no new record batch this frame")]
     EmptyRecordBatch {
         /// Which of the four sub-batches was empty.
         which: &'static str,
@@ -122,68 +120,9 @@ pub enum WireError {
     },
 }
 
-/// Serializes one [`RecordBatch`] as a self-contained Arrow IPC
-/// stream (schema + one record batch + EOS).
-fn write_ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>, WireError> {
-    let mut buf: Vec<u8> = Vec::new();
-    {
-        let mut writer = arrow_ipc::writer::StreamWriter::try_new(&mut buf, &batch.schema())?;
-        writer.write(batch)?;
-        writer.finish()?;
-    }
-    Ok(buf)
-}
-
-/// Deserializes one [`RecordBatch`] from bytes written by
-/// [`write_ipc_bytes`]. `which` names the sub-batch for error
-/// messages only.
-fn read_ipc_bytes(bytes: &[u8], which: &'static str) -> Result<RecordBatch, WireError> {
-    let mut reader = arrow_ipc::reader::StreamReader::try_new(bytes, None)?;
-    match reader.next() {
-        Some(batch) => Ok(batch?),
-        None => Err(WireError::EmptyRecordBatch { which }),
-    }
-}
-
-/// Serializes a whole [`SketchStreamBatch`] into one length-prefixed
-/// frame, each sub-batch as its own self-contained one-shot IPC
-/// stream — see the module doc for the exact byte layout and for why
-/// [`WireWriter`] is almost always the better choice for anything with
-/// an ongoing connection to amortize schema cost over. Does *not*
-/// include the leading `total_len` prefix; that's added by
-/// [`send_stream_batch`] (or by a caller framing its own transport,
-/// e.g. writing this to a file).
-pub fn encode_stream_batch(batch: &SketchStreamBatch) -> Result<Vec<u8>, WireError> {
-    let parts = [
-        write_ipc_bytes(&batch.schema)?,
-        write_ipc_bytes(&batch.dictionary)?,
-        write_ipc_bytes(&batch.labels)?,
-        write_ipc_bytes(&batch.record)?,
-    ];
-    frame_parts(&parts)
-}
-
-/// Inverse of [`encode_stream_batch`]: reconstructs a
-/// [`SketchStreamBatch`] from a frame's body bytes (i.e. everything
-/// after the leading `total_len` prefix, if any).
-pub fn decode_stream_batch(bytes: &[u8]) -> Result<SketchStreamBatch, WireError> {
-    let names = ["schema", "dictionary", "labels", "record"];
-    let mut parts: Vec<RecordBatch> = Vec::with_capacity(4);
-    for (part, which) in unframe_parts(bytes, &names)? {
-        parts.push(read_ipc_bytes(part, which)?);
-    }
-    let mut parts = parts.into_iter();
-    Ok(SketchStreamBatch {
-        schema: parts.next().expect("schema part"),
-        dictionary: parts.next().expect("dictionary part"),
-        labels: parts.next().expect("labels part"),
-        record: parts.next().expect("record part"),
-    })
-}
-
 /// Length-prefixes each of `parts` back to back (no leading
-/// `total_len` — callers add that at their own framing layer).
-/// Shared by [`encode_stream_batch`] and [`WireWriter::send`].
+/// `total_len` — [`WireWriter::send`] adds that at its own framing
+/// layer).
 fn frame_parts(parts: &[Vec<u8>]) -> Result<Vec<u8>, WireError> {
     let mut out = Vec::with_capacity(parts.iter().map(|p| p.len() + 4).sum());
     for part in parts {
@@ -203,7 +142,7 @@ fn frame_parts(parts: &[Vec<u8>]) -> Result<Vec<u8>, WireError> {
 
 /// Inverse of [`frame_parts`]: splits `bytes` into `names.len()`
 /// length-prefixed slices, pairing each with its role name for error
-/// messages. Shared by [`decode_stream_batch`] and [`WireReader::recv`].
+/// messages. Used by [`WireReader::recv`].
 fn unframe_parts<'a>(
     bytes: &'a [u8],
     names: &[&'static str],
@@ -228,32 +167,6 @@ fn unframe_parts<'a>(
         cursor = rest;
     }
     Ok(out)
-}
-
-/// Sends one [`SketchStreamBatch`] over `stream` as a single one-shot
-/// frame (each sub-batch its own self-contained IPC stream), with a
-/// leading big-endian `u32` total length. Prefer [`WireWriter`] for an
-/// ongoing connection — this pays the Arrow IPC Schema-message cost on
-/// every call, which [`WireWriter`] pays exactly once.
-pub async fn send_stream_batch(
-    stream: &mut TcpStream,
-    batch: &SketchStreamBatch,
-) -> Result<(), WireError> {
-    let body = encode_stream_batch(batch)?;
-    write_frame(stream, &body).await
-}
-
-/// Reads one [`SketchStreamBatch`] previously written by
-/// [`send_stream_batch`]. Returns `Ok(None)` on a clean EOF at a
-/// frame boundary (the sender closed the connection after its last
-/// batch) rather than an error.
-pub async fn recv_stream_batch(
-    stream: &mut TcpStream,
-) -> Result<Option<SketchStreamBatch>, WireError> {
-    match read_frame(stream).await? {
-        None => Ok(None),
-        Some(body) => Ok(Some(decode_stream_batch(&body)?)),
-    }
 }
 
 async fn write_frame(stream: &mut TcpStream, body: &[u8]) -> Result<(), WireError> {
@@ -310,10 +223,6 @@ async fn read_exact_or_eof(stream: &mut TcpStream, buf: &mut [u8]) -> Result<boo
     }
     Ok(true)
 }
-
-// ============================================================================
-// Persistent-connection API: WireWriter / WireReader
-// ============================================================================
 
 /// One role's (schema/dictionary/labels/record) ongoing Arrow IPC
 /// stream on the send side. `None` until the first `write_delta` call
@@ -543,6 +452,7 @@ mod tests {
     use crate::envelope::{Encoding, SketchEnvelope, SketchType};
     use crate::observation::KeyValue;
     use crate::otap::dictionary::{SeriesDictionary, SeriesDictionaryDecoder};
+    use tokio::net::{TcpListener, TcpStream};
 
     fn envelope() -> SketchEnvelope {
         SketchEnvelope {
@@ -563,30 +473,51 @@ mod tests {
         }
     }
 
-    #[test]
-    fn encode_decode_round_trips_a_populated_batch() {
+    /// Spawns a loopback listener and returns (client stream,
+    /// accept-side server task handle) — shared setup for every test
+    /// below.
+    async fn loopback() -> (TcpStream, TcpListener) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let client = TcpStream::connect(addr).await.expect("connect");
+        (client, listener)
+    }
+
+    #[tokio::test]
+    async fn wire_writer_reader_round_trips_a_populated_batch() {
         let mut dict = SeriesDictionary::new();
         let env = envelope();
         let batch = dict
             .encode(std::slice::from_ref(&env), None)
             .expect("encode");
 
-        let bytes = encode_stream_batch(&batch).expect("wire encode");
-        let decoded_batch = decode_stream_batch(&bytes).expect("wire decode");
+        let (mut client, listener) = loopback().await;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            WireReader::new()
+                .recv(&mut socket)
+                .await
+                .expect("recv")
+                .expect("Some(batch)")
+        });
 
-        assert_eq!(decoded_batch.schema.num_rows(), batch.schema.num_rows());
-        assert_eq!(
-            decoded_batch.dictionary.num_rows(),
-            batch.dictionary.num_rows()
-        );
-        assert_eq!(decoded_batch.labels.num_rows(), batch.labels.num_rows());
-        assert_eq!(decoded_batch.record.num_rows(), batch.record.num_rows());
+        WireWriter::new()
+            .send(&mut client, &batch)
+            .await
+            .expect("send");
+        drop(client); // signal EOF after the one frame.
+
+        let received = server.await.expect("server task");
+        assert_eq!(received.schema.num_rows(), batch.schema.num_rows());
+        assert_eq!(received.dictionary.num_rows(), batch.dictionary.num_rows());
+        assert_eq!(received.labels.num_rows(), batch.labels.num_rows());
+        assert_eq!(received.record.num_rows(), batch.record.num_rows());
 
         // The whole point: joining the IPC-round-tripped batch back
         // through SeriesDictionaryDecoder reconstructs the original
         // envelope exactly.
         let mut decoder = SeriesDictionaryDecoder::new();
-        let out = decoder.decode(&decoded_batch).expect("dictionary decode");
+        let out = decoder.decode(&received).expect("dictionary decode");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].payload, env.payload);
         assert_eq!(out[0].labels, env.labels);
@@ -594,113 +525,42 @@ mod tests {
         assert_eq!(out[0].sketch_type, env.sketch_type);
     }
 
-    #[test]
-    fn encode_decode_round_trips_an_empty_batch() {
+    #[tokio::test]
+    async fn wire_writer_reader_round_trips_an_empty_batch() {
         let mut dict = SeriesDictionary::new();
         let batch = dict.encode(&[], None).expect("encode empty");
-        let bytes = encode_stream_batch(&batch).expect("wire encode");
-        let decoded = decode_stream_batch(&bytes).expect("wire decode");
-        assert!(decoded.schema.num_rows() == 0);
-        assert!(decoded.dictionary.num_rows() == 0);
-        assert!(decoded.labels.num_rows() == 0);
-        assert!(decoded.record.num_rows() == 0);
-    }
 
-    #[test]
-    fn encode_decode_round_trips_repeat_window_dictionary_free_batch() {
-        // The batch that matters most: window 2+ for an
-        // already-known series, where schema/dictionary/labels are
-        // genuinely empty and only `record` carries a row.
-        let mut dict = SeriesDictionary::new();
-        let env1 = envelope();
-        let _ = dict
-            .encode(std::slice::from_ref(&env1), None)
-            .expect("window 1");
-        let env2 = SketchEnvelope {
-            window_start_ms: 11_000,
-            window_end_ms: 21_000,
-            payload: vec![9, 9, 9],
-            ..envelope()
-        };
-        let batch2 = dict
-            .encode(std::slice::from_ref(&env2), None)
-            .expect("window 2");
-        assert_eq!(batch2.schema.num_rows(), 0);
-        assert_eq!(batch2.dictionary.num_rows(), 0);
-        assert_eq!(batch2.labels.num_rows(), 0);
-        assert_eq!(batch2.record.num_rows(), 1);
-
-        let bytes = encode_stream_batch(&batch2).expect("wire encode");
-        let decoded_batch = decode_stream_batch(&bytes).expect("wire decode");
-
-        let mut decoder = SeriesDictionaryDecoder::new();
-        // Must ingest window 1 first — this decoded batch alone has
-        // no DICTIONARY entry to resolve series_id 0 against.
-        let bytes1 = encode_stream_batch(&dict_only_window1(&env1)).expect("encode w1");
-        let decoded1 = decode_stream_batch(&bytes1).expect("decode w1");
-        decoder.decode(&decoded1).expect("decode w1 into decoder");
-
-        let out = decoder.decode(&decoded_batch).expect("decode w2");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].payload, env2.payload);
-        assert_eq!(out[0].window_start_ms, 11_000);
-        assert_eq!(out[0].window_end_ms, 21_000);
-    }
-
-    /// Helper for the test above: re-derives window 1's batch from a
-    /// fresh dictionary so it can be fed to a fresh decoder
-    /// independently of the outer test's `dict` state.
-    fn dict_only_window1(env: &SketchEnvelope) -> SketchStreamBatch {
-        let mut dict = SeriesDictionary::new();
-        dict.encode(std::slice::from_ref(env), None)
-            .expect("encode")
-    }
-
-    #[tokio::test]
-    async fn send_recv_round_trips_over_a_real_tcp_loopback_socket() {
-        use tokio::net::{TcpListener, TcpStream};
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("local_addr");
-
-        let mut dict = SeriesDictionary::new();
-        let env = envelope();
-        let batch = dict
-            .encode(std::slice::from_ref(&env), None)
-            .expect("encode");
-
+        let (mut client, listener) = loopback().await;
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            recv_stream_batch(&mut socket)
+            WireReader::new()
+                .recv(&mut socket)
                 .await
                 .expect("recv")
                 .expect("Some(batch)")
         });
 
-        let mut client = TcpStream::connect(addr).await.expect("connect");
-        send_stream_batch(&mut client, &batch).await.expect("send");
-        drop(client); // signal EOF after the one frame.
+        WireWriter::new()
+            .send(&mut client, &batch)
+            .await
+            .expect("send");
+        drop(client);
 
         let received = server.await.expect("server task");
-        let mut decoder = SeriesDictionaryDecoder::new();
-        let out = decoder.decode(&received).expect("decode");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].payload, env.payload);
+        assert_eq!(received.schema.num_rows(), 0);
+        assert_eq!(received.dictionary.num_rows(), 0);
+        assert_eq!(received.labels.num_rows(), 0);
+        assert_eq!(received.record.num_rows(), 0);
     }
 
     #[tokio::test]
     async fn recv_returns_none_on_clean_eof_between_frames() {
-        use tokio::net::{TcpListener, TcpStream};
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("local_addr");
-
+        let (client, listener) = loopback().await;
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            recv_stream_batch(&mut socket).await
+            WireReader::new().recv(&mut socket).await
         });
 
-        let client = TcpStream::connect(addr).await.expect("connect");
         drop(client); // close immediately, no frames sent.
 
         let result = server.await.expect("server task").expect("no error");
@@ -713,11 +573,6 @@ mod tests {
         // windows for the same series over one connection and get
         // them all back correctly, including the repeat-window case
         // where schema/dictionary/labels are genuinely empty.
-        use tokio::net::{TcpListener, TcpStream};
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let addr = listener.local_addr().expect("local_addr");
-
         let mut dict = SeriesDictionary::new();
         let env1 = envelope();
         let batch1 = dict
@@ -738,6 +593,7 @@ mod tests {
         assert_eq!(batch2.dictionary.num_rows(), 0);
         assert_eq!(batch2.labels.num_rows(), 0);
 
+        let (mut client, listener) = loopback().await;
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
             let mut reader = WireReader::new();
@@ -748,7 +604,6 @@ mod tests {
             out
         });
 
-        let mut client = TcpStream::connect(addr).await.expect("connect");
         let mut writer = WireWriter::new();
         writer.send(&mut client, &batch1).await.expect("send w1");
         writer.send(&mut client, &batch2).await.expect("send w2");
