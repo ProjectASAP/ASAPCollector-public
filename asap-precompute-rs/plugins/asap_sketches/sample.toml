@@ -4,9 +4,8 @@
 # plugin is parameterized by `sketch_type`; multi-sketch deployments
 # declare multiple blocks with different `id` + `sketch_type` values.
 #
-# Phase C (asap-precompute-rs/src/otap/) implements the lifecycle
-# around this config block; Phase D will wire the TOML loader once the
-# OTAP submodule binding lands.
+# Registered under urn:asap:processor:asap_sketches
+# (asap-precompute-rs/src/otap/processor.rs, `otap-engine` feature).
 
 [[pipelines.metrics.processors]]
 id     = "asap_ddsketch"
@@ -21,13 +20,11 @@ plugin = "asap_sketches"
   ##   "countminsketch"   (frequency, biased upward)
   sketch_type = "ddsketch"
 
-  ## Window size. Rust duration string parsed via OTAP's TOML
-  ## convention; passed verbatim into `PrecomputeConfig::window`.
+  ## Window size. Rust duration string, parsed via humantime;
+  ## passed verbatim into `PrecomputeConfig::window`.
   window_size = "10s"
 
-  ## Output metric name stamped onto every emitted envelope. The
-  ## codec uses this as the stable `metric` column of every
-  ## emitted RecordBatch.
+  ## Output metric name stamped onto every emitted envelope.
   output_metric_name = "http_request_duration_ms"
 
   ## Sketch-specific tuning knobs. Only the keys relevant to
@@ -39,10 +36,12 @@ plugin = "asap_sketches"
   # width = 2048             # countsketch / countminsketch — width
   # depth = 4                # countsketch / countminsketch — depth
 
-  ## Bootstrap — controller for plan delivery via the
-  ## `ControlChannel` impl wired in Phase D.
-  ## Sketch-runtime params (sketch_type, window, sketch_params) above
-  ## are also push-overridable from the controller plan; the values
-  ## here are bootstrap defaults used until the first plan arrives.
-  controller_url = "http://controller:8080"
-  agent_id       = "otap-host-01"
+  ## Legacy bootstrap fields — predate the engine's own OpAMP
+  ## controller extension, which now owns instance identification and
+  ## remote-config delivery centrally. Sketch-runtime params
+  ## (sketch_type, window, sketch_params) above are push-overridable
+  ## via NodeControlMsg::Config from that path; these two fields are
+  ## likely deprecation candidates rather than something to configure
+  ## going forward.
+  # controller_url = "http://controller:8080"
+  # agent_id       = "otap-host-01"

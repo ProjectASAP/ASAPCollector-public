@@ -9,11 +9,9 @@
 //!   per-row Strategy-B field.
 //!
 //! The codec **owns no Tokio tasks, no timers, no control-channel
-//! inbox**. The full plugin lifecycle (`Wakeup`-driven flush ticker,
-//! `NodeControlMsg` handling, control-channel poll task, graceful
-//! drain) is **Phase C** and lives in `otap-patch/plugins/asap_sketches/`
-//! once that arrives — kept deliberately separate from the codec to
-//! match the two-layer split.
+//! inbox**. The full `Wakeup`-driven flush ticker / control-channel
+//! poll / graceful-drain lifecycle lives in [`lifecycle::AsapSketchesPlugin`]
+//! — kept deliberately separate from the codec.
 //!
 //! # Schema (v1)
 //!
@@ -80,47 +78,42 @@
 //!   (non-envelope) observation ingestion and for whatever still needs
 //!   OTAP-Metrics-payload compatibility.
 //!
-//! # Phase C — full plugin lifecycle
-//!
-//! Phase B shipped the stateless codec (`decode_batch` /
-//! `encode_batch`) plus a [`StubPlugin`] anchor. Phase C layers the
-//! Tokio-driven plugin lifecycle on top:
+//! # Plugin lifecycle
 //!
 //! - [`config::PluginConfig`] + [`config::resolve`] — high-level
 //!   plugin configuration with 5-sketch `sketch_type` dispatch
 //!   (DDSketch / KLL / HLL / CountSketch / CountMinSketch).
 //! - [`records::OtapMetricRecords`] + [`records::flatten`] /
-//!   [`records::lift`] — local model of the upstream OTAP
-//!   `OtapArrowRecords` family with the bidirectional
-//!   sibling-batch ↔ flat-batch projection that Phase B deferred.
+//!   [`records::lift`] — local, real-OTAP-free model of an
+//!   `OtapArrowRecords`-shaped sibling-batch family, with the
+//!   bidirectional sibling-batch ↔ flat-batch projection. Backs the
+//!   legacy `dictionary`/`wire` transport (below), not `codec`/
+//!   `processor`.
 //! - [`lifecycle::AsapSketchesPlugin`] — Tokio runtime: input task
 //!   consumes the host-supplied stream, `Wakeup`-driven flush
 //!   ticker emits batches, control-channel poll task picks up
 //!   plan changes, graceful drain on shutdown.
 //!
-//! The OTAP submodule wiring (linkme distributed-slice registration,
-//! `build_asap_otap.sh`, `otap-patch/all/mod.rs` patch) is **Phase D**
-//! and is deliberately not touched here. The
-//! Phase C plugin lifecycle is exercised end-to-end via the
-//! `tests/otap_lifecycle.rs` harness.
+//! # The real OTAP node (`codec` / `processor`, `otap-engine` feature)
 //!
-//! # Out of scope (Phase D / E, deliberately deferred)
+//! [`processor::AsapSketchesProcessor`] is the real
+//! `local::Processor<OtapPdata>` node OTAP's engine actually runs,
+//! registered under `urn:asap:processor:asap_sketches` via `linkme`.
+//! [`codec`] is its direct `SketchEnvelope <-> OtapPdata` binding — no
+//! intermediate `RecordBatch` or [`records::OtapMetricRecords`] hop;
+//! see `codec.rs`'s module doc for why. Gated behind the `otap-engine`
+//! Cargo feature, which pulls in the real OTAP Dataflow engine/pdata
+//! crates via a plain git dependency (see `Cargo.toml`) — no manual
+//! staging into a local checkout required, `cargo build --features
+//! otap-engine` just works.
 //!
-//! - `linkme` distributed-slice plugin registration in
-//!   `otap-patch/all/mod.rs`.
-//! - `build_asap_otap.sh`.
-//! - Cross-host envelope parity (Phase E).
-//! - `OtapArrowRecords` binding to the upstream Rust type — Phase D
-//!   wires [`records::OtapMetricRecords`] to the upstream
-//!   `OtapPdata` shape.
-//!
-//! # Stub plugin shell (kept for back-compat with Phase B tests)
+//! # Stub plugin shell (kept for back-compat with early tests)
 //!
 //! [`StubPlugin`] is a no-op lifecycle wrapper that threads
 //! `decode_batch` / `encode_batch` against any
-//! [`crate::precompute::Precompute`]. Phase C's full plugin lives in
-//! [`lifecycle::AsapSketchesPlugin`]; the stub is retained to keep
-//! Phase B's tests passing as a regression backstop.
+//! [`crate::precompute::Precompute`]. [`lifecycle::AsapSketchesPlugin`]
+//! is the full plugin; the stub is retained to keep early tests
+//! passing as a regression backstop.
 
 mod decode;
 mod dictionary;
@@ -132,6 +125,11 @@ pub mod config;
 pub mod lifecycle;
 pub mod records;
 pub mod wire;
+
+#[cfg(feature = "otap-engine")]
+pub mod codec;
+#[cfg(feature = "otap-engine")]
+pub mod processor;
 
 pub use decode::{decode_batch, OtapDecodeError};
 pub use dictionary::{

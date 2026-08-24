@@ -14,9 +14,9 @@
 //! control-channel inbox, and no `linkme` distributed-slice
 //! registration**. The full plugin (Tokio interval-driven flush
 //! ticker, `NodeControlMsg::Wakeup` handling, control-channel poll
-//! task, graceful drain) is **Phase C** in
-//! `otap-patch/plugins/asap_sketches/`. Comments below mark the seams
-//! Phase C will fill in.
+//! task, graceful drain) is [`super::lifecycle::AsapSketchesPlugin`];
+//! the real OTAP node (`linkme` registration included) is
+//! [`super::processor::AsapSketchesProcessor`], `otap-engine` feature.
 
 use std::sync::Mutex;
 
