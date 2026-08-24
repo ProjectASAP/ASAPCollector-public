@@ -7,7 +7,7 @@ license = "MIT"
 
 # asap_sketchlib is a public dependency.
 [dependencies]
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "0a2ac3725f9b6d562f3ed7d9a48c6a1ae0c285e6" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "010457de46ba9ec5574a53476bbe8b4bdb02b965" }
 serde = { version = "1", features = ["derive"] }
 prost = "0.13"
 thiserror = "1"
@@ -15,15 +15,27 @@ thiserror = "1"
 # Apache Arrow is only pulled in by the OTAP codec. Consumers on the
 # row-oriented data model never touch Arrow, so the `otap` feature is
 # non-default to keep their build cheap.
-arrow-array = { version = "53", optional = true }
-arrow-schema = { version = "53", optional = true }
+#
+# Pinned to 58.3 to match the OTAP Dataflow workspace's own pin
+# (rust/otap-dataflow/Cargo.toml as of otel-arrow@3e85c34, 2026-08-24)
+# rather than an independently-chosen version: `RecordBatch` built here
+# must be the literal same type `otap-patch/`'s upstream-facing binding
+# code hands to OTAP's engine, which only holds if both sides resolve
+# to one canonical `arrow-array` version. An older/newer pin here would
+# make that binding a type mismatch even though both are "Arrow".
+arrow-array = { version = "58.3", optional = true }
+arrow-schema = { version = "58.3", optional = true }
+# Only pulled in for otap::wire's Arrow IPC serialization of
+# SketchStreamBatch across a real transport (see docs/data_model.md's
+# "crosses a node or network boundary" framing).
+arrow-ipc = { version = "58.3", optional = true }
 
 # Tokio drives the plugin lifecycle (Stream consumer
 # task + Wakeup-driven flush ticker + control-channel poll task +
-# graceful drain). Only the `rt`, `sync`, `time`, and `macros`
-# sub-features are needed; the full set is pulled in via the `otap`
-# feature gate so default-feature consumers don't pay for it.
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros"], optional = true }
+# graceful drain), plus `otap::wire`'s TCP transport (`net`,
+# `io-util`). The full set is pulled in via the `otap` feature gate so
+# default-feature consumers don't pay for it.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util"], optional = true }
 futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
@@ -32,14 +44,27 @@ serde_json = "1"
 # The full tokio runtime is required for #[tokio::test]-driven
 # lifecycle tests under `tests/otap_*.rs`.
 tokio = { version = "1", features = ["full"] }
+# Only used to adapt an `mpsc::UnboundedReceiver` into a `Stream` for
+# chaining two `AsapSketchesPlugin`s (producer's EmitReceiver ->
+# receiver's start_from_envelopes) in tests and the network-transport
+# examples. The library itself is Stream-source-agnostic.
+tokio-stream = "0.1"
 
 [features]
 default = []
 # Enables the OTAP codec + plugin lifecycle at `crate::otap`
 # (decode_batch / encode_batch over `arrow::RecordBatch`, plus the
 # `AsapSketchesPlugin` Tokio runtime).
-otap = ["dep:arrow-array", "dep:arrow-schema", "dep:tokio", "dep:futures"]
+otap = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tokio", "dep:futures"]
 
 [[example]]
 name = "sketch_pipeline_demo"
+required-features = ["otap"]
+
+[[example]]
+name = "sketch_producer_node"
+required-features = ["otap"]
+
+[[example]]
+name = "sketch_receiver_node"
 required-features = ["otap"]
