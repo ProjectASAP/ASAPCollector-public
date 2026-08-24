@@ -22,9 +22,11 @@ OTAP Dataflow's Arrow-native streaming model as a single unified
 The piece OTAP's runtime actually sees:
 
 - `AsapSketchesProcessor` implements
-  `otap_df_engine::local::processor::Processor<OtapPdata>` — an
+  `otel_arrow_dfe_engine::local::processor::Processor<OtapPdata>` — an
   `async fn process(msg: Message<OtapPdata>, effect_handler)` handling
-  `Message::PData` and `NodeControlMsg::{Wakeup, Config, Shutdown, …}`.
+  `Message::PData` and `NodeControlMsg::{TimerTick, Config, Shutdown, …}`.
+  (Crate prefix `otel-arrow-dfe-*`, not the older `otap-df-*` — upstream
+  renamed these very recently, otel-arrow issue #1848.)
 - Registered via `#[distributed_slice(OTAP_PROCESSOR_FACTORIES)]` under
   the URN `urn:asap:processor:asap_sketches`, with a `ProcessorFactory`
   (`create` + `validate_config` + `WiringContract::UNRESTRICTED`).
@@ -32,10 +34,20 @@ The piece OTAP's runtime actually sees:
   `--validate-and-exit` time (see
   [`otap-patch/plugins/asap_sketches/sample.toml`](./otap-patch/plugins/asap_sketches/sample.toml)).
 
-> Note: this adapter is currently a deliberate **pass-through** — the
-> `OtapPdata ↔ OtapMetricRecords` `From`/`Into` binding is the one seam
-> left to wire (marked Phase D/E in the code). Everything it drives
-> (Layer B) is complete and tested.
+> Note: the `OtapPdata ↔ OtapMetricRecords` binding is now implemented
+> (`otap-patch/all/otap_bridge.rs`) — real OTLP metrics in,
+> sketch/estimate output back out as real OTLP metrics, for the
+> **producer role** (`AsapSketchesPlugin::start_from_envelopes`'s
+> **receiver role** — ingesting another `asap_sketches` node's
+> `SketchStreamBatch` output — isn't covered; that format doesn't fit
+> OTAP's metrics shape). The adapter drives a bare `Precompute`
+> instance directly rather than `AsapSketchesPlugin`'s own Tokio-task
+> lifecycle, whose emit shape (`SketchStreamBatch`, PR #5/#6's
+> dictionary economics) diverged from what this binding needs.
+> **Unverified**: `otap-patch/` has no standalone build in this repo
+> (see Layer A/B split below), so this binding has been checked
+> against upstream source reads, not a compiler — see
+> `otap_bridge.rs`'s module doc for exactly what's confirmed.
 
 **Layer B — the runtime lifecycle + Arrow codec** (`asap-precompute-rs/src/otap/`)
 
@@ -55,7 +67,7 @@ host-neutral edge precompute runtime.
 ```sh
 cd asap-precompute-rs
 cargo build --features otap
-cargo test  --features otap        # 135 tests: runtime + OTAP codec + lifecycle
+cargo test  --features otap        # 156 tests: runtime + OTAP codec + lifecycle
 cargo clippy --all-targets --features otap -- -D warnings
 cargo fmt --check
 ```
@@ -73,9 +85,12 @@ public dependency.
 
 Phases **B** (Arrow codec) and **C** (full 5-sketch plugin lifecycle)
 are complete and tested here. Phase **D** (the `linkme` registration +
-OTAP submodule build wiring) is present as the `otap-patch/` overlay
-with the processor adapter as a pass-through; the `OtapPdata` binding
-and cross-host byte-parity (Phase **E**) are the remaining work.
+OTAP submodule build wiring, plus the `OtapPdata` binding) is present
+as the `otap-patch/` overlay — the producer-role binding is now
+implemented (`otap_bridge.rs`) but **unverified** (no standalone build
+of `otap-patch/` in this repo — see the Layer A note above). The
+receiver-role `OtapPdata` binding and cross-host byte-parity
+(Phase **E**) are the remaining work.
 
 ---
 
