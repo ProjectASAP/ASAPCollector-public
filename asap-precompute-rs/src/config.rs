@@ -152,21 +152,48 @@ pub fn sketch_param_get(params: &SketchParams, key: &str, default: f64) -> f64 {
 pub fn sketch_size_string(sketch_type: SketchType, params: &SketchParams) -> Option<String> {
     match sketch_type {
         SketchType::DDSketch => params.get("relative_accuracy").map(f64::to_string),
-        SketchType::KLLSketch => params.get("k").map(|v| (*v as u64).to_string()),
-        SketchType::HLLSketch => params.get("precision").map(|v| (*v as u64).to_string()),
+        SketchType::KLLSketch => params
+            .get("k")
+            .and_then(|v| as_wire_u64(*v))
+            .map(|v| v.to_string()),
+        SketchType::HLLSketch => params
+            .get("precision")
+            .and_then(|v| as_wire_u64(*v))
+            .map(|v| v.to_string()),
         SketchType::CountSketch => match (params.get("width"), params.get("depth")) {
-            (Some(w), Some(d)) => Some(format!("{} x {}", *w as u64, *d as u64)),
+            (Some(w), Some(d)) => match (as_wire_u64(*w), as_wire_u64(*d)) {
+                (Some(w), Some(d)) => Some(format!("{w} x {d}")),
+                _ => None,
+            },
             _ => match (params.get("epsilon"), params.get("delta")) {
                 (Some(e), Some(d)) => Some(format!("epsilon={e}, delta={d}")),
                 _ => None,
             },
         },
         SketchType::CountMinSketch => match (params.get("rows"), params.get("columns")) {
-            (Some(r), Some(c)) => Some(format!("{} x {}", *r as u64, *c as u64)),
+            (Some(r), Some(c)) => match (as_wire_u64(*r), as_wire_u64(*c)) {
+                (Some(r), Some(c)) => Some(format!("{r} x {c}")),
+                _ => None,
+            },
             _ => None,
         },
         SketchType::Unspecified => None,
     }
+}
+
+/// Converts a sketch-param value to its `u64` wire form, or `None` if
+/// it isn't cleanly representable as one — negative, non-finite, or
+/// carrying a fractional part (e.g. a unit mixup like `k = 0.5`) all
+/// indicate a misconfigured param. Silently truncating (`as u64`)
+/// would report a fabricated, wrong `sketch_size` on the wire instead
+/// (`k = 0.5` truncating to `"0"`); better to omit the field, mirroring
+/// `resolve_hash_seed`'s "omit rather than fabricate" stance for a
+/// malformed input.
+fn as_wire_u64(v: f64) -> Option<u64> {
+    if !v.is_finite() || v < 0.0 || v.fract() != 0.0 {
+        return None;
+    }
+    Some(v as u64)
 }
 
 /// Host-neutral form of today's per-OTel-processor `Config` struct,
