@@ -1331,6 +1331,7 @@ mod tests {
     use super::*;
     use arrow_array::{BinaryArray, Float64Array, StringArray, UInt32Array, UInt64Array};
     use arrow_schema::{DataType, Field, Schema};
+    use otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType;
 
     /// One-row `OtapMetricRecords`: `metric_name` at `value`, one
     /// string attribute (`key` = `value`) and, if `envelope_bytes` is
@@ -1529,5 +1530,55 @@ mod tests {
         let outcome = pdata_to_otap_metric_records(pdata).expect("decode empty");
         assert!(outcome.records.is_none());
         assert_eq!(outcome.skipped_non_scalar, 0);
+    }
+
+    /// This is the fact `mod.rs`'s "There is exactly one transport: the
+    /// pipeline" doc rests on: OTAP's real Arrow encoder
+    /// (`encode_metrics_otap_batch`, which [`otap_metric_records_to_pdata`]
+    /// calls) dictionary-encodes the metric name and every string-valued
+    /// attribute key/value on its own, by construction — this adapter
+    /// doesn't have to ask for it. If this ever regresses upstream (a
+    /// schema change stops using `DataType::Dictionary` for these
+    /// columns), the module doc's rationale for not reinventing
+    /// `SeriesDictionary`'s SCHEMA/DICTIONARY/RECORD tiering on this
+    /// path goes with it — this test exists so that regression is loud,
+    /// not discovered by someone re-deriving it from scratch.
+    #[test]
+    fn real_otap_encoding_dictionary_encodes_metric_name_and_string_attributes() {
+        let records = one_row_records("http_request_duration_ms", 42.5, "path", "/api", None);
+        let pdata = otap_metric_records_to_pdata(&records).expect("encode to real OtapPdata");
+
+        let (_context, payload) = pdata.into_parts();
+        let arrow_records: OtapArrowRecords = payload
+            .try_into_with_default()
+            .expect("payload converts to real OtapArrowRecords");
+
+        let metrics_batch = arrow_records
+            .get(ArrowPayloadType::UnivariateMetrics)
+            .expect("a UnivariateMetrics batch was populated");
+        let metrics_schema = metrics_batch.schema();
+        let name_type = metrics_schema
+            .field_with_name("name")
+            .expect("metrics batch has a name column")
+            .data_type();
+        assert!(
+            matches!(name_type, DataType::Dictionary(_, _)),
+            "expected the metric name column to be dictionary-encoded, got {name_type:?}"
+        );
+
+        let attrs_batch = arrow_records
+            .get(ArrowPayloadType::NumberDpAttrs)
+            .expect("a NumberDpAttrs batch was populated");
+        let attrs_schema = attrs_batch.schema();
+        for column in ["key", "str"] {
+            let field_type = attrs_schema
+                .field_with_name(column)
+                .unwrap_or_else(|_| panic!("attrs batch has a {column} column"))
+                .data_type();
+            assert!(
+                matches!(field_type, DataType::Dictionary(_, _)),
+                "expected attrs column {column:?} to be dictionary-encoded, got {field_type:?}"
+            );
+        }
     }
 }

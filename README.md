@@ -42,33 +42,30 @@ The piece OTAP's runtime actually sees:
 > (`SketchStreamBatch`, PR #5/#6's dictionary economics) diverged from
 > what this binding needs.
 >
-> **Both roles are now wired into real, running OTAP nodes**, both
-> using this same `OtapPdata` encoding:
-> - **Producer role**: `AsapSketchesProcessor` — when its config
->   carries `peer_addr`, `emit_envelopes` forwards each window directly
->   over the wire lane (`otap_wire::OtapWireWriter`, a persistent Arrow
->   IPC stream per TCP connection) to a peer instead of via the generic
->   pipeline hop.
-> - **Receiver role**: `otap_receiver::AsapSketchesReceiver` — a real
->   `local::Receiver<OtapPdata>` node that listens on a TCP address,
->   decodes with `otap_wire::OtapWireReader`, and pushes into the
->   pipeline via `effect_handler.send_message`, registered under
->   `urn:asap:receiver:asap_sketches_wire`.
->
-> (Ingesting another `asap_sketches` node's *legacy*
-> `SketchStreamBatch` output — the older `asap_precompute_rs::otap::wire`
-> format, predating this unification — still isn't covered by either
-> role; see `otap-patch/all/mod.rs`'s module doc, "Scope not covered
-> here".)
+> **There is exactly one transport: the pipeline.** `AsapSketchesProcessor`
+> sends only via `effect_handler.send_message_with_source_node` — an
+> earlier revision also carried a direct-TCP "wire lane"
+> (`otap_wire.rs` + a standalone `AsapSketchesReceiver` node); that's
+> been removed. It turned out to be solving a problem OTAP's real Arrow
+> encoding already solves: the custom wire lane existed to give sketch
+> traffic dictionary/schema-reuse economics
+> (`asap_precompute_rs::otap::dictionary`'s SCHEMA/DICTIONARY/RECORD
+> tiering), but `otap_bridge`'s real `OtapPdata` gets that for free —
+> OTAP's own Arrow encoder dictionary-encodes the metric name and every
+> string-valued attribute key/value by construction. Confirmed against
+> the real workspace and guarded by a permanent test
+> (`otap_bridge.rs`'s
+> `real_otap_encoding_dictionary_encodes_metric_name_and_string_attributes`);
+> see `mod.rs`'s module doc, "There is exactly one transport: the
+> pipeline", for the full rationale and the real schema this produces.
 >
 > **Build/lint/test-verified** against a real `open-telemetry/otel-arrow`
-> checkout (commit `3e85c346`, 2026-08-24), including an end-to-end test
-> of `AsapSketchesReceiver::start()` against a real loopback TCP socket
-> — this repo itself still has no standalone build of `otap-patch/`
-> (see Layer A/B split below), so that verification happened by staging
-> the files into a temporary, separate checkout of the real workspace
-> as a `crates/*` member; see `otap_bridge.rs` / `otap_wire.rs` /
-> `otap_receiver.rs`'s module docs for exactly what that covered.
+> checkout (commit `3e85c346`, 2026-08-24) — this repo itself still has
+> no standalone build of `otap-patch/` (see Layer A/B split below), so
+> that verification happened by staging the files into a temporary,
+> separate checkout of the real workspace as a `crates/*` member; see
+> `otap_bridge.rs`'s module doc "Verification status" for exactly what
+> that covered.
 
 **Layer B — the runtime lifecycle + Arrow codec** (`asap-precompute-rs/src/otap/`)
 
@@ -107,14 +104,14 @@ public dependency.
 Phases **B** (Arrow codec) and **C** (full 5-sketch plugin lifecycle)
 are complete and tested here. Phase **D** (the `linkme` registration +
 OTAP submodule build wiring, plus the `OtapPdata` binding) is present
-as the `otap-patch/` overlay — both the producer role
-(`AsapSketchesProcessor`, `otap_bridge.rs`) and the receiver role
-(`AsapSketchesReceiver`, `otap_receiver.rs`) are now implemented,
-wired into real running OTAP nodes over one unified `OtapPdata`
-encoding (`otap_wire.rs`), and build/lint/test-verified against a real
-OTAP Dataflow workspace checkout — though not by this repo's own build
-(see the Layer A note above). Cross-host byte-parity (Phase **E**) is
-the remaining work.
+as the `otap-patch/` overlay — the producer role (`AsapSketchesProcessor`,
+`otap_bridge.rs`) is implemented and build/lint/test-verified against a
+real OTAP Dataflow workspace checkout, though not by this repo's own
+build (see the Layer A note above). The receiver role — ingesting
+another `asap_sketches` node's *legacy* `SketchStreamBatch` output —
+isn't addressed by this adapter; that format has its own standalone
+example binaries. Cross-host byte-parity (Phase **E**) is the
+remaining work.
 
 ---
 
