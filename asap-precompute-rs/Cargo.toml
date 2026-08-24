@@ -15,12 +15,20 @@ thiserror = "1"
 # Apache Arrow is only pulled in by the OTAP codec. Consumers on the
 # row-oriented data model never touch Arrow, so the `otap` feature is
 # non-default to keep their build cheap.
-arrow-array = { version = "53", optional = true }
-arrow-schema = { version = "53", optional = true }
+#
+# Pinned to 58.3 to match the OTAP Dataflow workspace's own pin
+# (rust/otap-dataflow/Cargo.toml as of otel-arrow@3e85c34, 2026-08-24)
+# rather than an independently-chosen version: `RecordBatch` built here
+# must be the literal same type `otap-patch/`'s upstream-facing binding
+# code hands to OTAP's engine, which only holds if both sides resolve
+# to one canonical `arrow-array` version. An older/newer pin here would
+# make that binding a type mismatch even though both are "Arrow".
+arrow-array = { version = "58.3", optional = true }
+arrow-schema = { version = "58.3", optional = true }
 # Only pulled in for otap::wire's Arrow IPC serialization of
 # SketchStreamBatch across a real transport (see docs/data_model.md's
 # "crosses a node or network boundary" framing).
-arrow-ipc = { version = "53", optional = true }
+arrow-ipc = { version = "58.3", optional = true }
 
 # Tokio drives the plugin lifecycle (Stream consumer
 # task + Wakeup-driven flush ticker + control-channel poll task +
