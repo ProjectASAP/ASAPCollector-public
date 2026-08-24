@@ -46,6 +46,16 @@ use tokio::net::TcpStream;
 
 use super::dictionary::SketchStreamBatch;
 
+/// Hard cap [`recv_stream_batch`] applies to the untrusted `total_len`
+/// prefix **before** allocating a buffer for it. Not a wire-format
+/// constraint (the framing itself allows up to `u32::MAX`, ~4 GiB) —
+/// without this cap, a malformed or hostile peer's 4-byte length
+/// prefix alone could force an allocation of up to ~4 GiB before a
+/// single content byte is validated, a trivial single-connection
+/// memory-exhaustion vector against any node acting as a receiver.
+/// Chosen well above any `SketchStreamBatch` this crate emits today.
+pub const MAX_FRAME_LEN: usize = 256 * 1024 * 1024; // 256 MiB
+
 /// Failure modes for [`encode_stream_batch`] / [`decode_stream_batch`]
 /// / [`send_stream_batch`] / [`recv_stream_batch`].
 #[derive(Debug, Error)]
@@ -77,6 +87,20 @@ pub enum WireError {
     /// Network I/O failed while sending/receiving a frame.
     #[error("otap wire: io error: {0}")]
     Io(#[from] io::Error),
+
+    /// A length prefix (the frame's `total_len`, or a sub-batch's own
+    /// serialized length on encode) exceeded what this module will
+    /// represent/accept — either a hostile/corrupt peer's inflated
+    /// `total_len` ([`recv_stream_batch`]'s [`MAX_FRAME_LEN`] cap), or
+    /// (on encode) a sub-batch too large for the wire format's `u32`
+    /// length-prefix field to represent at all without truncating.
+    #[error("otap wire: frame length {len} exceeds cap of {max} bytes")]
+    FrameTooLarge {
+        /// The length that was rejected.
+        len: usize,
+        /// The cap it exceeded.
+        max: usize,
+    },
 }
 
 /// Serializes one [`RecordBatch`] as a self-contained Arrow IPC
@@ -116,7 +140,15 @@ pub fn encode_stream_batch(batch: &SketchStreamBatch) -> Result<Vec<u8>, WireErr
     ];
     let mut out = Vec::with_capacity(parts.iter().map(|p| p.len() + 4).sum());
     for part in &parts {
-        out.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        // Checked, not `as u32`: a silent truncation here would write
+        // a length prefix smaller than the bytes that actually
+        // follow, desynchronizing every subsequent frame the decoder
+        // reads on this stream.
+        let len = u32::try_from(part.len()).map_err(|_| WireError::FrameTooLarge {
+            len: part.len(),
+            max: u32::MAX as usize,
+        })?;
+        out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(part);
     }
     Ok(out)
@@ -163,7 +195,11 @@ pub async fn send_stream_batch(
     batch: &SketchStreamBatch,
 ) -> Result<(), WireError> {
     let body = encode_stream_batch(batch)?;
-    stream.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    let len = u32::try_from(body.len()).map_err(|_| WireError::FrameTooLarge {
+        len: body.len(),
+        max: u32::MAX as usize,
+    })?;
+    stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&body).await?;
     Ok(())
 }
@@ -180,6 +216,15 @@ pub async fn recv_stream_batch(
         return Ok(None);
     }
     let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_FRAME_LEN {
+        // Reject before allocating — see MAX_FRAME_LEN's doc. A
+        // peer's untrusted length prefix must never itself dictate an
+        // allocation this large.
+        return Err(WireError::FrameTooLarge {
+            len,
+            max: MAX_FRAME_LEN,
+        });
+    }
     let mut body = vec![0u8; len];
     stream.read_exact(&mut body).await?;
     Ok(Some(decode_stream_batch(&body)?))
