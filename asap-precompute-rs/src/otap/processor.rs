@@ -103,6 +103,7 @@ use otel_arrow_dfe_config::node::NodeUserConfig;
 use otel_arrow_dfe_engine::config::ProcessorConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
 use otel_arrow_dfe_engine::control::NodeControlMsg;
+use otel_arrow_dfe_engine::effect_handler::TimerCancelHandle;
 use otel_arrow_dfe_engine::error::Error;
 use otel_arrow_dfe_engine::local::processor as local;
 use otel_arrow_dfe_engine::message::Message;
@@ -192,6 +193,11 @@ impl AsapSketchesUserConfig {
     }
 }
 
+fn requires_precompute_rebuild(current: &PluginConfig, next: &PluginConfig) -> bool {
+    !current.sketch_type.eq_ignore_ascii_case(&next.sketch_type)
+        || current.sketch_params != next.sketch_params
+}
+
 /// `linkme` registration entry — the static the OTAP runtime walks at
 /// startup to populate `OTAP_PIPELINE_FACTORY.processor_factory_map`.
 ///
@@ -241,7 +247,6 @@ pub fn create_asap_sketches_processor(
             }
         })?;
     let plugin_config = user.into_plugin_config()?;
-    let window_size = plugin_config.window_size;
 
     // `from_plugin_config` is pure (no Tokio) — it just validates and
     // resolves. Grab the `Arc<dyn Precompute>` it constructs and
@@ -263,7 +268,7 @@ pub fn create_asap_sketches_processor(
     drop(plugin);
 
     Ok(ProcessorWrapper::local(
-        AsapSketchesProcessor::new(precompute, window_size),
+        AsapSketchesProcessor::new(precompute, plugin_config),
         node,
         node_config,
         processor_config,
@@ -285,12 +290,13 @@ pub fn create_asap_sketches_processor(
 /// pipeline", for why there's no second, direct-TCP transport here.
 pub struct AsapSketchesProcessor {
     precompute: Arc<dyn Precompute>,
+    plugin_config: PluginConfig,
     window_size: Duration,
     /// `effect_handler.start_periodic_timer` is `async` and OTAP has
     /// no dedicated "processor started" hook — armed on the first
     /// `process()` call instead (`Message::PData` or any control
     /// message) rather than at construction time.
-    timer_started: bool,
+    timer: Option<TimerCancelHandle<OtapPdata>>,
     /// `PrecomputeConfigSet::version` for the next `NodeControlMsg::Config`
     /// this processor applies — monotonically increasing, independent
     /// of any external controller's own versioning since this
@@ -299,11 +305,13 @@ pub struct AsapSketchesProcessor {
 }
 
 impl AsapSketchesProcessor {
-    fn new(precompute: Arc<dyn Precompute>, window_size: Duration) -> Self {
+    fn new(precompute: Arc<dyn Precompute>, plugin_config: PluginConfig) -> Self {
+        let window_size = plugin_config.window_size;
         Self {
             precompute,
+            plugin_config,
             window_size,
-            timer_started: false,
+            timer: None,
             next_config_version: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -346,18 +354,15 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
         msg: Message<OtapPdata>,
         effect_handler: &mut local::EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
-        if !self.timer_started {
-            self.timer_started = true;
+        if self.timer.is_none() {
             // Best-effort: if this fails, the processor still ingests
             // and observes correctly, it just never flushes a window
-            // on its own — degraded, not broken. `TimerCancelHandle`
-            // is dropped immediately: the timer keeps firing for this
-            // processor's lifetime rather than being cancellable
-            // (there's currently no shutdown-adjacent place to hold
-            // the handle across `process()` calls without adding
-            // another `Option<...>` field for a cancellation this
-            // adapter never actually exercises).
-            let _ = effect_handler.start_periodic_timer(self.window_size).await;
+            // on its own. Retaining the handle lets a later config push
+            // cancel and recreate the timer when window_size changes.
+            self.timer = effect_handler
+                .start_periodic_timer(self.window_size)
+                .await
+                .ok();
         }
 
         match msg {
@@ -430,11 +435,44 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 let Ok((pcfg, _dispatch)) = resolve_plugin_config(&plugin_config) else {
                     return Ok(());
                 };
-                let version = self.next_config_version.fetch_add(1, Ordering::Relaxed);
-                self.precompute.update_config(&PrecomputeConfigSet {
-                    version,
-                    configs: vec![pcfg],
-                });
+
+                // The sketch factory and observer are fixed when a
+                // PrecomputeImpl is constructed. If a push changes the
+                // algorithm or its construction parameters, updating only
+                // PrecomputeConfig would stamp the new type onto sketches
+                // still produced by the old implementation. Flush the old
+                // instance and replace it with a consistently constructed
+                // one instead.
+                let factory_changed =
+                    requires_precompute_rebuild(&self.plugin_config, &plugin_config);
+                if factory_changed {
+                    let replacement = match AsapSketchesPlugin::from_plugin_config(&plugin_config) {
+                        Ok(plugin) => plugin.precompute().clone(),
+                        Err(_) => return Ok(()),
+                    };
+                    let pending = self.precompute.drain();
+                    self.emit_envelopes(&pending, effect_handler).await?;
+                    self.precompute = replacement;
+                } else {
+                    let version = self.next_config_version.fetch_add(1, Ordering::Relaxed);
+                    self.precompute.update_config(&PrecomputeConfigSet {
+                        version,
+                        configs: vec![pcfg],
+                    });
+                }
+
+                if plugin_config.window_size != self.window_size {
+                    if let Some(timer) = self.timer.take() {
+                        let _ = timer.cancel().await;
+                    }
+                    self.timer = Some(
+                        effect_handler
+                            .start_periodic_timer(plugin_config.window_size)
+                            .await?,
+                    );
+                    self.window_size = plugin_config.window_size;
+                }
+                self.plugin_config = plugin_config;
                 Ok(())
             }
             Message::Control(NodeControlMsg::CollectTelemetry { .. }) => Ok(()),
@@ -557,5 +595,25 @@ mod tests {
             ASAP_SKETCHES_PROCESSOR_URN,
             "urn:asap:processor:asap_sketches"
         );
+    }
+
+    #[test]
+    fn algorithm_and_factory_parameter_changes_require_rebuild() {
+        let current = PluginConfig::default();
+
+        let mut algorithm_change = current.clone();
+        algorithm_change.sketch_type = "hll".to_string();
+        assert!(requires_precompute_rebuild(&current, &algorithm_change));
+
+        let mut parameter_change = current.clone();
+        parameter_change
+            .sketch_params
+            .insert("relative_accuracy".to_string(), 0.005);
+        assert!(requires_precompute_rebuild(&current, &parameter_change));
+
+        let mut runtime_only_change = current.clone();
+        runtime_only_change.output_metric_name = "renamed".to_string();
+        runtime_only_change.window_size = Duration::from_secs(60);
+        assert!(!requires_precompute_rebuild(&current, &runtime_only_change));
     }
 }
