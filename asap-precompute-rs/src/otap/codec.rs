@@ -20,10 +20,9 @@
 //! one job. This module skips straight to the last step, implementing
 //! OTAP's own `MetricsView` trait directly over `&[SketchEnvelope]`.
 //!
-//! `encode_batch`/`decode_batch`/`records::{flatten,lift}` still exist
-//! and are still tested — they back the legacy `SeriesDictionary` /
-//! `otap::wire` transport (`dictionary.rs`, standalone example
-//! binaries), which predates this module and isn't part of this path.
+//! `encode_batch`/`decode_batch`/`records::{flatten,lift}` still exist as a
+//! standalone Arrow adapter surface, but are not an additional node-to-node
+//! transport.
 //!
 //! # Native protocol mapping
 //!
@@ -90,7 +89,6 @@ use crate::envelope::{Encoding, SketchEnvelope};
 use crate::observation::{KeyValue, Observation, ObservationValue};
 
 use super::decode::{parse_encoding, parse_sketch_type};
-use super::dictionary::resolve_hash_seed;
 use super::schema::{
     OTAP_ATTR_AGG_ID as ATTR_AGG_ID, OTAP_ATTR_ENCODING as ATTR_ENCODING,
     OTAP_ATTR_ENVELOPE as ATTR_ENVELOPE, OTAP_ATTR_HASH_FUNCTION as ATTR_HASH_FUNCTION,
@@ -99,6 +97,29 @@ use super::schema::{
     OTAP_ATTR_SKETCH_TYPE as ATTR_SKETCH_TYPE, OTAP_ATTR_WINDOW_END_MS as ATTR_WINDOW_END_MS,
     OTAP_ATTR_WINDOW_START_MS as ATTR_WINDOW_START_MS,
 };
+
+fn resolve_hash_seed(
+    sketch_type: crate::envelope::SketchType,
+    spec: Option<&asap_sketchlib::proto::sketchlib::HashSpec>,
+) -> (Option<u64>, Option<String>) {
+    let Some(spec) = spec else {
+        return (None, None);
+    };
+    let seed = if matches!(
+        sketch_type,
+        crate::envelope::SketchType::CountSketch | crate::envelope::SketchType::CountMinSketch
+    ) {
+        spec.seed_list.first().copied()
+    } else {
+        spec.seed_list
+            .get(spec.canonical_seed_index as usize)
+            .copied()
+    };
+    let function = asap_sketchlib::proto::sketchlib::HashAlgorithm::try_from(spec.algorithm)
+        .ok()
+        .map(|algorithm| algorithm.as_str_name().to_owned());
+    (seed, function)
+}
 
 static PROTOCOL_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 

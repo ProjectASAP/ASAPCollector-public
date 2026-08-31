@@ -329,13 +329,8 @@ pub trait Precompute: Send + Sync {
 
     /// Returns a clone of the active config, or `None` if unconfigured.
     ///
-    /// Used by the OTAP encode layer
-    /// ([`crate::otap::dictionary::SeriesDictionary`]) to source
-    /// `SCHEMA`-tier facts (`sketch_params`, and eventually the hash
-    /// determinism contract) that live on the config rather than being
-    /// re-derived per envelope — those facts change at config-time,
-    /// not per-record, so they don't belong on
-    /// [`crate::envelope::SketchEnvelope`] itself.
+    /// Used by OTAP encoders to source schema facts such as sketch parameters
+    /// that live on the config rather than being re-derived per envelope.
     fn active_config(&self) -> Option<PrecomputeConfig>;
 
     /// Returns the live counters; safe to call concurrently.
