@@ -115,3 +115,8 @@ required-features = ["otap"]
 [[example]]
 name = "sketch_receiver_node"
 required-features = ["otap"]
+
+[[bin]]
+name = "asap-otap-demo"
+path = "src/bin/asap_otap_demo.rs"
+required-features = ["otap-engine"]
