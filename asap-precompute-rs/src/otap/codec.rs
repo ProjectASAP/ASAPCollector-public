@@ -84,10 +84,9 @@ use otel_arrow_dfe_pdata_views::views::metrics::{
     Value as DpValue, ValueAtQuantileView,
 };
 use otel_arrow_dfe_pdata_views::views::resource::ResourceView;
-use prost::Message;
 
 use crate::config::{sketch_size_string, SketchParams};
-use crate::envelope::{Encoding, ProtoSketchEnvelope, SketchEnvelope};
+use crate::envelope::{Encoding, SketchEnvelope};
 use crate::observation::{KeyValue, Observation, ObservationValue};
 
 use super::decode::{parse_encoding, parse_sketch_type};
@@ -220,22 +219,58 @@ impl OtapSketchEncoder {
     }
 }
 
-/// Enforces the native OTAP carrier contract for full protobuf snapshots.
+/// Enforces the native OTAP carrier contract for sketch records.
 ///
-/// `sketch.envelope` contains the canonical sketchlib `SketchEnvelope`
-/// protobuf, whose `sketch_state` oneof identifies and describes the sketch.
-/// Delta and MessagePack encodings have their own advertised formats and are
-/// therefore not parsed as a full envelope here.
+/// `sketch.envelope` contains the canonical sketchlib ASAPv1 envelope:
+/// magic, version, kind ID, length-prefixed metadata, and payload.
 fn validate_self_describing_payload(encoding: Encoding, payload: &[u8]) -> Result<(), String> {
-    if payload.is_empty() || encoding != Encoding::ProtoFull {
+    if payload.is_empty() {
         return Ok(());
     }
-    let envelope = ProtoSketchEnvelope::decode(payload)
-        .map_err(|error| format!("invalid self-describing sketch.envelope: {error}"))?;
-    if envelope.sketch_state.is_none() {
-        return Err(
-            "invalid self-describing sketch.envelope: sketch_state oneof is missing".into(),
-        );
+    if encoding != Encoding::Msgpack {
+        return Err(format!(
+            "sketch.envelope requires the self-describing ASAPv1 MessagePack format, got {}",
+            encoding.name()
+        ));
+    }
+    const MAGIC: &[u8; 6] = b"ASAPv1";
+    const HEADER_PREFIX_LEN: usize = MAGIC.len() + 2;
+    if payload.len() < HEADER_PREFIX_LEN + 8 || !payload.starts_with(MAGIC) {
+        return Err("invalid self-describing sketch.envelope: missing ASAPv1 magic".into());
+    }
+    if payload[MAGIC.len()] != 1 {
+        return Err(format!(
+            "invalid self-describing sketch.envelope: unsupported ASAPv1 version {}",
+            payload[MAGIC.len()]
+        ));
+    }
+    let kind_len = payload[MAGIC.len() + 1] as usize;
+    let lengths_at = HEADER_PREFIX_LEN
+        .checked_add(kind_len)
+        .ok_or_else(|| "invalid self-describing sketch.envelope: length overflow".to_string())?;
+    if payload.len() < lengths_at + 8 || kind_len == 0 {
+        return Err("invalid self-describing sketch.envelope: truncated kind or lengths".into());
+    }
+    let metadata_len = u32::from_be_bytes(
+        payload[lengths_at..lengths_at + 4]
+            .try_into()
+            .expect("four-byte metadata length"),
+    ) as usize;
+    let sketch_len = u32::from_be_bytes(
+        payload[lengths_at + 4..lengths_at + 8]
+            .try_into()
+            .expect("four-byte payload length"),
+    ) as usize;
+    let expected_len = lengths_at
+        .checked_add(8)
+        .and_then(|len| len.checked_add(metadata_len))
+        .and_then(|len| len.checked_add(sketch_len))
+        .ok_or_else(|| "invalid self-describing sketch.envelope: length overflow".to_string())?;
+    if payload.len() != expected_len {
+        return Err(format!(
+            "invalid self-describing sketch.envelope: framed length {expected_len}, actual {}",
+            payload.len()
+        ));
     }
     Ok(())
 }
@@ -1701,7 +1736,7 @@ mod tests {
     use crate::envelope::SketchType;
     use crate::observation::{KeyValue as Kv, ObservationValueKind};
     use crate::precompute::Sketch;
-    use crate::sketches::DDSketchWrapper;
+    use crate::sketches::KLLWrapper;
 
     fn one_envelope(
         metric_name: &str,
@@ -1792,19 +1827,17 @@ mod tests {
     #[test]
     fn summary_carrier_round_trips_a_self_describing_sketch_envelope() {
         let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
-        env.sketch_type = SketchType::DDSketch;
-        env.encoding = Encoding::ProtoFull;
+        env.sketch_type = SketchType::KLLSketch;
+        env.encoding = Encoding::Msgpack;
         env.agg_id = 7;
-        let mut sketch = DDSketchWrapper::new(0.01);
+        let mut sketch = KLLWrapper::new(200, Some(42)).with_wire_encoding(Encoding::Msgpack);
         sketch.update(42.0);
         env.payload = sketch
             .snapshot()
-            .expect("self-describing DDSketch envelope");
+            .expect("self-describing KLL ASAPv1 envelope");
         let expected_payload = env.payload.clone();
 
-        let proto = ProtoSketchEnvelope::decode(env.payload.as_slice())
-            .expect("sketch.envelope must be the sketchlib protobuf");
-        assert!(proto.sketch_state.is_some());
+        assert!(env.payload.starts_with(b"ASAPv1"));
 
         let pdata = encode_envelopes_to_pdata(std::slice::from_ref(&env)).expect("encode");
         let outcome = decode_pdata_to_observations(pdata).expect("decode");
@@ -1813,24 +1846,37 @@ mod tests {
         assert_eq!(obs.value.kind, ObservationValueKind::Envelope);
         let decoded_env = obs.value.envelope.as_ref().expect("envelope");
         assert_eq!(decoded_env.payload, expected_payload);
-        assert_eq!(decoded_env.sketch_type, SketchType::DDSketch);
-        assert_eq!(decoded_env.encoding, Encoding::ProtoFull);
+        assert_eq!(decoded_env.sketch_type, SketchType::KLLSketch);
+        assert_eq!(decoded_env.encoding, Encoding::Msgpack);
         assert_eq!(decoded_env.agg_id, 7);
         assert_eq!(decoded_env.window_start_ms, 1_000);
         assert_eq!(decoded_env.window_end_ms, 2_000);
     }
 
     #[test]
-    fn proto_full_rejects_non_self_describing_envelope_bytes() {
+    fn asapv1_rejects_non_self_describing_envelope_bytes() {
         let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
-        env.sketch_type = SketchType::DDSketch;
-        env.encoding = Encoding::ProtoFull;
+        env.sketch_type = SketchType::KLLSketch;
+        env.encoding = Encoding::Msgpack;
         env.payload = vec![0xde, 0xad, 0xbe, 0xef];
 
-        let error = encode_envelopes_to_pdata(&[env]).expect_err("invalid protobuf must fail");
+        let error = encode_envelopes_to_pdata(&[env]).expect_err("invalid ASAPv1 must fail");
         assert!(error
             .to_string()
             .contains("self-describing sketch.envelope"));
+    }
+
+    #[test]
+    fn summary_carrier_rejects_non_self_describing_encoding() {
+        let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
+        env.sketch_type = SketchType::KLLSketch;
+        env.encoding = Encoding::ProtoFull;
+        env.payload = vec![0x0a, 0x00];
+
+        let error = encode_envelopes_to_pdata(&[env]).expect_err("protobuf must fail");
+        assert!(error
+            .to_string()
+            .contains("requires the self-describing ASAPv1 MessagePack format"));
     }
 
     /// The bug this rewrite fixes: an estimate-mode envelope (empty

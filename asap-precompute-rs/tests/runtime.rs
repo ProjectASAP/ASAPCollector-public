@@ -1067,8 +1067,6 @@ mod real_sketch {
 
     #[test]
     fn kll_msgpack_full_roundtrips_through_ingest() {
-        use asap_sketchlib::MessagePackCodec;
-
         let cfg = PrecomputeConfig {
             agg_id: 1,
             sketch_type: SketchType::KLLSketch,
@@ -1098,8 +1096,8 @@ mod real_sketch {
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].encoding, Encoding::Msgpack);
         assert!(!envs[0].payload.is_empty());
-        let psk =
-            asap_sketchlib::KllSketch::from_msgpack(&envs[0].payload).expect("decode producer");
+        let psk = asap_sketchlib::KLL::<f64>::deserialize_from_bytes(&envs[0].payload)
+            .expect("decode producer ASAPv1 envelope");
         assert!(
             (psk.quantile(0.5) - 500.0).abs() < 60.0,
             "producer p50={}",
@@ -1121,7 +1119,8 @@ mod real_sketch {
         let out = merger.tick(20_000);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].encoding, Encoding::Msgpack);
-        let sk = asap_sketchlib::KllSketch::from_msgpack(&out[0].payload).expect("decode merged");
+        let sk = asap_sketchlib::KLL::<f64>::deserialize_from_bytes(&out[0].payload)
+            .expect("decode merged ASAPv1 envelope");
         assert!(sk.count() > 0, "re-emitted merged sketch must be non-empty");
     }
 
