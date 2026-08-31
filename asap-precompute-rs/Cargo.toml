@@ -55,6 +55,7 @@ proptest = "1"
 serde_json = "1"
 # The full Tokio runtime is required by the live OTAP pipeline integration test.
 tokio = { version = "1", features = ["full"] }
+criterion = { version = "0.7", features = ["html_reports"] }
 [features]
 default = []
 # Enables the OTAP codec + plugin lifecycle at `crate::otap`
@@ -90,3 +91,12 @@ otap-engine = [
 name = "asap-otap-demo"
 path = "src/bin/asap_otap_demo.rs"
 required-features = ["otap-engine"]
+
+[[bench]]
+name = "asap_sketch_pipeline"
+harness = false
+required-features = ["otap-engine"]
+
+[profile.bench]
+debug = true
+strip = "none"

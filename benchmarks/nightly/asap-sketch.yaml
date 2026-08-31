@@ -1,0 +1,38 @@
+name: Nightly - ASAP Sketches
+methodology: otel-arrow-pipeline-perf-test
+topology:
+  load-generator:
+    data_source: semantic_conventions
+    metric: http.server.request.duration
+    attributes:
+      - http.request.method
+      - http.route
+      - http.response.status_code
+      - service.name
+    generation_strategy: pre_generated
+    batch_sizes: [1024, 16384, 131072]
+  system-under-test:
+    processor: urn:asap:processor:asap_sketches
+    sketch: kll
+    k: 200
+    shards: 4
+    operation: create-merge-estimate
+  simulated-backend:
+    assertions:
+      quantiles: [0.5, 0.99]
+      maximum_relative_error: 0.05
+comparisons:
+  - otap_pdata_roundtrip
+  - exact_sort
+  - asap_kll_4way_merge
+measurements:
+  - signals_per_second
+  - wall_time
+  - user_cpu_time
+  - system_cpu_time
+  - cpu_percent
+  - maximum_resident_set_size
+profiling:
+  criterion: target/criterion
+  symbols: strip-none
+  follow_up: samply-or-otap-pprof
