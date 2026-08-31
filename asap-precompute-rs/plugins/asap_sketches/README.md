@@ -47,6 +47,14 @@ Field reference:
 | `sketch_params.precision` | hll | HLL register-count exponent (4-18). Default `12`. |
 | `sketch_params.width` | countsketch, cms | Sketch column count. Default `2048`. |
 | `sketch_params.depth` | countsketch, cms | Sketch row count. Default `4`. |
+| `default_key` | optional | CountSketch fallback key when an observation has neither bytes nor labels. Defaults to `output_metric_name`. |
+| `omit_resource_attrs` | optional | Exclude resource attributes from series identity. Default `false`. |
+| `global_aggregation` | optional | Collapse all observations into one series. Default `false`. |
+| `emit_window_stats` | optional | Add `sample_count` and `window_duration_seconds` labels. Default `false`. |
+| `encoding` | optional | `ProtoFull`, `Msgpack`, or a delta variant. Default `ProtoFull`. |
+| `delta_transmission` | optional | Emit deltas after the initial full snapshot. Default `false`. |
+| `transmit_sketch` | optional | `true` emits sketch state; `false` emits scalar estimates. Default `true`. |
+| `quantiles` | estimate mode | DDSketch/KLL quantiles to emit, such as `[0.5, 0.99]`. |
 | `controller_url` | optional | Legacy bootstrap field, predates the engine's own OpAMP controller extension (which now owns `instance_uid`/`endpoint`/`agent_description` centrally) — likely a deprecation candidate rather than something to keep pushing new values into. |
 | `agent_id` | optional | Same caveat as `controller_url`. |
 
