@@ -86,6 +86,9 @@ All of this sits on the host-neutral runtime in the same crate
 
 ## Build & test
 
+For a presentation-ready walkthrough of the real YAML pipeline integration,
+see the [live OTAP pipeline demo guide](./docs/demo-guide.md).
+
 ```sh
 cd asap-precompute-rs
 cargo build --features otap-engine
@@ -114,12 +117,12 @@ are complete and tested. Phase **D** (the `linkme` registration + the
 real `OtapPdata` binding) is complete and build/lint/test-verified by
 this repo's own build. `tests/otap_pipeline_e2e.rs` parses a genuine
 OTAP pipeline YAML, builds it through `OTAP_PIPELINE_FACTORY`, runs the
-resulting `RuntimePipeline`, injects a real `OtapPdata`, and verifies
-the sketch emitted through the configured exporter. The receiver role — ingesting
-another `asap_sketches` node's *legacy* `SketchStreamBatch` output —
-isn't addressed by this adapter; that format has its own standalone
-example binaries. Cross-host byte-parity (Phase **E**) is the
-remaining work.
+resulting `RuntimePipeline`, injects real scalar `OtapPdata`, and verifies a
+three-processor creation → merge → estimation flow at the configured exporter.
+The real OTAP adapter merges an upstream processor's self-describing sketch
+directly from `OtapPdata`; the separate legacy `SketchStreamBatch` format has
+its own standalone example binaries. Cross-host byte-parity (Phase **E**) is
+the remaining work.
 
 ---
 
