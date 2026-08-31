@@ -3,7 +3,7 @@
 `asap-precompute-rs` is ASAP's host-neutral edge precompute runtime.
 It owns the windowing, snapshot caching, and delta-encoding logic for
 the Rust edge runtime, and — under the `otap` feature — the OTAP
-Dataflow integration layer (Arrow codec + Tokio plugin lifecycle).
+Dataflow integration layer (Arrow codec + native OTAP processor).
 
 Per-platform Adapter implementations (the Layer-4 shims) translate their
 host's native event into an `Observation`, hand it to a `Precompute`,
@@ -31,12 +31,10 @@ native event.
 
 | Rust module | Responsibility |
 | --- | --- |
-| `otap::lifecycle` | `AsapSketchesPlugin` — Tokio runtime (input / flush-ticker / control-channel tasks + graceful drain). |
 | `otap::config` | `PluginConfig` + `resolve()` — 5-sketch `sketch_type` dispatch. |
 | `otap::decode` / `otap::encode` | Arrow `RecordBatch` ↔ `Observation` / `SketchEnvelope` codec. |
 | `otap::records` | `OtapMetricRecords` + `flatten` / `lift` (sibling-batch ↔ flat-batch projection, Strategy-B attribute-lift). |
 | `otap::schema` | Well-known column names + `_asap_*` Strategy-B carrier keys. |
-| `otap::plugin` | `StubPlugin` — minimal codec-only shell (regression backstop). |
 
 ## Dependency
 
@@ -54,6 +52,6 @@ cargo fmt --check
 ```
 
 The default build compiles the row-oriented runtime only (no
-Arrow/Tokio); the `otap` feature enables the OTAP codec + plugin
-lifecycle. The test suite covers the runtime plus the OTAP codec
-(`tests/otap_codec.rs`) and plugin lifecycle (`tests/otap_lifecycle.rs`).
+Arrow/Tokio); the `otap` feature enables the OTAP codec. The test suite
+covers the runtime plus the OTAP codec (`tests/otap_codec.rs`) and the
+real dataflow processor (`tests/otap_pipeline_e2e.rs`).

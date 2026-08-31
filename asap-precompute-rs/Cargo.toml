@@ -25,19 +25,6 @@ thiserror = "1"
 # make that binding a type mismatch even though both are "Arrow".
 arrow-array = { version = "58.3", optional = true }
 arrow-schema = { version = "58.3", optional = true }
-# Only pulled in for otap::wire's Arrow IPC serialization of
-# SketchStreamBatch across a real transport (see docs/data_model.md's
-# "crosses a node or network boundary" framing).
-arrow-ipc = { version = "58.3", optional = true }
-
-# Tokio drives the plugin lifecycle (Stream consumer
-# task + Wakeup-driven flush ticker + control-channel poll task +
-# graceful drain), plus `otap::wire`'s TCP transport (`net`,
-# `io-util`). The full set is pulled in via the `otap` feature gate so
-# default-feature consumers don't pay for it.
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net", "io-util"], optional = true }
-futures = { version = "0.3", optional = true }
-
 # Real OTAP Dataflow engine + pdata crates, for `otap::processor` /
 # `otap::codec` (the `AsapSketchesProcessor` node + its direct
 # `SketchEnvelope <-> OtapPdata` binding). Plain git dependencies on
@@ -56,31 +43,24 @@ otel-arrow-dfe-pdata = { git = "https://github.com/open-telemetry/otel-arrow", r
 otel-arrow-dfe-pdata-views = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-pdata-views", optional = true }
 otel-arrow-dfe-state = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-state", optional = true }
 otel-arrow-dfe-telemetry = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-telemetry", optional = true }
+otel-arrow-dfe-core-nodes = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-core-nodes", optional = true }
 linkme = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 humantime-serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
+tokio = { version = "1", features = ["sync"], optional = true }
 
 [dev-dependencies]
 proptest = "1"
 serde_json = "1"
-# The full tokio runtime is required for #[tokio::test]-driven
-# lifecycle tests under `tests/otap_*.rs`.
+# The full Tokio runtime is required by the live OTAP pipeline integration test.
 tokio = { version = "1", features = ["full"] }
-# Only used to adapt an `mpsc::UnboundedReceiver` into a `Stream` for
-# chaining two `AsapSketchesPlugin`s (producer's EmitReceiver ->
-# receiver's start_from_envelopes) in tests and the network-transport
-# examples. The library itself is Stream-source-agnostic.
-tokio-stream = "0.1"
-
 [features]
 default = []
 # Enables the OTAP codec + plugin lifecycle at `crate::otap`
-# (decode_batch / encode_batch over `arrow::RecordBatch`, plus the
-# `AsapSketchesPlugin` Tokio runtime, plus the legacy
-# `SeriesDictionary` / `otap::wire` transport). No dependency on real
-# OTAP Dataflow crates — this is the standalone-buildable half.
-otap = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-ipc", "dep:tokio", "dep:futures"]
+# (`decode_batch` / `encode_batch` over `arrow::RecordBatch`). No dependency
+# on real OTAP Dataflow crates — this is the standalone-buildable half.
+otap = ["dep:arrow-array", "dep:arrow-schema"]
 # Enables `otap::processor`/`otap::codec` — the real
 # `local::Processor<OtapPdata>` node (`AsapSketchesProcessor`) and its
 # direct `SketchEnvelope <-> OtapPdata` binding, registered via
@@ -98,23 +78,13 @@ otap-engine = [
     "dep:otel-arrow-dfe-pdata-views",
     "dep:otel-arrow-dfe-state",
     "dep:otel-arrow-dfe-telemetry",
+    "dep:otel-arrow-dfe-core-nodes",
     "dep:linkme",
     "dep:async-trait",
     "dep:humantime-serde",
     "dep:serde_json",
+    "dep:tokio",
 ]
-
-[[example]]
-name = "sketch_pipeline_demo"
-required-features = ["otap"]
-
-[[example]]
-name = "sketch_producer_node"
-required-features = ["otap"]
-
-[[example]]
-name = "sketch_receiver_node"
-required-features = ["otap"]
 
 [[bin]]
 name = "asap-otap-demo"
