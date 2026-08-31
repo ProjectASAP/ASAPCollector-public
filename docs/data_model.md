@@ -377,7 +377,14 @@ it. The real OTAP metrics mapping implemented by `otap/codec.rs` is:
 |---|---|
 | `SCHEMA` | Attributes of the aggregation plan's Resource |
 | `DICTIONARY` / `LABELS` | Metric name plus attributes of the series' instrumentation Scope |
-| `RECORD` | NumberDataPoint plus its attribute child rows |
+| `RECORD` | SummaryDataPoint + SummaryDpAttrs for sketch envelopes; NumberDataPoint for scalar estimates |
+
+For a sketch `RECORD`, `SummaryDpAttrs["sketch.envelope"]` contains the
+canonical sketchlib `SketchEnvelope` protobuf. Its `sketch_state` oneof makes
+the binary self-describing; the surrounding `sketch.*` Resource/Scope
+attributes provide OTAP routing and indexing, rather than being required to
+interpret raw sketch bytes. A `PROTO_FULL` carrier is rejected if that
+self-describing envelope cannot be decoded or has no `sketch_state`.
 
 OTAP's `resource_id`, `scope_id`, metric `id`, and attribute `parent_id`
 columns express the joins instead of repeating SCHEMA and series facts on

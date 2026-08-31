@@ -56,7 +56,7 @@
 //!
 //! The real OTAP path now expresses the protocol structurally: aggregation
 //! SCHEMA is attached to Resource rows, series DICTIONARY/LABELS to Scope
-//! rows, and per-window RECORD fields to NumberDataPoint rows. OTAP's own
+//! rows, and sketch RECORD fields to SummaryDataPoint attribute rows. OTAP's own
 //! parent IDs carry the joins, while its stateful IPC producer retains Arrow
 //! schemas and emits dictionary deltas. `SeriesDictionary` /
 //! `SketchStreamBatch` remain only for the legacy `crate::otap::wire`
@@ -424,7 +424,7 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 if outcome.skipped_non_scalar > 0 {
                     effect_handler
                         .info(&format!(
-                            "asap_sketches: skipped {} non-scalar (histogram/exponential-histogram/summary) data point(s) — only Gauge/Sum are aggregated",
+                            "asap_sketches: skipped {} unsupported histogram/exponential-histogram data point(s)",
                             outcome.skipped_non_scalar
                         ))
                         .await;
@@ -433,7 +433,7 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                     // Note: `observe` here handles both "genuine OTLP
                     // metric" and "sketch shipped as binary inside an
                     // OTAP metric" (an upstream asap_sketches node's
-                    // `_asap_envelope`-tagged output) — no branching
+                    // `sketch.envelope` Summary output) — no branching
                     // needed at this call site. `decode_pdata_to_observations`
                     // already tags the latter as
                     // `ObservationValueKind::Envelope`, and

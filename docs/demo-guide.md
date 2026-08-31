@@ -79,6 +79,13 @@ records and the physical OTAP Arrow child batches (row counts plus schemas).
 Large input batches are abbreviated, and binary envelopes are shown by byte
 length. The final p50/p99 scalar metrics are printed in full.
 
+Sketch-bearing metrics use OTLP Summary semantics. The `sketch.envelope` bytes
+attribute in OTAP `SummaryDpAttrs` is the canonical, self-describing sketchlib
+`SketchEnvelope` protobuf: its `sketch_state` oneof identifies the algorithm and
+carries its full state. The remaining `sketch.*` attributes are routing and
+index fields; they are not required to interpret the binary sketch state. Final
+estimates remain Gauge metrics represented by `NumberDataPoints`.
+
 ## Run the automated assertion
 
 Run only the live-pipeline scenario:

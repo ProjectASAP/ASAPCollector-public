@@ -29,8 +29,8 @@
 //!
 //! The design in `docs/data_model.md` is represented by OTAP's own joins:
 //! SCHEMA attributes are children of a Resource, DICTIONARY/LABELS are
-//! children of an instrumentation Scope, and RECORD fields are children of
-//! the NumberDataPoint. A stream-scoped [`OtapSketchEncoder`] assigns stable
+//! children of an instrumentation Scope, and sketch RECORD fields are
+//! SummaryDataPoint attributes. A stream-scoped [`OtapSketchEncoder`] assigns stable
 //! series IDs across flushes. Arrow IPC schema and string dictionaries are
 //! retained by OTAP's transport producer; resource and scope parent rows are
 //! still present in each independently valid `OtapPdata` message.
@@ -49,7 +49,7 @@
 //! What "handling a metric" means on decode splits into two cases,
 //! decided by content, not by which OTLP metric type carried it:
 //!
-//! - **A data point carrying `_asap_envelope`** (this module's own
+//! - **A Summary data point carrying `sketch.envelope`** (this module's own
 //!   encode output, or any other `asap_sketches` node's) routes
 //!   through `ObservationValueKind::Envelope`; `Precompute::observe`
 //!   already dispatches those to `observe_envelope` (merge as a
@@ -84,17 +84,21 @@ use otel_arrow_dfe_pdata_views::views::metrics::{
     Value as DpValue, ValueAtQuantileView,
 };
 use otel_arrow_dfe_pdata_views::views::resource::ResourceView;
+use prost::Message;
 
 use crate::config::{sketch_size_string, SketchParams};
-use crate::envelope::SketchEnvelope;
+use crate::envelope::{Encoding, ProtoSketchEnvelope, SketchEnvelope};
 use crate::observation::{KeyValue, Observation, ObservationValue};
 
 use super::decode::{parse_encoding, parse_sketch_type};
 use super::dictionary::resolve_hash_seed;
 use super::schema::{
-    ATTR_AGG_ID, ATTR_ENCODING, ATTR_ENVELOPE, ATTR_HASH_FUNCTION, ATTR_HASH_SEED,
-    ATTR_SCHEMA_VERSION, ATTR_SERIES_ID, ATTR_SKETCH_SIZE, ATTR_SKETCH_TYPE, ATTR_WINDOW_END_MS,
-    ATTR_WINDOW_START_MS,
+    OTAP_ATTR_AGG_ID as ATTR_AGG_ID, OTAP_ATTR_ENCODING as ATTR_ENCODING,
+    OTAP_ATTR_ENVELOPE as ATTR_ENVELOPE, OTAP_ATTR_HASH_FUNCTION as ATTR_HASH_FUNCTION,
+    OTAP_ATTR_HASH_SEED as ATTR_HASH_SEED, OTAP_ATTR_SCHEMA_VERSION as ATTR_SCHEMA_VERSION,
+    OTAP_ATTR_SERIES_ID as ATTR_SERIES_ID, OTAP_ATTR_SKETCH_SIZE as ATTR_SKETCH_SIZE,
+    OTAP_ATTR_SKETCH_TYPE as ATTR_SKETCH_TYPE, OTAP_ATTR_WINDOW_END_MS as ATTR_WINDOW_END_MS,
+    OTAP_ATTR_WINDOW_START_MS as ATTR_WINDOW_START_MS,
 };
 
 static PROTOCOL_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -172,6 +176,10 @@ impl OtapSketchEncoder {
 
     /// Encodes one flush while retaining series identity across later flushes.
     pub fn encode(&mut self, envelopes: &[SketchEnvelope]) -> Result<OtapPdata, CodecError> {
+        for env in envelopes {
+            validate_self_describing_payload(env.encoding, &env.payload)
+                .map_err(CodecError::Encode)?;
+        }
         let series_ids = envelopes
             .iter()
             .map(|env| self.series_id_for(env))
@@ -212,10 +220,30 @@ impl OtapSketchEncoder {
     }
 }
 
+/// Enforces the native OTAP carrier contract for full protobuf snapshots.
+///
+/// `sketch.envelope` contains the canonical sketchlib `SketchEnvelope`
+/// protobuf, whose `sketch_state` oneof identifies and describes the sketch.
+/// Delta and MessagePack encodings have their own advertised formats and are
+/// therefore not parsed as a full envelope here.
+fn validate_self_describing_payload(encoding: Encoding, payload: &[u8]) -> Result<(), String> {
+    if payload.is_empty() || encoding != Encoding::ProtoFull {
+        return Ok(());
+    }
+    let envelope = ProtoSketchEnvelope::decode(payload)
+        .map_err(|error| format!("invalid self-describing sketch.envelope: {error}"))?;
+    if envelope.sketch_state.is_none() {
+        return Err(
+            "invalid self-describing sketch.envelope: sketch_state oneof is missing".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Zero-copy adapter presenting a `&[SketchEnvelope]` as a
 /// `MetricsView` directly — one Resource (empty), one Scope (unnamed),
-/// one Metric (the envelopes' shared `metric_name`), one Gauge, one
-/// `NumberDataPoint` per envelope.
+/// one Metric per series, using SummaryDataPoints for sketch envelopes and
+/// Gauge NumberDataPoints for scalar estimates.
 struct AsapMetricsView<'a> {
     envelopes: &'a [SketchEnvelope],
     resources: Vec<AsapResourceGroup>,
@@ -470,16 +498,20 @@ impl<'v, 'a> DataView<'v> for AsapDataView<'v, 'a> {
     where
         Self: 'exp;
     type Summary<'summary>
-        = AsapNoSummary
+        = AsapSummaryView<'summary, 'a>
     where
         Self: 'summary;
 
     fn value_type(&self) -> MetricKind {
-        MetricKind::Gauge
+        if self.view.envelopes[self.rows[0]].payload.is_empty() {
+            MetricKind::Gauge
+        } else {
+            MetricKind::Summary
+        }
     }
 
     fn as_gauge(&self) -> Option<Self::Gauge<'_>> {
-        Some(AsapGaugeView {
+        (self.value_type() == MetricKind::Gauge).then_some(AsapGaugeView {
             view: self.view,
             rows: self.rows,
         })
@@ -498,7 +530,94 @@ impl<'v, 'a> DataView<'v> for AsapDataView<'v, 'a> {
     }
 
     fn as_summary(&self) -> Option<Self::Summary<'_>> {
-        None
+        (self.value_type() == MetricKind::Summary).then_some(AsapSummaryView {
+            view: self.view,
+            rows: self.rows,
+        })
+    }
+}
+
+struct AsapSummaryView<'v, 'a> {
+    view: &'v AsapMetricsView<'a>,
+    rows: &'v [usize],
+}
+
+impl<'v, 'a> SummaryView for AsapSummaryView<'v, 'a> {
+    type SummaryDataPoint<'dp>
+        = AsapSummaryDataPointView<'dp, 'a>
+    where
+        Self: 'dp;
+    type SummaryDataPointIter<'dp>
+        = std::vec::IntoIter<AsapSummaryDataPointView<'dp, 'a>>
+    where
+        Self: 'dp;
+
+    fn data_points(&self) -> Self::SummaryDataPointIter<'_> {
+        self.rows
+            .iter()
+            .copied()
+            .map(|row| AsapSummaryDataPointView {
+                view: self.view,
+                row,
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+}
+
+struct AsapSummaryDataPointView<'v, 'a> {
+    view: &'v AsapMetricsView<'a>,
+    row: usize,
+}
+
+impl<'v, 'a> SummaryDataPointView for AsapSummaryDataPointView<'v, 'a> {
+    type Attribute<'att>
+        = AsapAttribute<'att>
+    where
+        Self: 'att;
+    type AttributeIter<'att>
+        = std::vec::IntoIter<AsapAttribute<'att>>
+    where
+        Self: 'att;
+    type ValueAtQuantile<'vaq>
+        = AsapNoValueAtQuantile
+    where
+        Self: 'vaq;
+    type ValueAtQuantileIter<'vaq>
+        = std::vec::IntoIter<AsapNoValueAtQuantile>
+    where
+        Self: 'vaq;
+
+    fn attributes(&self) -> Self::AttributeIter<'_> {
+        self.view.attributes_for_row(self.row).into_iter()
+    }
+
+    fn start_time_unix_nano(&self) -> u64 {
+        self.view.envelopes[self.row]
+            .window_start_ms
+            .saturating_mul(1_000_000)
+    }
+
+    fn time_unix_nano(&self) -> u64 {
+        self.view.envelopes[self.row]
+            .window_end_ms
+            .saturating_mul(1_000_000)
+    }
+
+    fn count(&self) -> u64 {
+        self.view.envelopes[self.row].count
+    }
+
+    fn sum(&self) -> f64 {
+        self.view.envelopes[self.row].value
+    }
+
+    fn quantile_values(&self) -> Self::ValueAtQuantileIter<'_> {
+        Vec::new().into_iter()
+    }
+
+    fn flags(&self) -> DataPointFlags {
+        DataPointFlags::new(0)
     }
 }
 
@@ -673,9 +792,10 @@ impl<'a> AnyValueView<'a> for AsapAnyValueView<'a> {
 
 // -- Uninhabited placeholder types -------------------------------------------
 //
-// `resource()`/`scope()` always return `None`, and only Gauge is ever
-// produced (`as_sum`/`as_histogram`/`as_exponential_histogram`/
-// `as_summary` always return `None`, and there are no exemplars) — but
+// Unsupported metric kinds and exemplars still require concrete associated
+// types even though no instance is produced. The inhabited Resource, Scope,
+// Gauge, and Summary types are defined above; these placeholders cover the
+// remaining view surface.
 // the view traits still require *some* concrete, well-formed type for
 // each associated type regardless of whether an instance is ever
 // constructed. An uninhabited enum (`enum X {}`) lets every trait
@@ -1058,70 +1178,6 @@ impl BucketsView for AsapNoBuckets {
     }
 }
 
-enum AsapNoSummary {}
-impl SummaryView for AsapNoSummary {
-    type SummaryDataPoint<'dp>
-        = AsapNoSummaryDataPoint
-    where
-        Self: 'dp;
-    type SummaryDataPointIter<'dp>
-        = std::vec::IntoIter<AsapNoSummaryDataPoint>
-    where
-        Self: 'dp;
-
-    fn data_points(&self) -> Self::SummaryDataPointIter<'_> {
-        match *self {}
-    }
-}
-
-enum AsapNoSummaryDataPoint {}
-impl SummaryDataPointView for AsapNoSummaryDataPoint {
-    type Attribute<'att>
-        = AsapAttribute<'att>
-    where
-        Self: 'att;
-    type AttributeIter<'att>
-        = std::vec::IntoIter<AsapAttribute<'att>>
-    where
-        Self: 'att;
-    type ValueAtQuantile<'q>
-        = AsapNoValueAtQuantile
-    where
-        Self: 'q;
-    type ValueAtQuantileIter<'q>
-        = std::vec::IntoIter<AsapNoValueAtQuantile>
-    where
-        Self: 'q;
-
-    fn start_time_unix_nano(&self) -> u64 {
-        match *self {}
-    }
-
-    fn time_unix_nano(&self) -> u64 {
-        match *self {}
-    }
-
-    fn count(&self) -> u64 {
-        match *self {}
-    }
-
-    fn sum(&self) -> f64 {
-        match *self {}
-    }
-
-    fn quantile_values(&self) -> Self::ValueAtQuantileIter<'_> {
-        match *self {}
-    }
-
-    fn attributes(&self) -> Self::AttributeIter<'_> {
-        match *self {}
-    }
-
-    fn flags(&self) -> DataPointFlags {
-        match *self {}
-    }
-}
-
 enum AsapNoValueAtQuantile {}
 impl ValueAtQuantileView for AsapNoValueAtQuantile {
     fn quantile(&self) -> f64 {
@@ -1170,7 +1226,9 @@ pub fn describe_pdata_protocol(pdata: &OtapPdata) -> Result<String, CodecError> 
             otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::ScopeAttrs => "DICTIONARY / LABELS",
             otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::UnivariateMetrics => "SERIES JOIN",
             otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::NumberDataPoints
-            | otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::NumberDpAttrs => "RECORD",
+            | otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::NumberDpAttrs
+            | otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::SummaryDataPoints
+            | otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::SummaryDpAttrs => "RECORD",
             _ => "CHILD BATCH",
         };
         writeln!(
@@ -1226,7 +1284,7 @@ pub fn describe_pdata_protocol(pdata: &OtapPdata) -> Result<String, CodecError> 
         if let Some(envelope) = observation.value.envelope {
             writeln!(
                 output,
-                "    +-- Metric  {}\n        |-- labels     {{{}}}\n        |-- value      sketch envelope ({} bytes)\n        |-- schema     agg_id={}  {}  {}  v{}\n        +-- window     [{}, {})",
+                "    +-- Metric  {}\n        |-- labels     {{{}}}\n        |-- value      self-describing sketch envelope ({} bytes)\n        |-- schema     agg_id={}  {}  {}  v{}\n        +-- window     [{}, {})",
                 observation.metric, labels, envelope.payload.len(), envelope.agg_id,
                 envelope.sketch_type.name(), envelope.encoding.name(), envelope.schema_version,
                 envelope.window_start_ms, envelope.window_end_ms
@@ -1277,6 +1335,7 @@ fn pretty_arrow_type(data_type: &arrow_schema::DataType) -> String {
                 .join(", ");
             format!("struct<{children}>")
         }
+        DataType::List(field) => format!("list<{}>", pretty_arrow_type(field.data_type())),
         other => format!("{other:?}").to_lowercase(),
     }
 }
@@ -1372,9 +1431,19 @@ pub fn decode_pdata_to_observations(pdata: OtapPdata) -> Result<DecodeOutcome, C
                     for dp in sum.data_points() {
                         acc.push_data_point(dp, &name, &schema, &resource_labels, &series_labels)?;
                     }
+                } else if let Some(summary) = data.as_summary() {
+                    for dp in summary.data_points() {
+                        acc.push_summary_data_point(
+                            dp,
+                            &name,
+                            &schema,
+                            &resource_labels,
+                            &series_labels,
+                        )?;
+                    }
                 } else {
-                    // Histogram / ExponentialHistogram / Summary: no
-                    // single well-defined scalar — count, don't expand.
+                    // Histogram / ExponentialHistogram: no single
+                    // well-defined scalar or sketch envelope.
                     skipped_non_scalar += match data.value_type() {
                         MetricKind::Histogram => data
                             .as_histogram()
@@ -1383,10 +1452,6 @@ pub fn decode_pdata_to_observations(pdata: OtapPdata) -> Result<DecodeOutcome, C
                         MetricKind::ExponentialHistogram => data
                             .as_exponential_histogram()
                             .map(|h| h.data_points().count())
-                            .unwrap_or(0),
-                        MetricKind::Summary => data
-                            .as_summary()
-                            .map(|s| s.data_points().count())
                             .unwrap_or(0),
                         _ => 0,
                     };
@@ -1424,6 +1489,88 @@ struct DecodeSchema {
 }
 
 impl DecodeAccumulator {
+    fn push_summary_data_point<D: SummaryDataPointView>(
+        &mut self,
+        dp: D,
+        metric_name: &str,
+        inherited_schema: &DecodeSchema,
+        resource_labels: &[KeyValue],
+        series_labels: &[KeyValue],
+    ) -> Result<(), CodecError> {
+        let mut envelope_bytes: Option<Vec<u8>> = None;
+        let mut window_start_ms = None;
+        let mut window_end_ms = None;
+        let mut labels = series_labels.to_vec();
+
+        for attr in dp.attributes() {
+            let Some(value) = attr.value() else { continue };
+            let key = String::from_utf8_lossy(attr.key()).into_owned();
+            match key.as_str() {
+                ATTR_ENVELOPE => envelope_bytes = value.as_bytes().map(<[u8]>::to_vec),
+                ATTR_WINDOW_START_MS => {
+                    window_start_ms = value.as_int64().filter(|v| *v >= 0).map(|v| v as u64)
+                }
+                ATTR_WINDOW_END_MS => {
+                    window_end_ms = value.as_int64().filter(|v| *v >= 0).map(|v| v as u64)
+                }
+                _ => {
+                    if let Some(value) = value.as_string() {
+                        labels.push(KeyValue::new(
+                            key,
+                            String::from_utf8_lossy(value).into_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        let payload = envelope_bytes
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or_else(|| {
+                CodecError::Decode("summary sketch is missing sketch.envelope".into())
+            })?;
+        let sketch_type = inherited_schema
+            .sketch_type
+            .as_deref()
+            .map(|value| parse_sketch_type(0, value))
+            .transpose()
+            .map_err(|error| CodecError::Decode(error.to_string()))?
+            .unwrap_or(crate::envelope::SketchType::Unspecified);
+        let encoding = inherited_schema
+            .encoding
+            .as_deref()
+            .map(|value| parse_encoding(0, value))
+            .transpose()
+            .map_err(|error| CodecError::Decode(error.to_string()))?
+            .unwrap_or(crate::envelope::Encoding::Unspecified);
+        validate_self_describing_payload(encoding, &payload).map_err(CodecError::Decode)?;
+        let timestamp_ms = dp.time_unix_nano() / 1_000_000;
+        let envelope = SketchEnvelope {
+            schema_version: inherited_schema.schema_version.unwrap_or(0),
+            sketch_type,
+            agg_id: inherited_schema.agg_id.unwrap_or(0),
+            resource_labels: resource_labels.to_vec(),
+            labels: labels.clone(),
+            window_start_ms: window_start_ms.unwrap_or(dp.start_time_unix_nano() / 1_000_000),
+            window_end_ms: window_end_ms.unwrap_or(timestamp_ms),
+            encoding,
+            payload,
+            hash_spec: None,
+            metric_name: metric_name.to_string(),
+            count: dp.count(),
+            aggregation_temporality: 0,
+            value: dp.sum(),
+        };
+        self.observations.push(Observation::new(
+            timestamp_ms,
+            metric_name.to_string(),
+            resource_labels.to_vec(),
+            labels,
+            ObservationValue::envelope(envelope),
+        ));
+        Ok(())
+    }
+
     /// Builds and appends one `Observation` from a data point — a
     /// no-op if the data point carries no value.
     ///
@@ -1551,8 +1698,10 @@ impl DecodeAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::{Encoding, SketchType};
+    use crate::envelope::SketchType;
     use crate::observation::{KeyValue as Kv, ObservationValueKind};
+    use crate::precompute::Sketch;
+    use crate::sketches::DDSketchWrapper;
 
     fn one_envelope(
         metric_name: &str,
@@ -1641,12 +1790,21 @@ mod tests {
     }
 
     #[test]
-    fn encode_then_decode_round_trips_a_sketch_envelope_carried_as_a_metric_attribute() {
+    fn summary_carrier_round_trips_a_self_describing_sketch_envelope() {
         let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
         env.sketch_type = SketchType::DDSketch;
         env.encoding = Encoding::ProtoFull;
         env.agg_id = 7;
-        env.payload = vec![0xde, 0xad, 0xbe, 0xef];
+        let mut sketch = DDSketchWrapper::new(0.01);
+        sketch.update(42.0);
+        env.payload = sketch
+            .snapshot()
+            .expect("self-describing DDSketch envelope");
+        let expected_payload = env.payload.clone();
+
+        let proto = ProtoSketchEnvelope::decode(env.payload.as_slice())
+            .expect("sketch.envelope must be the sketchlib protobuf");
+        assert!(proto.sketch_state.is_some());
 
         let pdata = encode_envelopes_to_pdata(std::slice::from_ref(&env)).expect("encode");
         let outcome = decode_pdata_to_observations(pdata).expect("decode");
@@ -1654,12 +1812,25 @@ mod tests {
         let obs = &outcome.observations[0];
         assert_eq!(obs.value.kind, ObservationValueKind::Envelope);
         let decoded_env = obs.value.envelope.as_ref().expect("envelope");
-        assert_eq!(decoded_env.payload, vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(decoded_env.payload, expected_payload);
         assert_eq!(decoded_env.sketch_type, SketchType::DDSketch);
         assert_eq!(decoded_env.encoding, Encoding::ProtoFull);
         assert_eq!(decoded_env.agg_id, 7);
         assert_eq!(decoded_env.window_start_ms, 1_000);
         assert_eq!(decoded_env.window_end_ms, 2_000);
+    }
+
+    #[test]
+    fn proto_full_rejects_non_self_describing_envelope_bytes() {
+        let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
+        env.sketch_type = SketchType::DDSketch;
+        env.encoding = Encoding::ProtoFull;
+        env.payload = vec![0xde, 0xad, 0xbe, 0xef];
+
+        let error = encode_envelopes_to_pdata(&[env]).expect_err("invalid protobuf must fail");
+        assert!(error
+            .to_string()
+            .contains("self-describing sketch.envelope"));
     }
 
     /// The bug this rewrite fixes: an estimate-mode envelope (empty
