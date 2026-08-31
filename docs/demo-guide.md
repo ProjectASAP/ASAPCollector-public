@@ -96,25 +96,32 @@ Before running the command, show the YAML embedded in
 [`tests/otap_pipeline_e2e.rs`](../asap-precompute-rs/tests/otap_pipeline_e2e.rs).
 Its effective topology is:
 
-```text
-one_metric receiver (values 1..=100)
-        |
-        | scalar OtapPdata: request.duration{route=/checkout}
-        v
-create_sketch: asap_sketches
-        |
-        | self-describing DDSketch carried by OtapPdata
-        v
-merge_sketch: asap_sketches
-        |
-        | merged self-describing DDSketch carried by OtapPdata
-        v
-estimate_sketch: asap_sketches
-        |
-        | scalar p50 and p99 OtapPdata gauges
-        v
-capture exporter
+```mermaid
+flowchart TD
+  subgraph RP["one RuntimePipeline — single process, in-memory OTAP channels"]
+    direction TB
+    S["<b>source</b><br/>urn:asap:receiver:one_metric<br/><i>test node</i>"]
+    C["<b>create_sketch</b> · asap_sketches<br/>ddsketch · agg_id 7 · window 20ms<br/>transmit_sketch = true"]
+    M["<b>merge_sketch</b> · asap_sketches<br/>ddsketch · agg_id 7 · window 20ms<br/>transmit_sketch = true"]
+    E["<b>estimate_sketch</b> · asap_sketches<br/>ddsketch · agg_id 7 · window 20ms<br/>transmit_sketch = false · quantiles [0.5, 0.99]"]
+    X["<b>sink</b><br/>urn:asap:exporter:capture<br/><i>test node</i>"]
+
+    S -->|"100 scalar OtapPdata gauges<br/>request.duration{route=/checkout}"| C
+    C -->|"self-describing DDSketch<br/>_asap_envelope on OtapPdata (ProtoFull)"| M
+    M -->|"merged DDSketch<br/>folded as sketch state, never re-sampled"| E
+    E -->|"scalar p50 / p99 OtapPdata gauges<br/>request.duration.estimate{quantile=…, route=/checkout}"| X
+  end
+
+  style C fill:#2b6cb0,color:#fff
+  style M fill:#2b6cb0,color:#fff
+  style E fill:#2b6cb0,color:#fff
 ```
+
+Every edge is an in-process OTAP pipeline channel
+(`effect_handler.send_message_with_source_node`) — there is no network hop in
+this demo. `source` and `sink` are deterministic test nodes; the three
+`asap_sketches` nodes, the YAML parser, factory registration, timer, runtime,
+`OtapPdata` codec, and shutdown path are the real implementations.
 
 The important processor portion of the YAML is:
 
@@ -152,10 +159,6 @@ nodes:
       transmit_sketch: false
       quantiles: [0.5, 0.99]
 ```
-
-The source and capture exporter are deterministic test nodes. The
-`asap_sketches` node, YAML parser, factory registration, channels, timer,
-runtime, `OtapPdata` codec, and shutdown path are the real implementations.
 
 ## Suggested presentation script
 
