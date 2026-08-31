@@ -38,7 +38,8 @@ use otel_arrow_dfe_otap::{
 use otel_arrow_dfe_state::store::ObservedStateStore;
 use otel_arrow_dfe_telemetry::InternalTelemetrySystem;
 
-const SOURCE_URN: &str = "urn:asap:receiver:demo_metrics";
+const SOURCE_A_URN: &str = "urn:asap:receiver:demo_metrics_a";
+const SOURCE_B_URN: &str = "urn:asap:receiver:demo_metrics_b";
 const SINK_URN: &str = "urn:asap:exporter:demo_results";
 static CAPTURED: OnceLock<Mutex<Vec<OtapPdata>>> = OnceLock::new();
 
@@ -46,8 +47,8 @@ fn captured() -> &'static Mutex<Vec<OtapPdata>> {
     CAPTURED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn scalar_input() -> OtapPdata {
-    let observations = (1..=100)
+fn scalar_input(start: i32, end: i32) -> OtapPdata {
+    let observations = (start..=end)
         .map(|value| SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::Unspecified,
@@ -68,7 +69,11 @@ fn scalar_input() -> OtapPdata {
     encode_envelopes_to_pdata(&observations).expect("encode demo input")
 }
 
-struct DemoReceiver;
+struct DemoReceiver {
+    name: &'static str,
+    start: i32,
+    end: i32,
+}
 
 #[async_trait(?Send)]
 impl local_receiver::Receiver<OtapPdata> for DemoReceiver {
@@ -77,8 +82,11 @@ impl local_receiver::Receiver<OtapPdata> for DemoReceiver {
         mut ctrl: local_receiver::ControlChannel<OtapPdata>,
         effect_handler: local_receiver::EffectHandler<OtapPdata>,
     ) -> Result<TerminalState, otel_arrow_dfe_engine::error::Error> {
-        let input = scalar_input();
-        println!("\n=== receiver output: request.duration ===");
+        let input = scalar_input(self.start, self.end);
+        println!(
+            "\n=== receiver output: {} (values {}..={}) ===",
+            self.name, self.start, self.end
+        );
         match describe_pdata_protocol(&input) {
             Ok(description) => print!("{description}"),
             Err(error) => println!("  unable to describe OTAP message: {error}"),
@@ -94,20 +102,56 @@ impl local_receiver::Receiver<OtapPdata> for DemoReceiver {
     }
 }
 
-fn create_source(
+fn create_source_a(
     _ctx: PipelineContext,
     node: NodeId,
     config: Arc<NodeUserConfig>,
     runtime: &ReceiverConfig,
     _capabilities: &Capabilities,
 ) -> Result<ReceiverWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
-    Ok(ReceiverWrapper::local(DemoReceiver, node, config, runtime))
+    Ok(ReceiverWrapper::local(
+        DemoReceiver {
+            name: "source_a",
+            start: 1,
+            end: 100,
+        },
+        node,
+        config,
+        runtime,
+    ))
 }
 
 #[distributed_slice(OTAP_RECEIVER_FACTORIES)]
-static SOURCE_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
-    name: SOURCE_URN,
-    create: create_source,
+static SOURCE_A_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
+    name: SOURCE_A_URN,
+    create: create_source_a,
+    wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
+    validate_config: otel_arrow_dfe_config::validation::no_config,
+};
+
+fn create_source_b(
+    _ctx: PipelineContext,
+    node: NodeId,
+    config: Arc<NodeUserConfig>,
+    runtime: &ReceiverConfig,
+    _capabilities: &Capabilities,
+) -> Result<ReceiverWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
+    Ok(ReceiverWrapper::local(
+        DemoReceiver {
+            name: "source_b",
+            start: 101,
+            end: 200,
+        },
+        node,
+        config,
+        runtime,
+    ))
+}
+
+#[distributed_slice(OTAP_RECEIVER_FACTORIES)]
+static SOURCE_B_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
+    name: SOURCE_B_URN,
+    create: create_source_b,
     wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
     validate_config: otel_arrow_dfe_config::validation::no_config,
 };
@@ -154,9 +198,21 @@ fn pipeline_yaml() -> String {
     format!(
         r#"
 nodes:
-  source:
-    type: "{SOURCE_URN}"
-  create_sketch:
+  source_a:
+    type: "{SOURCE_A_URN}"
+  source_b:
+    type: "{SOURCE_B_URN}"
+  create_sketch_a:
+    type: "urn:asap:processor:asap_sketches"
+    config:
+      sketch_type: "ddsketch"
+      window_size: "20ms"
+      output_metric_name: "request.duration.sketch"
+      agg_id: 7
+      sketch_params:
+        relative_accuracy: 0.01
+      transmit_sketch: true
+  create_sketch_b:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "ddsketch"
@@ -190,9 +246,13 @@ nodes:
   sink:
     type: "{SINK_URN}"
 connections:
-  - from: source
-    to: create_sketch
-  - from: create_sketch
+  - from: source_a
+    to: create_sketch_a
+  - from: source_b
+    to: create_sketch_b
+  - from: create_sketch_a
+    to: merge_sketch
+  - from: create_sketch_b
     to: merge_sketch
   - from: merge_sketch
     to: estimate_sketch
@@ -205,8 +265,9 @@ connections:
 fn main() {
     set_protocol_trace_enabled(true);
     println!("ASAP native OTAP sketch protocol demo");
-    println!("input: 100 request.duration values (1..=100), route=/checkout");
-    println!("pipeline: scalar -> create DDSketch -> merge sketch -> estimate p50/p99");
+    println!("input A: 100 request.duration values (1..=100), route=/checkout");
+    println!("input B: 100 request.duration values (101..=200), route=/checkout");
+    println!("pipeline: two DDSketch creates -> merge both sketches -> estimate p50/p99");
 
     captured().lock().expect("capture mutex").clear();
     let config = PipelineConfig::from_yaml("asap-demo".into(), "sketches".into(), &pipeline_yaml())
@@ -307,5 +368,22 @@ fn main() {
             observation.value.envelope.is_some()
         );
     }
-    println!("success: sketch state crossed two native OtapPdata processor hops");
+    let estimate = |quantile: &str| {
+        decoded
+            .iter()
+            .find(|observation| {
+                observation
+                    .labels
+                    .iter()
+                    .any(|kv| kv.key == "quantile" && kv.value == quantile)
+            })
+            .unwrap_or_else(|| panic!("missing quantile {quantile}"))
+            .value
+            .float
+    };
+    let p50 = estimate("0.5");
+    let p99 = estimate("0.99");
+    assert!((p50 - 100.0).abs() / 100.0 < 0.05, "unexpected p50: {p50}");
+    assert!((p99 - 198.0).abs() / 198.0 < 0.05, "unexpected p99: {p99}");
+    println!("success: two 100-point sketches merged into one 200-point distribution");
 }
