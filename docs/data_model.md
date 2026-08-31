@@ -371,20 +371,31 @@ The reason "SCHEMA once, DICTIONARY incremental" saves anything is that
 Arrow's **IPC format** keeps state across a stream: a decoder retains
 the last Schema message and every Dictionary batch it has seen, and
 later RecordBatches lean on that retained state instead of repeating
-it. That's an IPC-level property — it is not something OTAP itself
-guarantees. OTAP's own protocol does carry schema/dictionary
-constructs, but nothing above the IPC layer guarantees a receiver
-treats a sequence of OTAP batches as one continuous stream with
-retained state; a batch can in principle be decoded independently, or
-land on a replica that never saw the earlier Schema/Dictionary
-messages.
+it. The real OTAP metrics mapping implemented by `otap/codec.rs` is:
+
+| Sketch entity | Native OTAP representation |
+|---|---|
+| `SCHEMA` | Attributes of the aggregation plan's Resource |
+| `DICTIONARY` / `LABELS` | Metric name plus attributes of the series' instrumentation Scope |
+| `RECORD` | NumberDataPoint plus its attribute child rows |
+
+OTAP's `resource_id`, `scope_id`, metric `id`, and attribute `parent_id`
+columns express the joins instead of repeating SCHEMA and series facts on
+every data point. The processor also retains its series registry, so a series
+keeps the same `series_id` across window flushes.
+
+The current OTAP transport does preserve Arrow stream state. Its producer
+retains one IPC writer and dictionary tracker per payload type, writes the
+Arrow schema when that stream is created or its schema changes, and enables
+dictionary-delta handling. Schema bytes and dictionary values are therefore
+incremental over one continuous OTAP connection.
 
 So the "established once, referenced by index thereafter" economics
 this doc leans on are inherited from Arrow IPC decode semantics, and
-only hold if whatever carries these envelopes between `asap_sketches`
-instances preserves that same continuous-stream contract (stable
-routing, no replica hand-off mid-stream) — it is not a guarantee OTAP
-provides for free at its own protocol level. Open question: does the
-transport between `asap_sketches` instances actually provide that
-guarantee today, or does `DICTIONARY`'s incremental-append design
-assume a stronger delivery contract than exists?
+only hold while that producer/consumer stream remains continuous. Each
+`OtapPdata` is nevertheless independently joinable and includes the Resource
+and Scope parent rows required by its metric records; those structural rows
+cannot safely be omitted merely because an earlier message carried equivalent
+parents. Reconnection, routing to another replica, or conversion through OTLP
+starts a new schema/dictionary context without making an individual message
+undecodable.
