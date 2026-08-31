@@ -119,6 +119,13 @@ this repo's own build. `tests/otap_pipeline_e2e.rs` parses a genuine
 OTAP pipeline YAML, builds it through `OTAP_PIPELINE_FACTORY`, runs the
 resulting `RuntimePipeline`, injects real scalar `OtapPdata`, and verifies a
 three-processor creation → merge → estimation flow at the configured exporter.
+Run the same live pipeline as a terminal demo with:
+
+```sh
+cd asap-precompute-rs
+cargo run --bin asap-otap-demo --features otap-engine
+```
+
 The real OTAP adapter merges an upstream processor's self-describing sketch
 directly from `OtapPdata`; the separate legacy `SketchStreamBatch` format has
 its own standalone example binaries. Cross-host byte-parity (Phase **E**) is

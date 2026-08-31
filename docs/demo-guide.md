@@ -6,8 +6,8 @@ three independently configured dataflow processors: one creates a DDSketch,
 one merges that self-describing sketch without expanding it back into samples,
 and one estimates p50 and p99 as ordinary scalar OTAP metrics.
 
-The demo is automated as an integration test so it is repeatable and ends with
-a clear pass/fail result.
+The demo is available both as a runnable binary that prints its estimates and
+as an integration test with strict pass/fail assertions.
 
 ## What the demo proves
 
@@ -67,6 +67,16 @@ cargo test --features otap-engine --test otap_pipeline_e2e --no-run
 ```
 
 ## Run the demo
+
+Run the presentation binary:
+
+```sh
+cargo run --bin asap-otap-demo --features otap-engine
+```
+
+It prints the input, pipeline stages, and the final p50/p99 scalar metrics.
+
+## Run the automated assertion
 
 Run only the live-pipeline scenario:
 
