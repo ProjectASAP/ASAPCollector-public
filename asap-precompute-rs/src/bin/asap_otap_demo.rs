@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 
 use asap_precompute_rs::envelope::{Encoding, SketchEnvelope, SketchType};
 use asap_precompute_rs::observation::KeyValue;
-use asap_precompute_rs::otap::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata};
+use asap_precompute_rs::otap::codec::{
+    decode_pdata_to_observations, describe_pdata_protocol, encode_envelopes_to_pdata,
+    set_protocol_trace_enabled,
+};
 use async_trait::async_trait;
 use linkme::distributed_slice;
 use otel_arrow_dfe_config::node::NodeUserConfig;
@@ -74,9 +77,13 @@ impl local_receiver::Receiver<OtapPdata> for DemoReceiver {
         mut ctrl: local_receiver::ControlChannel<OtapPdata>,
         effect_handler: local_receiver::EffectHandler<OtapPdata>,
     ) -> Result<TerminalState, otel_arrow_dfe_engine::error::Error> {
-        effect_handler
-            .send_message_with_source_node(scalar_input())
-            .await?;
+        let input = scalar_input();
+        println!("\n=== receiver output: request.duration ===");
+        match describe_pdata_protocol(&input) {
+            Ok(description) => print!("{description}"),
+            Err(error) => println!("  unable to describe OTAP message: {error}"),
+        }
+        effect_handler.send_message_with_source_node(input).await?;
         loop {
             match ctrl.recv().await {
                 Ok(NodeControlMsg::Shutdown { .. }) | Err(_) => break,
@@ -196,6 +203,7 @@ connections:
 }
 
 fn main() {
+    set_protocol_trace_enabled(true);
     println!("ASAP native OTAP sketch protocol demo");
     println!("input: 100 request.duration values (1..=100), route=/checkout");
     println!("pipeline: scalar -> create DDSketch -> merge sketch -> estimate p50/p99");

@@ -74,7 +74,10 @@ Run the presentation binary:
 cargo run --bin asap-otap-demo --features otap-engine
 ```
 
-It prints the input, pipeline stages, and the final p50/p99 scalar metrics.
+It prints every pipeline boundary in two forms: the logical OTLP metric
+records and the physical OTAP Arrow child batches (row counts plus schemas).
+Large input batches are abbreviated, and binary envelopes are shown by byte
+length. The final p50/p99 scalar metrics are printed in full.
 
 ## Run the automated assertion
 

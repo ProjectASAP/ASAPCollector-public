@@ -111,7 +111,10 @@ use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::{AsapSketchesPlugin, PluginConfig};
 use crate::precompute::{Precompute, PrecomputeError};
 
-use super::codec::{decode_pdata_to_observations, OtapSketchEncoder};
+use super::codec::{
+    decode_pdata_to_observations, describe_pdata_protocol, protocol_trace_enabled,
+    OtapSketchEncoder,
+};
 
 /// Public URN for the unified ASAP `asap_sketches` processor. Survives
 /// across hosts unchanged so a controller plan addressed at this URN
@@ -379,6 +382,16 @@ impl AsapSketchesProcessor {
             Ok(pdata) => pdata,
             Err(_e) => return Ok(()), // drop the bad window, keep the processor alive
         };
+        if protocol_trace_enabled() {
+            println!(
+                "\n=== processor output: {} ===",
+                self.plugin_config.output_metric_name
+            );
+            match describe_pdata_protocol(&pdata) {
+                Ok(description) => print!("{description}"),
+                Err(error) => println!("  unable to describe OTAP message: {error}"),
+            }
+        }
         effect_handler.send_message_with_source_node(pdata).await?;
         Ok(())
     }
