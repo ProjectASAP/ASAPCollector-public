@@ -56,6 +56,18 @@ pub const ATTR_WINDOW_END_MS: &str = "_asap_window_end_ms";
 /// (`"PROTO_FULL"` / `"PROTO_DELTA"` / `"MSGPACK"`).
 pub const ATTR_ENCODING: &str = "_asap_encoding";
 
+/// Stable series identity carried on the OTAP instrumentation-scope
+/// attribute child batch. Number data points reference their scope through
+/// OTAP's native `scope_id` join, so this value is not repeated per record.
+pub const ATTR_SERIES_ID: &str = "_asap_series_id";
+
+/// Optional sketch size/accuracy parameters on the Resource SCHEMA row.
+pub const ATTR_SKETCH_SIZE: &str = "_asap_sketch_size";
+/// Optional hash seed on the Resource SCHEMA row.
+pub const ATTR_HASH_SEED: &str = "_asap_hash_seed";
+/// Optional hash algorithm on the Resource SCHEMA row.
+pub const ATTR_HASH_FUNCTION: &str = "_asap_hash_function";
+
 /// Returns true if `name` is one of the well-known scalar columns or
 /// `_asap_*` carrier keys; everything else is treated as a per-row
 /// label by [`crate::otap::decode_batch`].
@@ -72,6 +84,10 @@ pub fn is_reserved_column(name: &str) -> bool {
             | ATTR_WINDOW_START_MS
             | ATTR_WINDOW_END_MS
             | ATTR_ENCODING
+            | ATTR_SERIES_ID
+            | ATTR_SKETCH_SIZE
+            | ATTR_HASH_SEED
+            | ATTR_HASH_FUNCTION
     )
 }
 
