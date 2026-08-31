@@ -63,7 +63,6 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use thiserror::Error;
 
@@ -119,17 +118,6 @@ fn resolve_hash_seed(
         .ok()
         .map(|algorithm| algorithm.as_str_name().to_owned());
     (seed, function)
-}
-
-static PROTOCOL_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
-
-/// Enables or disables human-readable protocol tracing for demo processes.
-pub fn set_protocol_trace_enabled(enabled: bool) {
-    PROTOCOL_TRACE_ENABLED.store(enabled, Ordering::Relaxed);
-}
-
-pub(crate) fn protocol_trace_enabled() -> bool {
-    PROTOCOL_TRACE_ENABLED.load(Ordering::Relaxed)
 }
 
 /// Failure modes for [`encode_envelopes_to_pdata`] / [`decode_pdata_to_observations`].
