@@ -1,21 +1,17 @@
-//! Runnable native-OTAP sketch create -> merge -> estimate demonstration.
-
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+//! Multi-process OTAP sketch create -> merge -> estimate demonstration.
+//! Each ASAP processor runs in its own OS process and OTAP RuntimePipeline.
 
 use asap_precompute_rs::envelope::{Encoding, SketchEnvelope, SketchType};
 use asap_precompute_rs::observation::KeyValue;
-use asap_precompute_rs::otap::codec::{
-    decode_pdata_to_observations, describe_pdata_protocol, encode_envelopes_to_pdata,
-    set_protocol_trace_enabled,
-};
+use asap_precompute_rs::otap::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata};
 use async_trait::async_trait;
 use linkme::distributed_slice;
 use otel_arrow_dfe_config::node::NodeUserConfig;
 use otel_arrow_dfe_config::observed_state::{ObservedStateSettings, SendPolicy};
 use otel_arrow_dfe_config::pipeline::PipelineConfig;
 use otel_arrow_dfe_config::policy::{ChannelCapacityPolicy, TelemetryPolicy};
-use otel_arrow_dfe_config::{DeployedPipelineKey, PipelineGroupId, PipelineId};
+use otel_arrow_dfe_config::{DeployedPipelineKey, PipelineGroupId, PipelineId, SignalType};
+use otel_arrow_dfe_core_nodes as _;
 use otel_arrow_dfe_engine::capability::registry::Capabilities;
 use otel_arrow_dfe_engine::config::{ExporterConfig, ReceiverConfig};
 use otel_arrow_dfe_engine::context::{ControllerContext, PipelineContext};
@@ -35,20 +31,26 @@ use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::{
     OTAP_EXPORTER_FACTORIES, OTAP_PIPELINE_FACTORY, OTAP_RECEIVER_FACTORIES,
 };
+use otel_arrow_dfe_pdata::{OtlpProtoBytes, TryIntoWithOptions};
 use otel_arrow_dfe_state::store::ObservedStateStore;
 use otel_arrow_dfe_telemetry::InternalTelemetrySystem;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{env, fs};
 
-const SOURCE_A_URN: &str = "urn:asap:receiver:demo_metrics_a";
-const SOURCE_B_URN: &str = "urn:asap:receiver:demo_metrics_b";
-const SINK_URN: &str = "urn:asap:exporter:demo_results";
+const WORKER_ARG: &str = "--df-worker";
+const SOURCE_URN: &str = "urn:asap:receiver:otlp_file";
+const SINK_URN: &str = "urn:asap:exporter:otlp_file";
+static INPUTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 static CAPTURED: OnceLock<Mutex<Vec<OtapPdata>>> = OnceLock::new();
-
 fn captured() -> &'static Mutex<Vec<OtapPdata>> {
     CAPTURED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 fn scalar_input(start: i32, end: i32) -> OtapPdata {
-    let observations = (start..=end)
+    let values = (start..=end)
         .map(|value| SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::Unspecified,
@@ -60,38 +62,46 @@ fn scalar_input(start: i32, end: i32) -> OtapPdata {
             encoding: Encoding::Unspecified,
             payload: vec![],
             hash_spec: None,
-            metric_name: "request.duration".to_owned(),
+            metric_name: "request.duration".into(),
             count: 0,
             aggregation_temporality: 0,
             value: f64::from(value),
         })
         .collect::<Vec<_>>();
-    encode_envelopes_to_pdata(&observations).expect("encode demo input")
+    encode_envelopes_to_pdata(&values).expect("encode input")
 }
 
-struct DemoReceiver {
-    name: &'static str,
-    start: i32,
-    end: i32,
+fn write_otlp(path: &Path, pdata: OtapPdata) -> Result<(), String> {
+    let (_, payload) = pdata.into_parts();
+    let encoded = <_ as TryIntoWithOptions<OtlpProtoBytes>>::try_into_with_default(payload)
+        .map_err(|e| e.to_string())?;
+    match encoded {
+        OtlpProtoBytes::ExportMetricsRequest(bytes) => {
+            fs::write(path, bytes).map_err(|e| e.to_string())
+        }
+        _ => Err("non-metrics signal".into()),
+    }
+}
+fn read_otlp(path: &Path) -> Result<OtapPdata, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    Ok(OtapPdata::new_todo_context(
+        OtlpProtoBytes::new_from_bytes(SignalType::Metrics, bytes).into(),
+    ))
 }
 
+struct FileReceiver;
 #[async_trait(?Send)]
-impl local_receiver::Receiver<OtapPdata> for DemoReceiver {
+impl local_receiver::Receiver<OtapPdata> for FileReceiver {
     async fn start(
         self: Box<Self>,
         mut ctrl: local_receiver::ControlChannel<OtapPdata>,
-        effect_handler: local_receiver::EffectHandler<OtapPdata>,
+        effects: local_receiver::EffectHandler<OtapPdata>,
     ) -> Result<TerminalState, otel_arrow_dfe_engine::error::Error> {
-        let input = scalar_input(self.start, self.end);
-        println!(
-            "\n=== receiver output: {} (values {}..={}) ===",
-            self.name, self.start, self.end
-        );
-        match describe_pdata_protocol(&input) {
-            Ok(description) => print!("{description}"),
-            Err(error) => println!("  unable to describe OTAP message: {error}"),
+        for path in INPUTS.get().expect("inputs initialized") {
+            effects
+                .send_message_with_source_node(read_otlp(path).expect("read OTLP input"))
+                .await?;
         }
-        effect_handler.send_message_with_source_node(input).await?;
         loop {
             match ctrl.recv().await {
                 Ok(NodeControlMsg::Shutdown { .. }) | Err(_) => break,
@@ -101,69 +111,30 @@ impl local_receiver::Receiver<OtapPdata> for DemoReceiver {
         Ok(TerminalState::default())
     }
 }
-
-fn create_source_a(
+fn create_source(
     _ctx: PipelineContext,
     node: NodeId,
     config: Arc<NodeUserConfig>,
     runtime: &ReceiverConfig,
-    _capabilities: &Capabilities,
+    _caps: &Capabilities,
 ) -> Result<ReceiverWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
-    Ok(ReceiverWrapper::local(
-        DemoReceiver {
-            name: "source_a",
-            start: 1,
-            end: 100,
-        },
-        node,
-        config,
-        runtime,
-    ))
+    Ok(ReceiverWrapper::local(FileReceiver, node, config, runtime))
 }
-
 #[distributed_slice(OTAP_RECEIVER_FACTORIES)]
-static SOURCE_A_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
-    name: SOURCE_A_URN,
-    create: create_source_a,
+static SOURCE_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
+    name: SOURCE_URN,
+    create: create_source,
     wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
     validate_config: otel_arrow_dfe_config::validation::no_config,
 };
 
-fn create_source_b(
-    _ctx: PipelineContext,
-    node: NodeId,
-    config: Arc<NodeUserConfig>,
-    runtime: &ReceiverConfig,
-    _capabilities: &Capabilities,
-) -> Result<ReceiverWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
-    Ok(ReceiverWrapper::local(
-        DemoReceiver {
-            name: "source_b",
-            start: 101,
-            end: 200,
-        },
-        node,
-        config,
-        runtime,
-    ))
-}
-
-#[distributed_slice(OTAP_RECEIVER_FACTORIES)]
-static SOURCE_B_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
-    name: SOURCE_B_URN,
-    create: create_source_b,
-    wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
-    validate_config: otel_arrow_dfe_config::validation::no_config,
-};
-
-struct DemoExporter;
-
+struct FileExporter;
 #[async_trait(?Send)]
-impl local_exporter::Exporter<OtapPdata> for DemoExporter {
+impl local_exporter::Exporter<OtapPdata> for FileExporter {
     async fn start(
         self: Box<Self>,
         mut inbox: ExporterInbox<OtapPdata>,
-        _effect_handler: local_exporter::EffectHandler<OtapPdata>,
+        _effects: local_exporter::EffectHandler<OtapPdata>,
     ) -> Result<TerminalState, otel_arrow_dfe_engine::error::Error> {
         loop {
             match inbox.recv().await? {
@@ -175,17 +146,15 @@ impl local_exporter::Exporter<OtapPdata> for DemoExporter {
         Ok(TerminalState::default())
     }
 }
-
 fn create_sink(
     _ctx: PipelineContext,
     node: NodeId,
     config: Arc<NodeUserConfig>,
     runtime: &ExporterConfig,
-    _capabilities: &Capabilities,
+    _caps: &Capabilities,
 ) -> Result<ExporterWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
-    Ok(ExporterWrapper::local(DemoExporter, node, config, runtime))
+    Ok(ExporterWrapper::local(FileExporter, node, config, runtime))
 }
-
 #[distributed_slice(OTAP_EXPORTER_FACTORIES)]
 static SINK_FACTORY: ExporterFactory<OtapPdata> = ExporterFactory {
     name: SINK_URN,
@@ -194,100 +163,73 @@ static SINK_FACTORY: ExporterFactory<OtapPdata> = ExporterFactory {
     validate_config: otel_arrow_dfe_config::validation::no_config,
 };
 
-fn pipeline_yaml() -> String {
-    format!(
+fn pipeline_yaml(role: &str, trace: &Path) -> Result<String, String> {
+    let (name, transmit, quantiles) = match role {
+        "create_a" | "create_b" => ("request.duration.sketch", true, "[]"),
+        "merge" => ("request.duration.merged_sketch", true, "[]"),
+        "estimate" => ("request.duration.estimate", false, "[0.5, 0.99]"),
+        _ => return Err(format!("unknown role {role}")),
+    };
+    let trace = serde_json::to_string(&trace.to_string_lossy()).unwrap();
+    Ok(format!(
         r#"
 nodes:
-  source_a:
-    type: "{SOURCE_A_URN}"
-  source_b:
-    type: "{SOURCE_B_URN}"
-  create_sketch_a:
+  source: {{ type: "{SOURCE_URN}" }}
+  sketch:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "kll"
       encoding: "Msgpack"
       window_size: "20ms"
-      output_metric_name: "request.duration.sketch"
+      output_metric_name: "{name}"
       agg_id: 7
-      sketch_params:
-        k: 200
-      transmit_sketch: true
-  create_sketch_b:
-    type: "urn:asap:processor:asap_sketches"
+      sketch_params: {{ k: 200 }}
+      transmit_sketch: {transmit}
+      quantiles: {quantiles}
+  debug:
+    type: "urn:otel:processor:debug"
     config:
-      sketch_type: "kll"
-      encoding: "Msgpack"
-      window_size: "20ms"
-      output_metric_name: "request.duration.sketch"
-      agg_id: 7
-      sketch_params:
-        k: 200
-      transmit_sketch: true
-  merge_sketch:
-    type: "urn:asap:processor:asap_sketches"
-    config:
-      sketch_type: "kll"
-      encoding: "Msgpack"
-      window_size: "20ms"
-      output_metric_name: "request.duration.merged_sketch"
-      agg_id: 7
-      sketch_params:
-        k: 200
-      transmit_sketch: true
-  estimate_sketch:
-    type: "urn:asap:processor:asap_sketches"
-    config:
-      sketch_type: "kll"
-      encoding: "Msgpack"
-      window_size: "20ms"
-      output_metric_name: "request.duration.estimate"
-      agg_id: 7
-      sketch_params:
-        k: 200
-      transmit_sketch: false
-      quantiles: [0.5, 0.99]
-  sink:
-    type: "{SINK_URN}"
+      verbosity: detailed
+      mode: batch
+      signals: [metrics]
+      output: {trace}
+  sink: {{ type: "{SINK_URN}" }}
 connections:
-  - from: source_a
-    to: create_sketch_a
-  - from: source_b
-    to: create_sketch_b
-  - from: create_sketch_a
-    to: merge_sketch
-  - from: create_sketch_b
-    to: merge_sketch
-  - from: merge_sketch
-    to: estimate_sketch
-  - from: estimate_sketch
-    to: sink
+  - {{ from: source, to: sketch }}
+  - {{ from: sketch, to: debug }}
+  - {{ from: debug, to: sink }}
 "#
-    )
+    ))
 }
 
-fn main() {
-    set_protocol_trace_enabled(true);
-    println!("ASAP native OTAP sketch protocol demo");
-    println!("input A: 100 request.duration values (1..=100), route=/checkout");
-    println!("input B: 100 request.duration values (101..=200), route=/checkout");
-    println!("pipeline: two ASAPv1 KLL creates -> merge both sketches -> estimate p50/p99");
-
-    captured().lock().expect("capture mutex").clear();
-    let config = PipelineConfig::from_yaml("asap-demo".into(), "sketches".into(), &pipeline_yaml())
-        .expect("demo pipeline YAML parses");
+fn run_worker(
+    role: &str,
+    inputs: Vec<PathBuf>,
+    output: PathBuf,
+    trace: PathBuf,
+) -> Result<(), String> {
+    INPUTS
+        .set(inputs)
+        .map_err(|_| "inputs already initialized".to_owned())?;
+    captured().lock().unwrap().clear();
+    let config = PipelineConfig::from_yaml(
+        "asap-demo".into(),
+        role.to_owned().into(),
+        &pipeline_yaml(role, &trace)?,
+    )
+    .map_err(|e| e.to_string())?;
     let telemetry = InternalTelemetrySystem::default();
-    let pipeline_ctx = ControllerContext::new(telemetry.registry()).pipeline_context_with(
+    let ctx = ControllerContext::new(telemetry.registry()).pipeline_context_with(
         PipelineGroupId::from("asap-demo"),
-        PipelineId::from("sketches"),
+        PipelineId::from(role.to_owned()),
         0,
         1,
         0,
     );
-    let entity_key = pipeline_ctx.register_pipeline_entity();
+    let entity = ctx.register_pipeline_entity();
     let runtime = OTAP_PIPELINE_FACTORY
         .build(
-            pipeline_ctx.clone(),
+            ctx.clone(),
             config,
             ChannelCapacityPolicy::default(),
             TelemetryPolicy::default(),
@@ -296,39 +238,38 @@ fn main() {
             None,
             None,
         )
-        .expect("build demo pipeline");
-    let channel_policy = ChannelCapacityPolicy::default();
-    let (runtime_tx, runtime_rx) = runtime_ctrl_msg_channel(channel_policy.control.pipeline);
-    let (completion_tx, completion_rx) =
-        pipeline_completion_msg_channel(channel_policy.control.completion);
+        .map_err(|e| e.to_string())?;
+    let policy = ChannelCapacityPolicy::default();
+    let (runtime_tx, runtime_rx) = runtime_ctrl_msg_channel(policy.control.pipeline);
+    let (completion_tx, completion_rx) = pipeline_completion_msg_channel(policy.control.completion);
     let observed = ObservedStateStore::new(&ObservedStateSettings::default(), telemetry.registry());
     let shutdown_tx = runtime_tx.clone();
     let shutdown = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(250));
         shutdown_tx
             .try_send(RuntimeControlMsg::Shutdown {
-                deadline: Instant::now() + Duration::from_secs(1),
-                reason: "demo complete".to_owned(),
+                deadline: Instant::now() + Duration::from_secs(2),
+                reason: "input complete".into(),
             })
-            .expect("request demo shutdown");
+            .expect("shutdown");
     });
-    let pipeline_key = DeployedPipelineKey {
-        pipeline_group_id: pipeline_ctx.pipeline_group_id(),
-        pipeline_id: pipeline_ctx.pipeline_id(),
+    let key = DeployedPipelineKey {
+        pipeline_group_id: ctx.pipeline_group_id(),
+        pipeline_id: ctx.pipeline_id(),
         core_id: 0,
         deployment_generation: 0,
     };
-    let (_pressure_tx, pressure_rx) = tokio::sync::watch::channel(
+    let (_, pressure_rx) = tokio::sync::watch::channel(
         otel_arrow_dfe_engine::memory_limiter::MemoryPressureChanged::initial(),
     );
-    let _entity_guard = otel_arrow_dfe_engine::entity_context::set_pipeline_entity_key(
-        pipeline_ctx.metrics_registry(),
-        entity_key,
+    let _guard = otel_arrow_dfe_engine::entity_context::set_pipeline_entity_key(
+        ctx.metrics_registry(),
+        entity,
     );
     runtime
         .run_forever(
-            pipeline_key,
-            pipeline_ctx,
+            key,
+            ctx,
             observed.reporter(SendPolicy::default()),
             telemetry.reporter(),
             Duration::from_secs(1),
@@ -338,56 +279,99 @@ fn main() {
             completion_tx,
             completion_rx,
         )
-        .expect("demo pipeline shuts down cleanly");
-    shutdown.join().expect("shutdown thread");
-
-    let outputs = captured().lock().expect("capture mutex");
-    let mut decoded = Vec::new();
-    for pdata in outputs.iter().cloned() {
-        decoded.extend(
-            decode_pdata_to_observations(pdata)
-                .expect("decode demo output")
-                .observations,
-        );
+        .map_err(|e| e.to_string())?;
+    shutdown
+        .join()
+        .map_err(|_| "shutdown thread panic".to_owned())?;
+    let mut outputs = captured().lock().unwrap();
+    if outputs.len() != 1 {
+        return Err(format!("expected one output, got {}", outputs.len()));
     }
-    assert!(!decoded.is_empty(), "demo produced no estimates");
-    println!("output:");
-    for observation in &decoded {
-        let quantile = observation
+    write_otlp(&output, outputs.pop().unwrap())
+}
+
+fn spawn(exe: &Path, role: &str, inputs: &[&Path], output: &Path, trace: &Path) -> Child {
+    let mut cmd = Command::new(exe);
+    cmd.arg(WORKER_ARG).arg(role);
+    for input in inputs {
+        cmd.arg(input);
+    }
+    cmd.arg(output).arg(trace);
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("launch {role}: {e}"));
+    println!(
+        "launched {role} DF processor pid={} trace={}",
+        child.id(),
+        trace.display()
+    );
+    child
+}
+fn wait(mut child: Child, role: &str) {
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{role} failed: {status}");
+}
+
+fn run_parent() {
+    println!("ASAP OTAP multi-process demo: OTLP Metrics boundaries, ASAPv1 sketches");
+    let id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = env::temp_dir().join(format!("asap-otap-demo-{}-{id}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let p = |name: &str| dir.join(name);
+    let ia = p("a.otlp");
+    let ib = p("b.otlp");
+    let sa = p("sa.otlp");
+    let sb = p("sb.otlp");
+    let merged = p("merged.otlp");
+    let out = p("out.otlp");
+    write_otlp(&ia, scalar_input(1, 100)).unwrap();
+    write_otlp(&ib, scalar_input(101, 200)).unwrap();
+    let exe = env::current_exe().unwrap();
+    let a = spawn(&exe, "create_a", &[&ia], &sa, &p("create-a.debug.log"));
+    let b = spawn(&exe, "create_b", &[&ib], &sb, &p("create-b.debug.log"));
+    wait(a, "create_a");
+    wait(b, "create_b");
+    let m = spawn(&exe, "merge", &[&sa, &sb], &merged, &p("merge.debug.log"));
+    wait(m, "merge");
+    let e = spawn(&exe, "estimate", &[&merged], &out, &p("estimate.debug.log"));
+    wait(e, "estimate");
+    let decoded = decode_pdata_to_observations(read_otlp(&out).unwrap())
+        .unwrap()
+        .observations;
+    for o in &decoded {
+        let q = o
             .labels
             .iter()
             .find(|kv| kv.key == "quantile")
             .map_or("?", |kv| kv.value.as_str());
-        let route = observation
-            .labels
-            .iter()
-            .find(|kv| kv.key == "route")
-            .map_or("?", |kv| kv.value.as_str());
         println!(
-            "  metric={} quantile={} value={:.3} route={} envelope={}",
-            observation.metric,
-            quantile,
-            observation.value.float,
-            route,
-            observation.value.envelope.is_some()
+            "result metric={} quantile={} value={:.3}",
+            o.metric, q, o.value.float
         );
     }
-    let estimate = |quantile: &str| {
-        decoded
-            .iter()
-            .find(|observation| {
-                observation
-                    .labels
-                    .iter()
-                    .any(|kv| kv.key == "quantile" && kv.value == quantile)
-            })
-            .unwrap_or_else(|| panic!("missing quantile {quantile}"))
-            .value
-            .float
-    };
-    let p50 = estimate("0.5");
-    let p99 = estimate("0.99");
-    assert!((p50 - 100.0).abs() / 100.0 < 0.05, "unexpected p50: {p50}");
-    assert!((p99 - 198.0).abs() / 198.0 < 0.05, "unexpected p99: {p99}");
-    println!("success: two 100-point sketches merged into one 200-point distribution");
+    assert_eq!(decoded.len(), 2);
+    println!("success: four DF processors ran in four child OS processes");
+    println!("official detailed debug traces: {}", dir.display());
+}
+
+fn main() {
+    let args = env::args_os().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|a| a == WORKER_ARG) {
+        if args.len() < 5 {
+            eprintln!("usage: {WORKER_ARG} ROLE INPUT... OUTPUT TRACE");
+            std::process::exit(2);
+        }
+        let role = args[1].to_string_lossy().into_owned();
+        let paths = args[2..].iter().map(PathBuf::from).collect::<Vec<_>>();
+        let trace = paths[paths.len() - 1].clone();
+        let output = paths[paths.len() - 2].clone();
+        let inputs = paths[..paths.len() - 2].to_vec();
+        if let Err(e) = run_worker(&role, inputs, output, trace) {
+            eprintln!("[{role}] {e}");
+            std::process::exit(1);
+        }
+    } else {
+        run_parent();
+    }
 }
