@@ -68,6 +68,21 @@ pub const ATTR_HASH_SEED: &str = "_asap_hash_seed";
 /// Optional hash algorithm on the Resource SCHEMA row.
 pub const ATTR_HASH_FUNCTION: &str = "_asap_hash_function";
 
+// Native OTAP Summary carrier keys. These intentionally use the public
+// `sketch.*` namespace; the `_asap_*` constants above remain for the legacy
+// flat Gauge carrier and its compatibility codecs.
+pub const OTAP_ATTR_ENVELOPE: &str = "sketch.envelope";
+pub const OTAP_ATTR_SKETCH_TYPE: &str = "sketch.type";
+pub const OTAP_ATTR_AGG_ID: &str = "sketch.agg_id";
+pub const OTAP_ATTR_SCHEMA_VERSION: &str = "sketch.schema_version";
+pub const OTAP_ATTR_WINDOW_START_MS: &str = "sketch.window_start_ms";
+pub const OTAP_ATTR_WINDOW_END_MS: &str = "sketch.window_end_ms";
+pub const OTAP_ATTR_ENCODING: &str = "sketch.encoding";
+pub const OTAP_ATTR_SERIES_ID: &str = "sketch.series_id";
+pub const OTAP_ATTR_SKETCH_SIZE: &str = "sketch.size";
+pub const OTAP_ATTR_HASH_SEED: &str = "sketch.hash_seed";
+pub const OTAP_ATTR_HASH_FUNCTION: &str = "sketch.hash_function";
+
 /// Returns true if `name` is one of the well-known scalar columns or
 /// `_asap_*` carrier keys; everything else is treated as a per-row
 /// label by [`crate::otap::decode_batch`].
