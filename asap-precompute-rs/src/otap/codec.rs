@@ -1160,28 +1160,49 @@ pub fn describe_pdata_protocol(pdata: &OtapPdata) -> Result<String, CodecError> 
         .try_into_with_default()
         .map_err(|e| CodecError::Decode(format!("{e}")))?;
 
-    writeln!(output, "  OTAP physical Arrow batches:").expect("write String");
+    writeln!(output, "  OTAP PHYSICAL LAYOUT").expect("write String");
     for payload_type in records.allowed_payload_types() {
         let Some(batch) = records.get(*payload_type) else {
             continue;
         };
-        let fields = batch
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| format!("{}:{:?}", field.name(), field.data_type()))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let role = match payload_type {
+            otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::ResourceAttrs => "SCHEMA",
+            otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::ScopeAttrs => "DICTIONARY / LABELS",
+            otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::UnivariateMetrics => "SERIES JOIN",
+            otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::NumberDataPoints
+            | otel_arrow_dfe_pdata::proto::opentelemetry::arrow::v1::ArrowPayloadType::NumberDpAttrs => "RECORD",
+            _ => "CHILD BATCH",
+        };
         writeln!(
             output,
-            "    {payload_type:?}: rows={} [{}]",
-            batch.num_rows(),
-            fields
+            "    +-- {payload_type:?}  [{role}]  rows={}",
+            batch.num_rows()
         )
         .expect("write String");
+        let fields = batch.schema();
+        let name_width = fields
+            .fields()
+            .iter()
+            .map(|field| field.name().len() + usize::from(field.is_nullable()))
+            .max()
+            .unwrap_or(0);
+        for field in fields.fields() {
+            let nullable_name = if field.is_nullable() {
+                format!("{}?", field.name())
+            } else {
+                field.name().to_string()
+            };
+            writeln!(
+                output,
+                "    |   {nullable_name:<name_width$}  {}",
+                pretty_arrow_type(field.data_type())
+            )
+            .expect("write String");
+        }
+        writeln!(output, "    |").expect("write String");
     }
 
-    writeln!(output, "  OTLP logical metric records:").expect("write String");
+    writeln!(output, "  OTLP LOGICAL METRICS").expect("write String");
     let decoded = decode_pdata_to_observations(pdata.clone())?;
     let observation_count = decoded.observations.len();
     for (index, observation) in decoded.observations.into_iter().enumerate() {
@@ -1205,28 +1226,59 @@ pub fn describe_pdata_protocol(pdata: &OtapPdata) -> Result<String, CodecError> 
         if let Some(envelope) = observation.value.envelope {
             writeln!(
                 output,
-                "    Metric(name={}) -> NumberDataPoint(labels={{{}}}, envelope={{agg_id={}, series_schema={}/{}/{}, window=[{},{}), bytes={}}})",
-                observation.metric,
-                labels,
-                envelope.agg_id,
-                envelope.sketch_type.name(),
-                envelope.encoding.name(),
-                envelope.schema_version,
-                envelope.window_start_ms,
-                envelope.window_end_ms,
-                envelope.payload.len()
+                "    +-- Metric  {}\n        |-- labels     {{{}}}\n        |-- value      sketch envelope ({} bytes)\n        |-- schema     agg_id={}  {}  {}  v{}\n        +-- window     [{}, {})",
+                observation.metric, labels, envelope.payload.len(), envelope.agg_id,
+                envelope.sketch_type.name(), envelope.encoding.name(), envelope.schema_version,
+                envelope.window_start_ms, envelope.window_end_ms
             )
             .expect("write String");
         } else {
             writeln!(
                 output,
-                "    Metric(name={}) -> NumberDataPoint(labels={{{}}}, value={})",
+                "    +-- Metric  {}\n        |-- labels     {{{}}}\n        +-- value      {}",
                 observation.metric, labels, observation.value.float
             )
             .expect("write String");
         }
     }
     Ok(output)
+}
+
+fn pretty_arrow_type(data_type: &arrow_schema::DataType) -> String {
+    use arrow_schema::DataType;
+
+    match data_type {
+        DataType::UInt8 => "u8".to_string(),
+        DataType::UInt16 => "u16".to_string(),
+        DataType::UInt32 => "u32".to_string(),
+        DataType::UInt64 => "u64".to_string(),
+        DataType::Int64 => "i64".to_string(),
+        DataType::Float64 => "f64".to_string(),
+        DataType::Utf8 => "utf8".to_string(),
+        DataType::Binary => "binary".to_string(),
+        DataType::Timestamp(unit, _) => format!("timestamp({unit:?})").to_lowercase(),
+        DataType::Dictionary(key, value) => format!(
+            "dict<{}, {}>",
+            pretty_arrow_type(key),
+            pretty_arrow_type(value)
+        ),
+        DataType::Struct(fields) => {
+            let children = fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "{}{}: {}",
+                        field.name(),
+                        if field.is_nullable() { "?" } else { "" },
+                        pretty_arrow_type(field.data_type())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("struct<{children}>")
+        }
+        other => format!("{other:?}").to_lowercase(),
+    }
 }
 
 /// Converts a real `OtapPdata` directly into `Vec<Observation>` —
