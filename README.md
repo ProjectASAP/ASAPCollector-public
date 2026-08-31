@@ -118,7 +118,8 @@ real `OtapPdata` binding) is complete and build/lint/test-verified by
 this repo's own build. `tests/otap_pipeline_e2e.rs` parses a genuine
 OTAP pipeline YAML, builds it through `OTAP_PIPELINE_FACTORY`, runs the
 resulting `RuntimePipeline`, injects real scalar `OtapPdata`, and verifies a
-three-processor creation → merge → estimation flow at the configured exporter.
+two-source, four-processor creation → fan-in merge → estimation flow at the
+configured exporter.
 Run the same live pipeline as a terminal demo with:
 
 ```sh
