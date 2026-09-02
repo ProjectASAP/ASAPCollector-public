@@ -150,15 +150,15 @@ Every boundary and its true cost:
 
 ## Implemented status (this repo)
 
-- **Sketch-on-wire**: proto (`ProtoFull`/`ProtoDelta`) **and** msgpack
-  (`Msgpack` full, `MsgpackDelta` sparse) for DDSketch / HLL / CMS / CountSketch.
-  KLL is **full-only** (`Msgpack`; no delta form).
+- **Sketch-on-wire**: KLL in sketchlib's canonical self-describing ASAPv1
+  MessagePack envelope. Private proto and legacy unframed MessagePack payloads
+  are rejected at configuration time. Other algorithms remain usable in
+  scalar estimate mode where implemented.
 - **Estimate mode** (`transmit_sketch=false`): DDSketch / KLL emit one Gauge per
   configured quantile (`quantile` label); HLL emits a cardinality Gauge.
   CMS / CountSketch top-k output needs a heavy-hitter tracker (not yet built).
-- **Cross-host merge**: exact for the count/quantile-bucket sketches; KLL
-  cross-host *merge* is approximate (a pre-existing limitation of both wire
-  formats — retained items carry level weights that item-replay drops).
+- **Cross-host merge**: KLL uses sketchlib's level-aware merge, preserving the
+  logical weights of retained items after compaction.
 
 Config knobs live on `PluginConfig` / `PrecomputeConfig`:
 `encoding`, `delta_transmission`, `transmit_sketch`, `quantiles`.

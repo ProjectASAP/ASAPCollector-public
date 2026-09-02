@@ -36,7 +36,7 @@ use otel_arrow_dfe_state::store::ObservedStateStore;
 use otel_arrow_dfe_telemetry::InternalTelemetrySystem;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, fs};
 
@@ -44,9 +44,9 @@ const WORKER_ARG: &str = "--df-worker";
 const SOURCE_URN: &str = "urn:asap:receiver:otlp_file";
 const SINK_URN: &str = "urn:asap:exporter:otlp_file";
 static INPUTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
-static CAPTURED: OnceLock<Mutex<Vec<OtapPdata>>> = OnceLock::new();
-fn captured() -> &'static Mutex<Vec<OtapPdata>> {
-    CAPTURED.get_or_init(|| Mutex::new(Vec::new()))
+static CAPTURED: OnceLock<(Mutex<Vec<OtapPdata>>, Condvar)> = OnceLock::new();
+fn captured() -> &'static (Mutex<Vec<OtapPdata>>, Condvar) {
+    CAPTURED.get_or_init(|| (Mutex::new(Vec::new()), Condvar::new()))
 }
 
 fn scalar_input(start: i32, end: i32) -> OtapPdata {
@@ -138,7 +138,11 @@ impl local_exporter::Exporter<OtapPdata> for FileExporter {
     ) -> Result<TerminalState, otel_arrow_dfe_engine::error::Error> {
         loop {
             match inbox.recv().await? {
-                Message::PData(pdata) => captured().lock().expect("capture mutex").push(pdata),
+                Message::PData(pdata) => {
+                    let (outputs, ready) = captured();
+                    outputs.lock().expect("capture mutex").push(pdata);
+                    ready.notify_all();
+                }
                 Message::Control(NodeControlMsg::Shutdown { .. }) => break,
                 Message::Control(_) => {}
             }
@@ -211,7 +215,7 @@ fn run_worker(
     INPUTS
         .set(inputs)
         .map_err(|_| "inputs already initialized".to_owned())?;
-    captured().lock().unwrap().clear();
+    captured().0.lock().unwrap().clear();
     let config = PipelineConfig::from_yaml(
         "asap-demo".into(),
         role.to_owned().into(),
@@ -245,11 +249,19 @@ fn run_worker(
     let observed = ObservedStateStore::new(&ObservedStateSettings::default(), telemetry.registry());
     let shutdown_tx = runtime_tx.clone();
     let shutdown = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(250));
+        let (outputs, ready) = captured();
+        let guard = outputs.lock().expect("capture mutex");
+        let (_guard, wait) = ready
+            .wait_timeout_while(guard, Duration::from_secs(10), |items| items.is_empty())
+            .expect("capture wait");
         shutdown_tx
             .try_send(RuntimeControlMsg::Shutdown {
                 deadline: Instant::now() + Duration::from_secs(2),
-                reason: "input complete".into(),
+                reason: if wait.timed_out() {
+                    "timed out waiting for pipeline output".into()
+                } else {
+                    "pipeline output complete".into()
+                },
             })
             .expect("shutdown");
     });
@@ -283,7 +295,7 @@ fn run_worker(
     shutdown
         .join()
         .map_err(|_| "shutdown thread panic".to_owned())?;
-    let mut outputs = captured().lock().unwrap();
+    let mut outputs = captured().0.lock().unwrap();
     if outputs.len() != 1 {
         return Err(format!("expected one output, got {}", outputs.len()));
     }
@@ -308,6 +320,24 @@ fn spawn(exe: &Path, role: &str, inputs: &[&Path], output: &Path, trace: &Path) 
 fn wait(mut child: Child, role: &str) {
     let status = child.wait().unwrap();
     assert!(status.success(), "{role} failed: {status}");
+}
+
+fn validate_quantiles(results: &[(String, f64)]) -> Result<(), String> {
+    if results.len() != 2 {
+        return Err(format!("expected p50 and p99, got {} result(s)", results.len()));
+    }
+    for (quantile, expected) in [("0.5", 100.0), ("0.99", 198.0)] {
+        let value = results
+            .iter()
+            .find_map(|(label, value)| (label == quantile).then_some(*value))
+            .ok_or_else(|| format!("missing quantile {quantile}"))?;
+        if (value - expected).abs() > 5.0 {
+            return Err(format!(
+                "quantile {quantile} out of tolerance: got {value}, expected {expected} +/- 5"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn run_parent() {
@@ -339,6 +369,7 @@ fn run_parent() {
     let decoded = decode_pdata_to_observations(read_otlp(&out).unwrap())
         .unwrap()
         .observations;
+    let mut quantiles = Vec::with_capacity(decoded.len());
     for o in &decoded {
         let q = o
             .labels
@@ -349,8 +380,10 @@ fn run_parent() {
             "result metric={} quantile={} value={:.3}",
             o.metric, q, o.value.float
         );
+        assert_eq!(o.metric, "request.duration.estimate");
+        quantiles.push((q.to_owned(), o.value.float));
     }
-    assert_eq!(decoded.len(), 2);
+    validate_quantiles(&quantiles).expect("correct p50/p99 results");
     println!("success: four DF processors ran in four child OS processes");
     println!("official detailed debug traces: {}", dir.display());
 }
@@ -373,5 +406,17 @@ fn main() {
         }
     } else {
         run_parent();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_quantiles;
+
+    #[test]
+    fn result_validation_requires_correct_p50_and_p99() {
+        assert!(validate_quantiles(&[("0.5".into(), 100.0), ("0.99".into(), 198.0)]).is_ok());
+        assert!(validate_quantiles(&[("0.5".into(), 12.0), ("0.99".into(), 13.0)]).is_err());
+        assert!(validate_quantiles(&[("0.5".into(), 100.0)]).is_err());
     }
 }
