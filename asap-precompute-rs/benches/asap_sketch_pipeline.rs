@@ -1,6 +1,6 @@
 //! Nightly traffic -> SUT -> backend benchmark.
 //!
-//! Both the no-sketch control and ASAP path consume the same pre-generated
+//! All three paths consume the same pre-generated
 //! native `OtapPdata`, decode it at ingress, encode their results as native
 //! pdata, and decode/validate those results in the simulated backend.
 
@@ -67,6 +67,19 @@ fn exact_quantiles(values: &[f64]) -> (f64, f64) {
     (at(0.5), at(0.99))
 }
 
+fn quantile_output(p50: f64, p99: f64) -> Vec<Observation> {
+    let output = [("0.5", p50), ("0.99", p99)]
+        .into_iter()
+        .map(|(quantile, value)| {
+            let mut envelope = scalar_envelope(value);
+            envelope.metric_name = "http.server.request.duration.estimate".into();
+            envelope.labels.push(KeyValue::new("quantile", quantile));
+            envelope
+        })
+        .collect::<Vec<_>>();
+    backend_decode(encode_envelopes_to_pdata(&output).expect("quantile output pdata"))
+}
+
 fn backend_decode(pdata: OtapPdata) -> Vec<Observation> {
     decode_pdata_to_observations(pdata)
         .expect("simulated backend decode")
@@ -88,6 +101,16 @@ fn control_pipeline(input: OtapPdata) -> Vec<Observation> {
     backend_decode(encode_envelopes_to_pdata(&output).expect("control output pdata"))
 }
 
+fn otap_exact_quantile_pipeline(input: OtapPdata) -> Vec<Observation> {
+    let observations = backend_decode(input);
+    let values = observations
+        .iter()
+        .map(|observation| observation.value.float)
+        .collect::<Vec<_>>();
+    let (p50, p99) = exact_quantiles(&values);
+    quantile_output(p50, p99)
+}
+
 fn asap_pipeline(input: OtapPdata) -> Vec<Observation> {
     let observations = backend_decode(input);
     let mut shards = (0..SHARDS)
@@ -102,19 +125,7 @@ fn asap_pipeline(input: OtapPdata) -> Vec<Observation> {
     for shard in &shards {
         merged.merge(shard).expect("ASAPv1 KLL shard merge");
     }
-    let output = [
-        ("0.5", merged.quantile(0.5)),
-        ("0.99", merged.quantile(0.99)),
-    ]
-    .into_iter()
-    .map(|(quantile, value)| {
-        let mut envelope = scalar_envelope(value);
-        envelope.metric_name = "http.server.request.duration.estimate".into();
-        envelope.labels.push(KeyValue::new("quantile", quantile));
-        envelope
-    })
-    .collect::<Vec<_>>();
-    backend_decode(encode_envelopes_to_pdata(&output).expect("ASAP output pdata"))
+    quantile_output(merged.quantile(0.5), merged.quantile(0.99))
 }
 
 fn assert_control(input: &OtapPdata, values: &[f64]) {
@@ -129,23 +140,37 @@ fn assert_control(input: &OtapPdata, values: &[f64]) {
         .contains(&KeyValue::new("http.route", "/checkout")));
 }
 
-fn assert_accuracy(input: &OtapPdata, values: &[f64]) {
+fn assert_quantile_pipelines(input: &OtapPdata, values: &[f64]) {
     let exact = exact_quantiles(values);
-    let output = asap_pipeline(input.clone());
-    assert_eq!(output.len(), 2);
-    for (name, quantile, want) in [("p50", "0.5", exact.0), ("p99", "0.99", exact.1)] {
-        let got = output
-            .iter()
-            .find(|observation| {
-                observation
-                    .labels
-                    .contains(&KeyValue::new("quantile", quantile))
-            })
-            .unwrap_or_else(|| panic!("missing {name}"))
-            .value
-            .float;
-        let relative_error = (got - want).abs() / want.max(f64::EPSILON);
-        assert!(relative_error <= 0.05, "{name}: got {got}, want {want}");
+    for (pipeline, output, maximum_error) in [
+        (
+            "OTAP exact",
+            otap_exact_quantile_pipeline(input.clone()),
+            0.0,
+        ),
+        ("ASAP KLL", asap_pipeline(input.clone()), 0.05),
+    ] {
+        assert_eq!(output.len(), 2, "{pipeline} output shape");
+        for (name, quantile, want) in [("p50", "0.5", exact.0), ("p99", "0.99", exact.1)] {
+            let observation = output
+                .iter()
+                .find(|observation| {
+                    observation
+                        .labels
+                        .contains(&KeyValue::new("quantile", quantile))
+                })
+                .unwrap_or_else(|| panic!("{pipeline} missing {name}"));
+            assert_eq!(observation.metric, "http.server.request.duration.estimate");
+            assert!(observation
+                .resource_labels
+                .contains(&KeyValue::new("service.name", "checkout")));
+            let got = observation.value.float;
+            let relative_error = (got - want).abs() / want.max(f64::EPSILON);
+            assert!(
+                relative_error <= maximum_error,
+                "{pipeline} {name}: got {got}, want {want}"
+            );
+        }
     }
 }
 
@@ -155,12 +180,12 @@ fn benchmark(c: &mut Criterion) {
         let values = semantic_http_durations(count);
         let input = generated_pdata(&values);
         assert_control(&input, &values);
-        assert_accuracy(&input, &values);
+        assert_quantile_pipelines(&input, &values);
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(
-            BenchmarkId::new("exact_sort_reference", count),
-            &values,
-            |b, v| b.iter(|| black_box(exact_quantiles(black_box(v)))),
+            BenchmarkId::new("otap_exact_quantile_pipeline", count),
+            &input,
+            |b, p| b.iter(|| black_box(otap_exact_quantile_pipeline(black_box(p.clone())))),
         );
         group.bench_with_input(
             BenchmarkId::new("otap_control_pipeline", count),
