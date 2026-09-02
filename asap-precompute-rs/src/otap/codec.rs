@@ -224,46 +224,9 @@ fn validate_self_describing_payload(encoding: Encoding, payload: &[u8]) -> Resul
             encoding.name()
         ));
     }
-    const MAGIC: &[u8; 6] = b"ASAPv1";
-    const HEADER_PREFIX_LEN: usize = MAGIC.len() + 2;
-    if payload.len() < HEADER_PREFIX_LEN + 8 || !payload.starts_with(MAGIC) {
-        return Err("invalid self-describing sketch.envelope: missing ASAPv1 magic".into());
-    }
-    if payload[MAGIC.len()] != 1 {
-        return Err(format!(
-            "invalid self-describing sketch.envelope: unsupported ASAPv1 version {}",
-            payload[MAGIC.len()]
-        ));
-    }
-    let kind_len = payload[MAGIC.len() + 1] as usize;
-    let lengths_at = HEADER_PREFIX_LEN
-        .checked_add(kind_len)
-        .ok_or_else(|| "invalid self-describing sketch.envelope: length overflow".to_string())?;
-    if payload.len() < lengths_at + 8 || kind_len == 0 {
-        return Err("invalid self-describing sketch.envelope: truncated kind or lengths".into());
-    }
-    let metadata_len = u32::from_be_bytes(
-        payload[lengths_at..lengths_at + 4]
-            .try_into()
-            .expect("four-byte metadata length"),
-    ) as usize;
-    let sketch_len = u32::from_be_bytes(
-        payload[lengths_at + 4..lengths_at + 8]
-            .try_into()
-            .expect("four-byte payload length"),
-    ) as usize;
-    let expected_len = lengths_at
-        .checked_add(8)
-        .and_then(|len| len.checked_add(metadata_len))
-        .and_then(|len| len.checked_add(sketch_len))
-        .ok_or_else(|| "invalid self-describing sketch.envelope: length overflow".to_string())?;
-    if payload.len() != expected_len {
-        return Err(format!(
-            "invalid self-describing sketch.envelope: framed length {expected_len}, actual {}",
-            payload.len()
-        ));
-    }
-    Ok(())
+    asap_sketchlib::sketches::KLL::<f64>::deserialize_from_bytes(payload)
+        .map(|_| ())
+        .map_err(|error| format!("invalid self-describing KLL sketch.envelope: {error}"))
 }
 
 fn append_labels_to_key(key: &mut String, labels: &[KeyValue]) {
@@ -1919,7 +1882,7 @@ mod tests {
         let error = encode_envelopes_to_pdata(&[env]).expect_err("invalid ASAPv1 must fail");
         assert!(error
             .to_string()
-            .contains("self-describing sketch.envelope"));
+            .contains("self-describing KLL sketch.envelope"));
     }
 
     #[test]

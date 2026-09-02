@@ -157,7 +157,7 @@ pub struct AsapSketchesUserConfig {
     /// Add sample-count and window-duration labels to emitted rows.
     #[serde(default)]
     pub emit_window_stats: bool,
-    /// Sketch payload encoding. Defaults to `ProtoFull`.
+    /// Sketch payload encoding. Defaults to self-describing ASAPv1 MessagePack.
     #[serde(default)]
     pub encoding: Option<Encoding>,
     /// Emit deltas after the first full snapshot.
@@ -204,7 +204,7 @@ impl AsapSketchesUserConfig {
             omit_resource_attrs: self.omit_resource_attrs,
             global_aggregation: self.global_aggregation,
             emit_window_stats: self.emit_window_stats,
-            encoding: self.encoding.unwrap_or(Encoding::ProtoFull),
+            encoding: self.encoding.unwrap_or(Encoding::Msgpack),
             delta_transmission: self.delta_transmission,
             transmit_sketch: self.transmit_sketch,
             quantiles: self.quantiles,
@@ -380,7 +380,14 @@ impl AsapSketchesProcessor {
         }
         let pdata = match self.sketch_encoder.encode(envs) {
             Ok(pdata) => pdata,
-            Err(_e) => return Ok(()), // drop the bad window, keep the processor alive
+            Err(error) => {
+                effect_handler
+                    .info(&format!(
+                        "asap_sketches: dropping window after OTAP encode failure: {error}"
+                    ))
+                    .await;
+                return Ok(());
+            }
         };
         if protocol_trace_enabled() {
             println!(
@@ -419,7 +426,14 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
             Message::PData(pdata) => {
                 let outcome = match decode_pdata_to_observations(pdata) {
                     Ok(outcome) => outcome,
-                    Err(_e) => return Ok(()), // drop the bad batch, keep the processor alive
+                    Err(error) => {
+                        effect_handler
+                            .info(&format!(
+                                "asap_sketches: dropping input after OTAP decode failure: {error}"
+                            ))
+                            .await;
+                        return Ok(());
+                    }
                 };
                 if outcome.skipped_non_scalar > 0 {
                     effect_handler
@@ -618,6 +632,7 @@ mod tests {
             "sketch_type": "ddsketch",
             "window_size": "5s",
             "output_metric_name": "x",
+            "transmit_sketch": false,
             "sketch_params": {
                 "relative_accuracy": 0.005
             },
@@ -697,7 +712,7 @@ mod tests {
         assert!(!requires_precompute_rebuild(&current, &runtime_only_change));
 
         let mut encoding_change = current.clone();
-        encoding_change.encoding = Encoding::Msgpack;
+        encoding_change.encoding = Encoding::ProtoFull;
         assert!(requires_precompute_rebuild(&current, &encoding_change));
 
         let mut series_identity_change = current.clone();
