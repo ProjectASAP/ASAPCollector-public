@@ -32,6 +32,78 @@ fn read_observations(path: &Path) -> Vec<asap_precompute_rs::observation::Observ
         .observations
 }
 
+fn run_scenario(scenario: &str, points: u64) -> (PathBuf, Value) {
+    let dir = unique_dir().join(scenario);
+    fs::create_dir_all(&dir).expect("create scenario directory");
+    let manifest_path = dir.join("result.json");
+    let output = Command::new(env!("CARGO_BIN_EXE_asap-otap-demo"))
+        .args([
+            "--scenario",
+            scenario,
+            "--output-dir",
+            dir.to_str().unwrap(),
+            "--result-manifest",
+            manifest_path.to_str().unwrap(),
+            "--points-per-source",
+            &points.to_string(),
+        ])
+        .output()
+        .expect("run scenario");
+    assert!(
+        output.status.success(),
+        "{scenario} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manifest = serde_json::from_slice(&fs::read(manifest_path).expect("manifest"))
+        .expect("valid manifest");
+    (dir, manifest)
+}
+
+/// Scenario: Raw baseline sends two sources through branch, merge, and final RuntimePipelines.
+/// Guarantees: All raw observations reach the backend and every stage has a distinct PID.
+#[test]
+fn raw_baseline_uses_four_processes_and_preserves_every_signal() {
+    let (dir, manifest) = run_scenario("raw", 100);
+    assert_eq!(read_observations(&dir.join("out.otlp")).len(), 200);
+    let processors = manifest["processors"].as_array().unwrap();
+    assert_eq!(processors.len(), 4);
+    assert_eq!(
+        processors
+            .iter()
+            .map(|processor| processor["pid"].as_u64().unwrap())
+            .collect::<HashSet<_>>()
+            .len(),
+        4
+    );
+}
+
+/// Scenario: Exact baseline sorts two source runs, merges them, and estimates p50/p99.
+/// Guarantees: The backend receives exact order-statistic results from four distinct processes.
+#[test]
+fn exact_baseline_uses_four_processes_and_returns_exact_quantiles() {
+    let (dir, manifest) = run_scenario("exact", 100);
+    let output = read_observations(&dir.join("out.otlp"));
+    let mut values = output
+        .iter()
+        .map(|observation| observation.value.float)
+        .collect::<Vec<_>>();
+    values.sort_by(f64::total_cmp);
+    assert_eq!(values, vec![101.0, 198.0]);
+    assert_eq!(
+        manifest["processors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|processor| processor["pid"].as_u64().unwrap())
+            .collect::<HashSet<_>>()
+            .len(),
+        4
+    );
+}
+
+/// Scenario: KLL demo processes two sources through create, merge, and estimate workers.
+/// Guarantees: Four distinct processes preserve ASAPv1 sketches and emit bounded-error quantiles.
 #[test]
 fn four_process_pipeline_preserves_asapv1_data_and_estimates_quantiles() {
     let dir = unique_dir();
