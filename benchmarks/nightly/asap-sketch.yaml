@@ -1,54 +1,56 @@
-name: Nightly - ASAP Sketches
-methodology: otel-arrow-pipeline-perf-test
-topology:
-  load-generator:
-    data_source: semantic_conventions
-    metric: http.server.request.duration
-    attributes:
-      - http.request.method
-      - http.route
-      - http.response.status_code
-      - service.name
-    generation_strategy: pre_generated
-    input_batch_size: 4096
-    value_distribution: deterministic_high_diversity_with_5_percent_slow_tail
-    batch_sizes: [1024, 16384, 131072]
-  systems-under-test:
-    - name: otap_control_pipeline
-      sources: 2
-      stages: [branch-pass-through, merge-pass-through, final-pass-through]
-    - name: otap_exact_quantile_pipeline
-      sources: 2
-      stages: [branch-sort, sorted-run-merge, exact-estimate]
-      quantiles: [0.5, 0.99]
-    - name: asap_kll_pipeline
-      processor: urn:asap:processor:asap_sketches
-      sketch: kll
-      k: 200
-      sources: 2
-      creators: 2
-      stages: [kll-create, asapv1-kll-merge, kll-estimate]
-  simulated-backend:
-    assertions:
-      quantiles: [0.5, 0.99]
-      maximum_relative_error: 0.05
-comparisons:
-  - otap_control_pipeline
-  - otap_exact_quantile_pipeline
-  - asap_kll_pipeline
-measurements:
-  - signals_per_second
-  - wall_time
-  - user_cpu_time
-  - system_cpu_time
-  - cpu_percent
-  - maximum_resident_set_size
-profiling:
-  criterion: target/criterion
-  symbols: strip-none
-  follow_up: samply-or-otap-pprof
-limitations:
-  - internal Criterion replica; not yet published by the upstream shared runner
-  - processor workloads run over native OtapPdata in the Criterion process; they are not yet deployed as full RuntimePipeline graphs
-  - peak RSS includes the Criterion harness, OTAP dependencies, and generated input, not only processor state
-  - traffic is pre-generated from the semantic-convention schema rather than the future annotation-generated SDK
+name: Nightly - aligned OTAP quantile pipelines
+
+# Every scenario uses the same image, two 65,536-signal sources, four
+# RuntimePipeline worker processes, 30-second observation window, cgroup limits,
+# file-backed OTLP boundary, and correctness-checking backend.
+components:
+  otap-raw:
+    deployment:
+      docker:
+        image: asap-quantile-benchmark:local
+        network: asap-benchmark
+        volumes: ['./benchmark-results:/results']
+        environment:
+          - ASAP_BENCH_SCENARIO=raw
+          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_RESULT_DIR=/results/raw
+    monitoring:
+      docker_component: { allocated_cores: 2 }
+  otap-exact-quantile:
+    deployment:
+      docker:
+        image: asap-quantile-benchmark:local
+        network: asap-benchmark
+        volumes: ['./benchmark-results:/results']
+        environment:
+          - ASAP_BENCH_SCENARIO=exact
+          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_RESULT_DIR=/results/exact
+    monitoring:
+      docker_component: { allocated_cores: 2 }
+  asap-kll:
+    deployment:
+      docker:
+        image: asap-quantile-benchmark:local
+        network: asap-benchmark
+        volumes: ['./benchmark-results:/results']
+        environment:
+          - ASAP_BENCH_SCENARIO=kll
+          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_RESULT_DIR=/results/kll
+    monitoring:
+      docker_component: { allocated_cores: 2 }
+
+tests:
+  - name: OTAP-RAW
+    from_template:
+      path: benchmarks/nightly/scenario-steps.yaml.j2
+      variables: { component: otap-raw, report_name: otap-raw-resources }
+  - name: OTAP-EXACT-QUANTILE
+    from_template:
+      path: benchmarks/nightly/scenario-steps.yaml.j2
+      variables: { component: otap-exact-quantile, report_name: otap-exact-quantile-resources }
+  - name: ASAP-KLL
+    from_template:
+      path: benchmarks/nightly/scenario-steps.yaml.j2
+      variables: { component: asap-kll, report_name: asap-kll-resources }

@@ -1,17 +1,23 @@
 # ASAP sketch performance benchmarks
 
-This benchmark adopts the OTAP pipeline performance methodology while the ASAP
-processor is still maintained outside the upstream `otel-arrow` tree.
+The nightly benchmark runs with OTAP's official Python `pipeline_perf_test`
+orchestrator. It deploys raw, exact-quantile, and ASAP KLL scenarios as
+identically configured Docker containers, observes each cgroup with the
+upstream `docker_component` monitor, and emits upstream process reports.
+Criterion remains available only as a local microbenchmark and is not used by
+the nightly workflow.
 
 The logical topology is `traffic generator → ASAP sketch SUT → simulated
 backend`. The generator uses a deterministic metric shaped like the OpenTelemetry
-`http.server.request.duration` semantic convention. Three SUT workloads are
-compared: transmitting every raw value, collecting and sorting every raw value
-for exact p50/p99, and creating then merging four self-describing ASAPv1 KLL
-shards for approximate p50/p99. The backend requires exact results from the sort
-path and fails the KLL path above 5% relative error.
+`http.server.request.duration` semantic convention. The local microbenchmark has
+three SUT workloads: transmitting every raw value, collecting and sorting every
+raw value for exact p50/p99, and creating then merging two self-describing
+ASAPv1 KLL shards for approximate p50/p99. The official-orchestrated nightly
+runs the same three workloads with real OTAP `RuntimePipeline` workers. The
+backend checks raw cardinality, exact sort results, and KLL's 5% error bound.
 
-Run locally:
+Run the official-style nightly suite locally with Docker and Python 3.13 (the
+runner fetches the pinned OTAP orchestrator revision on first use):
 
 ```sh
 ./benchmarks/run-nightly.sh
@@ -20,10 +26,10 @@ Run locally:
 ## Compared topologies
 
 All scenarios start from the same pre-generated, semantic-convention-shaped
-`http.server.request.duration` values and the same native `OtapPdata` batches
-(4,096 observations per batch). The timed boundary begins with owned clones of
-those batches and ends after the
-simulated backend decodes the scenario's output pdata.
+`http.server.request.duration` values. Nightly gives each of two sources one
+native `OtapPdata` batch of 65,536 observations. The local Criterion workload
+uses 4,096-observation batches. Both timed boundaries end after the simulated
+backend decodes the scenario's output pdata.
 
 ```text
 OTAP raw pass-through
@@ -64,25 +70,26 @@ The KLL path uses two deterministic `k=200` creators. Merge operates on the
 self-describing ASAPv1 representation supplied by `asap_sketchlib`; its p50/p99
 must remain within 5% of the exact result.
 
-These are currently in-process Criterion workloads over native `OtapPdata`, not
-three deployed OTAP `RuntimePipeline` graphs. Moving each box into registered
-receiver/processor/exporter nodes is the next step before claiming full engine
-topology overhead.
+In nightly, every topology has two branch workers, one merge worker, and one
+final/estimate worker. Every worker is a separate OS process containing a real
+OTAP `RuntimePipeline`; the upstream Docker monitor includes the entire process
+tree in CPU and RSS measurements. All scenarios use the same input count and
+the same warm-up and observation intervals.
 
-Criterion records throughput and latency for three pipelines with identical
+The local Criterion microbenchmark records throughput and latency for three pipelines with identical
 native pdata ingress and backend encode/decode boundaries: a no-computation OTAP
 raw pass-through, an OTAP exact-quantile processor that sorts all raw values,
 and the two-creator ASAP KLL path. Both quantile pipelines emit the same p50/p99
 Gauge shape. Before timing, the backend validates values, metric labels,
 resource labels, exact p50/p99 results, and the KLL 5% accuracy bound.
 
-The runner compiles first, outside measurement, then starts a separate benchmark
-process for every scenario and signal count. Each `resource-*.txt` therefore
-contains `/usr/bin/time -v` CPU, wall-time, and peak-RSS measurements attributable
-to one case rather than to Cargo/rustc and the entire suite. Results and the exact
-scenario manifest are written to `benchmark-results/` and uploaded by CI.
+The nightly workflow compiles first, outside measurement. During its observation
+window, OTAP's orchestrator samples CPU and RSS from the Docker cgroup. Each
+component writes completed input count, elapsed time, and signals/s below
+`benchmark-results/{raw,exact,kll}/throughput.env`; the orchestrator writes its
+three process reports under `benchmark-results/`. They are uploaded by CI.
 
-The comparison answers two separate questions. Raw pass-through measures the
+The local comparison answers two separate questions. Raw pass-through measures the
 cost of retaining and transmitting all observations, so its output cardinality
 is intentionally much larger. Exact sort and KLL both emit two Gauge values and
 are directly comparable for this fixed batch workload. At these input sizes,
@@ -91,13 +98,12 @@ larger streams and bounded-memory tests are needed to expose their different
 scaling behavior. Peak RSS is for the whole Criterion process, including input,
 OTAP/Arrow dependencies, and the harness—not just the algorithm state.
 
-This is deliberately an internal replica, not an upstream OTAP nightly suite.
-The three processor workloads operate on native `OtapPdata` inside Criterion;
-they are not yet instantiated as complete OTAP `RuntimePipeline` graphs.
-Once the ASAP processor is ready to move into `otel-arrow`, the manifest maps to
-their three-component orchestrator and shared bare-metal runner. PR 3830 only
-adds the declarative Weaver v2 registry today; switching the input generator to
-its future generated Rust SDK is therefore deferred.
+This repository consumes the official framework rather than copying its Python
+implementation. It pins the same OTAP revision as the Rust dependencies. It does
+not yet run on OpenTelemetry's shared bare-metal host. The file-backed OTLP
+boundary makes CPU, RSS, throughput, and artifact bytes comparable, but artifact
+bytes are not a network-bandwidth measurement. A future upstream contribution
+should replace it with the standard network traffic generator and backend nodes.
 
 For performance debugging, bench profiles retain symbols (`strip = "none"`).
 Criterion identifies regressions locally. A follow-up can use `samply`, or the
