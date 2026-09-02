@@ -28,11 +28,9 @@ simulated backend decodes the scenario's output pdata.
 ```text
 OTAP raw pass-through
 
-traffic data (OtapPdata batches)
-  -> OTAP pdata decode, one batch at a time
-  -> copy every raw Gauge observation
-  -> OTAP pdata encode (N Gauges)
-  -> simulated backend decode (N observations)
+source A -> pass-through A --\
+                               -> pass-through merge -> pass-through final -> backend
+source B -> pass-through B --/
 ```
 
 This is the no-computation control. It measures the cost of retaining and
@@ -42,13 +40,11 @@ quantile scenarios.
 ```text
 OTAP exact quantile
 
-traffic data (OtapPdata batches)
-  -> OTAP pdata decode, one batch at a time
-  -> retain raw values across the full window
-  -> total-order sort
-  -> select p50 and p99
-  -> OTAP pdata encode (2 Gauges)
-  -> simulated backend decode (2 observations)
+source A -> sort A -> encoded sorted run A --\
+                                               -> merge sorted runs
+source B -> sort B -> encoded sorted run B --/          |
+                                                         v
+                                              exact p50/p99 -> backend
 ```
 
 The exact path retains all N values until sorting completes. Its result must
@@ -57,17 +53,14 @@ equal the reference p50/p99 exactly.
 ```text
 ASAP KLL quantile
 
-traffic data (OtapPdata batches)
-  -> OTAP pdata decode, one batch at a time
-  -> KLL create shard 0 --\
-  -> KLL create shard 1 ----> ASAPv1 KLL merge -> estimate p50/p99
-  -> KLL create shard 2 ----/                         |
-  -> KLL create shard 3 --/                           v
-                              OTAP pdata encode (2 Gauges)
-                                -> simulated backend decode (2 observations)
+source A -> KLL create A -> ASAPv1 KLL A --\
+                                                -> KLL merge -> merged ASAPv1 KLL
+source B -> KLL create B -> ASAPv1 KLL B --/                    |
+                                                                  v
+                                                     KLL p50/p99 -> backend
 ```
 
-The KLL path uses four deterministic `k=200` shards. Merge operates on the
+The KLL path uses two deterministic `k=200` creators. Merge operates on the
 self-describing ASAPv1 representation supplied by `asap_sketchlib`; its p50/p99
 must remain within 5% of the exact result.
 
@@ -76,33 +69,10 @@ three deployed OTAP `RuntimePipeline` graphs. Moving each box into registered
 receiver/processor/exporter nodes is the next step before claiming full engine
 topology overhead.
 
-## Observed KLL crossover
-
-An exploratory local run extended the exact and KLL workloads beyond the
-nightly sizes. It used deterministic high-diversity durations, 4,096-point input
-batches, `k=200`, four KLL shards, and identical pdata/backend boundaries:
-
-| Values per window | OTAP exact | ASAP KLL | Observation |
-| ---: | ---: | ---: | --- |
-| 16,384 | 446.3 K/s | 442.8 K/s | exact about 0.8% faster |
-| 131,072 | 436.6 K/s | 438.2 K/s | near parity; KLL midpoint about 0.4% faster |
-| 524,288 | 413.3 K/s | 412.9 K/s | confidence intervals overlap |
-| 2,097,152 | 367.6 K/s | 371.1 K/s | KLL about 0.9% faster |
-
-On this machine, `131,072` values is only a borderline crossover and `524,288`
-is statistically tied. The first measured size with a clear KLL throughput lead
-is `2,097,152`, and even there the midpoint advantage is only about 0.9%; this
-must not be treated as a broad speedup claim. Pdata decode dominates both paths.
-KLL's structural advantage is instead that its processor state is bounded and
-mergeable: exact quantiles must retain every value in the open window, while
-each KLL shard retains bounded `k=200` state. Whole-process peak RSS does not
-isolate that difference because the benchmark process also owns all
-pre-generated input batches and OTAP/Arrow.
-
 Criterion records throughput and latency for three pipelines with identical
 native pdata ingress and backend encode/decode boundaries: a no-computation OTAP
 raw pass-through, an OTAP exact-quantile processor that sorts all raw values,
-and the four-shard ASAP KLL path. Both quantile pipelines emit the same p50/p99
+and the two-creator ASAP KLL path. Both quantile pipelines emit the same p50/p99
 Gauge shape. Before timing, the backend validates values, metric labels,
 resource labels, exact p50/p99 results, and the KLL 5% accuracy bound.
 
