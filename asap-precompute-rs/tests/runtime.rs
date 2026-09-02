@@ -572,6 +572,7 @@ fn observe_envelope_merges_into_active_window() {
         schema_version: 1,
         sketch_type: SketchType::DDSketch,
         agg_id: 5,
+        resource_labels: vec![KeyValue::new("service.name", "checkout")],
         labels: vec![KeyValue::new("k", "a")],
         window_start_ms: 0,
         window_end_ms: 10_000,
@@ -589,6 +590,7 @@ fn observe_envelope_merges_into_active_window() {
     assert_eq!(out.len(), 1);
     let got = &out[0];
     assert_eq!(got.agg_id, 5);
+    assert_eq!(got.resource_labels, env.resource_labels);
     // entry.count carries the upstream envelope count.
     assert_eq!(got.count, 17);
 }
