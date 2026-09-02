@@ -324,7 +324,10 @@ fn wait(mut child: Child, role: &str) {
 
 fn validate_quantiles(results: &[(String, f64)]) -> Result<(), String> {
     if results.len() != 2 {
-        return Err(format!("expected p50 and p99, got {} result(s)", results.len()));
+        return Err(format!(
+            "expected p50 and p99, got {} result(s)",
+            results.len()
+        ));
     }
     for (quantile, expected) in [("0.5", 100.0), ("0.99", 198.0)] {
         let value = results
