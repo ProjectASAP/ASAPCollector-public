@@ -14,7 +14,7 @@ use otel_arrow_dfe_otap::pdata::OtapPdata;
 use std::hint::black_box;
 
 const SIGNAL_COUNTS: [usize; 3] = [1_024, 16_384, 131_072];
-const SHARDS: usize = 4;
+const SOURCES: usize = 2;
 const INPUT_BATCH_SIZE: usize = 4_096;
 
 fn semantic_http_durations(count: usize) -> Vec<f64> {
@@ -60,7 +60,7 @@ fn scalar_envelope(value: f64) -> SketchEnvelope {
     }
 }
 
-fn generated_pdata(values: &[f64]) -> Vec<OtapPdata> {
+fn encode_values(values: &[f64]) -> Vec<OtapPdata> {
     values
         .chunks(INPUT_BATCH_SIZE)
         .map(|batch| {
@@ -74,6 +74,14 @@ fn generated_pdata(values: &[f64]) -> Vec<OtapPdata> {
         .collect()
 }
 
+fn generated_pdata(values: &[f64]) -> [Vec<OtapPdata>; SOURCES] {
+    let midpoint = values.len() / 2;
+    [
+        encode_values(&values[..midpoint]),
+        encode_values(&values[midpoint..]),
+    ]
+}
+
 fn exact_quantiles(values: &[f64]) -> (f64, f64) {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
@@ -81,7 +89,7 @@ fn exact_quantiles(values: &[f64]) -> (f64, f64) {
     (at(0.5), at(0.99))
 }
 
-fn quantile_output(p50: f64, p99: f64) -> Vec<Observation> {
+fn quantile_pdata(p50: f64, p99: f64) -> OtapPdata {
     let output = [("0.5", p50), ("0.99", p99)]
         .into_iter()
         .map(|(quantile, value)| {
@@ -91,7 +99,7 @@ fn quantile_output(p50: f64, p99: f64) -> Vec<Observation> {
             envelope
         })
         .collect::<Vec<_>>();
-    backend_decode(encode_envelopes_to_pdata(&output).expect("quantile output pdata"))
+    encode_envelopes_to_pdata(&output).expect("quantile output pdata")
 }
 
 fn backend_decode(pdata: OtapPdata) -> Vec<Observation> {
@@ -100,8 +108,8 @@ fn backend_decode(pdata: OtapPdata) -> Vec<Observation> {
         .observations
 }
 
-fn control_pipeline(input: Vec<OtapPdata>) -> Vec<Observation> {
-    let mut backend = Vec::new();
+fn pass_stage(input: Vec<OtapPdata>) -> Vec<OtapPdata> {
+    let mut output_batches = Vec::new();
     for batch in input {
         let observations = backend_decode(batch);
         let output = observations
@@ -114,53 +122,120 @@ fn control_pipeline(input: Vec<OtapPdata>) -> Vec<Observation> {
                 envelope
             })
             .collect::<Vec<_>>();
-        backend.extend(backend_decode(
-            encode_envelopes_to_pdata(&output).expect("control output pdata"),
-        ));
+        output_batches.push(encode_envelopes_to_pdata(&output).expect("pass output pdata"));
+    }
+    output_batches
+}
+
+fn control_pipeline(input: [Vec<OtapPdata>; SOURCES]) -> Vec<Observation> {
+    let [a, b] = input;
+    let mut joined = pass_stage(a);
+    joined.extend(pass_stage(b));
+    let output = pass_stage(pass_stage(joined));
+    let mut backend = Vec::new();
+    for batch in output {
+        backend.extend(backend_decode(batch));
     }
     backend
 }
 
-fn otap_exact_quantile_pipeline(input: Vec<OtapPdata>) -> Vec<Observation> {
-    let mut values = Vec::new();
-    for batch in input {
-        values.extend(
-            backend_decode(batch)
-                .into_iter()
-                .map(|observation| observation.value.float),
-        );
-    }
-    let (p50, p99) = exact_quantiles(&values);
-    quantile_output(p50, p99)
+fn decoded_values(input: Vec<OtapPdata>) -> Vec<f64> {
+    input
+        .into_iter()
+        .flat_map(backend_decode)
+        .map(|o| o.value.float)
+        .collect()
 }
 
-fn asap_pipeline(input: Vec<OtapPdata>) -> Vec<Observation> {
-    let mut shards = (0..SHARDS)
-        .map(|seed| {
-            KLLWrapper::new(200, Some(seed as u64 + 1)).with_wire_encoding(Encoding::Msgpack)
-        })
-        .collect::<Vec<_>>();
-    let mut index = 0;
-    for batch in input {
-        for observation in backend_decode(batch) {
-            shards[index % SHARDS].update(observation.value.float);
-            index += 1;
+fn sort_stage(input: Vec<OtapPdata>) -> Vec<OtapPdata> {
+    let mut values = decoded_values(input);
+    values.sort_by(f64::total_cmp);
+    encode_values(&values)
+}
+
+fn merge_sorted_stage(left: Vec<OtapPdata>, right: Vec<OtapPdata>) -> Vec<OtapPdata> {
+    let (left, right) = (decoded_values(left), decoded_values(right));
+    let (mut a, mut b) = (0, 0);
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    while a < left.len() && b < right.len() {
+        if left[a].total_cmp(&right[b]).is_le() {
+            merged.push(left[a]);
+            a += 1;
+        } else {
+            merged.push(right[b]);
+            b += 1;
         }
     }
-    let mut merged = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
-    for shard in &shards {
-        let bytes = shard.snapshot().expect("ASAPv1 KLL shard snapshot");
-        let mut decoded = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
-        decoded
-            .apply_delta_encoded(&bytes, Encoding::Msgpack)
-            .expect("ASAPv1 KLL shard decode");
-        merged.merge(&decoded).expect("ASAPv1 KLL shard merge");
-    }
-    quantile_output(merged.quantile(0.5), merged.quantile(0.99))
+    merged.extend_from_slice(&left[a..]);
+    merged.extend_from_slice(&right[b..]);
+    encode_values(&merged)
 }
 
-fn assert_control(input: &[OtapPdata], values: &[f64]) {
-    let output = control_pipeline(input.to_vec());
+fn exact_estimate_stage(input: Vec<OtapPdata>) -> OtapPdata {
+    let values = decoded_values(input);
+    let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
+    quantile_pdata(at(0.5), at(0.99))
+}
+
+fn otap_exact_quantile_pipeline(input: [Vec<OtapPdata>; SOURCES]) -> Vec<Observation> {
+    let [a, b] = input;
+    backend_decode(exact_estimate_stage(merge_sorted_stage(
+        sort_stage(a),
+        sort_stage(b),
+    )))
+}
+
+fn kll_create_stage(input: Vec<OtapPdata>, seed: u64) -> OtapPdata {
+    let mut sketch = KLLWrapper::new(200, Some(seed)).with_wire_encoding(Encoding::Msgpack);
+    let mut count = 0;
+    for batch in input {
+        for observation in backend_decode(batch) {
+            sketch.update(observation.value.float);
+            count += 1;
+        }
+    }
+    let mut env = scalar_envelope(0.0);
+    env.sketch_type = SketchType::KLLSketch;
+    env.agg_id = 7;
+    env.encoding = Encoding::Msgpack;
+    env.payload = sketch.snapshot().expect("KLL snapshot");
+    env.count = count;
+    env.metric_name = "http.server.request.duration.sketch".into();
+    encode_envelopes_to_pdata(&[env]).expect("KLL create pdata")
+}
+
+fn decode_kll(input: OtapPdata) -> KLLWrapper {
+    let obs = backend_decode(input).pop().expect("one sketch");
+    let env = obs.value.envelope.expect("sketch envelope");
+    let mut sketch = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
+    sketch
+        .apply_delta_encoded(&env.payload, env.encoding)
+        .expect("ASAPv1 decode");
+    sketch
+}
+
+fn kll_merge_stage(left: OtapPdata, right: OtapPdata) -> OtapPdata {
+    let mut merged = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
+    merged.merge(&decode_kll(left)).expect("merge left");
+    merged.merge(&decode_kll(right)).expect("merge right");
+    let mut env = scalar_envelope(0.0);
+    env.sketch_type = SketchType::KLLSketch;
+    env.agg_id = 7;
+    env.encoding = Encoding::Msgpack;
+    env.payload = merged.snapshot().expect("merged snapshot");
+    env.metric_name = "http.server.request.duration.merged_sketch".into();
+    encode_envelopes_to_pdata(&[env]).expect("KLL merge pdata")
+}
+
+fn asap_pipeline(input: [Vec<OtapPdata>; SOURCES]) -> Vec<Observation> {
+    let [a, b] = input;
+    let merged = kll_merge_stage(kll_create_stage(a, 1), kll_create_stage(b, 2));
+    let sketch = decode_kll(merged);
+    backend_decode(quantile_pdata(sketch.quantile(0.5), sketch.quantile(0.99)))
+}
+
+fn assert_control(input: &[Vec<OtapPdata>; SOURCES], values: &[f64]) {
+    let output = control_pipeline(input.clone());
     assert_eq!(output.len(), values.len());
     assert_eq!(output[0].value.float, values[0]);
     assert!(output[0]
@@ -211,20 +286,20 @@ fn requested(scenario: &str, count: usize) -> bool {
             .any(|filter| filter.contains(&format!("{scenario}/{count}")))
 }
 
-fn assert_exact(input: &[OtapPdata], values: &[f64]) {
+fn assert_exact(input: &[Vec<OtapPdata>; SOURCES], values: &[f64]) {
     let exact = exact_quantiles(values);
     assert_quantile_output(
         "OTAP exact",
-        otap_exact_quantile_pipeline(input.to_vec()),
+        otap_exact_quantile_pipeline(input.clone()),
         exact,
         0.0,
     );
 }
 
-fn assert_kll(input: &[OtapPdata], values: &[f64]) {
+fn assert_kll(input: &[Vec<OtapPdata>; SOURCES], values: &[f64]) {
     assert_quantile_output(
         "ASAP KLL",
-        asap_pipeline(input.to_vec()),
+        asap_pipeline(input.clone()),
         exact_quantiles(values),
         0.05,
     );
