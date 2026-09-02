@@ -60,6 +60,18 @@ pub enum ConfigError {
         /// Raw value from config (in milliseconds, post-parse).
         value: u128,
     },
+
+    /// Sketch payload transport is restricted to codecs that emit the
+    /// canonical self-describing ASAPv1 envelope.
+    #[error(
+        "asap_sketches: sketch transport requires kll with msgpack/ASAPv1; got {sketch_type:?} with {encoding} (set transmit_sketch=false for scalar estimates)"
+    )]
+    UnsupportedSketchTransport {
+        /// Configured sketch implementation.
+        sketch_type: String,
+        /// Configured wire encoding.
+        encoding: &'static str,
+    },
 }
 
 /// Plugin-level config block. Exposes the `sketch_type` knob plus the
@@ -94,10 +106,10 @@ pub struct PluginConfig {
     /// Whether to append `sample_count` / `window_duration_seconds`
     /// to every emitted envelope's labels.
     pub emit_window_stats: bool,
-    /// Outbound wire format for emitted envelopes. `ProtoFull` (default)
-    /// keeps the proto `SketchEnvelope` format; `Msgpack` / `MsgpackDelta`
-    /// select the msgpack codec. KLL supports `Msgpack` (full only — it has
-    /// no delta form, so `MsgpackDelta` still emits `Msgpack` full frames).
+    /// Outbound wire format for emitted envelopes. Sketch transport requires
+    /// KLL with `Msgpack`/`MsgpackDelta`, which emits the canonical ASAPv1
+    /// self-describing format. Other combinations remain available only when
+    /// `transmit_sketch=false` emits scalar estimates.
     pub encoding: Encoding,
     /// Whether to delta-encode emitted state against the cached outbound
     /// snapshot (per-window against-empty). Combined with a msgpack
@@ -116,7 +128,7 @@ pub struct PluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
-            sketch_type: SKETCH_TYPE_DDSKETCH.to_string(),
+            sketch_type: SKETCH_TYPE_KLL.to_string(),
             window_size: Duration::from_secs(10),
             output_metric_name: "asap_sketch".to_string(),
             agg_id: 0,
@@ -125,7 +137,7 @@ impl Default for PluginConfig {
             omit_resource_attrs: false,
             global_aggregation: false,
             emit_window_stats: false,
-            encoding: Encoding::ProtoFull,
+            encoding: Encoding::Msgpack,
             delta_transmission: false,
             transmit_sketch: true,
             quantiles: Vec::new(),
@@ -167,6 +179,14 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         });
     }
     let dispatch = build_dispatch(config)?;
+    if config.transmit_sketch
+        && (dispatch.sketch_type != SketchType::KLLSketch || !config.encoding.is_msgpack())
+    {
+        return Err(ConfigError::UnsupportedSketchTransport {
+            sketch_type: config.sketch_type.clone(),
+            encoding: config.encoding.name(),
+        });
+    }
     let pcfg = PrecomputeConfig {
         agg_id: config.agg_id,
         sketch_type: dispatch.sketch_type,
@@ -326,7 +346,39 @@ mod tests {
             window_size: Duration::from_secs(10),
             output_metric_name: "out".to_string(),
             agg_id: 1,
+            transmit_sketch: false,
             ..Default::default()
+        }
+    }
+
+    /// The out-of-box sketch transport must already satisfy the ASAPv1
+    /// self-describing carrier contract.
+    #[test]
+    fn default_transport_is_self_describing_kll() {
+        let cfg = PluginConfig::default();
+        assert_eq!(cfg.sketch_type, SKETCH_TYPE_KLL);
+        assert_eq!(cfg.encoding, Encoding::Msgpack);
+        assert!(resolve(&cfg).is_ok());
+    }
+
+    /// Until a sketchlib ASAPv1 codec exists for a sketch type, transport of
+    /// its private proto/legacy-msgpack state must fail during configuration.
+    #[test]
+    fn sketch_transport_rejects_non_asapv1_combinations() {
+        for (sketch_type, encoding) in [
+            (SKETCH_TYPE_DDSKETCH, Encoding::Msgpack),
+            (SKETCH_TYPE_HLL, Encoding::Msgpack),
+            (SKETCH_TYPE_COUNTMINSKETCH, Encoding::Msgpack),
+            (SKETCH_TYPE_COUNTSKETCH, Encoding::Msgpack),
+            (SKETCH_TYPE_KLL, Encoding::ProtoFull),
+        ] {
+            let mut cfg = make_config(sketch_type);
+            cfg.encoding = encoding;
+            cfg.transmit_sketch = true;
+            assert!(
+                resolve(&cfg).is_err(),
+                "{sketch_type}/{encoding:?} must not emit a private sketch payload"
+            );
         }
     }
 
@@ -403,8 +455,8 @@ mod tests {
     }
 
     #[test]
-    fn kll_allows_all_encodings() {
-        // KLL now has a msgpack full form; every encoding resolves.
+    fn estimate_mode_allows_all_kll_encodings() {
+        // Scalar estimate mode does not put private sketch bytes on the wire.
         for enc in [
             Encoding::ProtoFull,
             Encoding::Msgpack,
