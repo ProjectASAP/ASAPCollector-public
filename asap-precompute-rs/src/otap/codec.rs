@@ -192,23 +192,14 @@ impl OtapSketchEncoder {
     }
 
     fn series_id_for(&mut self, env: &SketchEnvelope) -> u32 {
-        let mut labels = env.labels.iter().collect::<Vec<_>>();
-        labels.sort_by(|a, b| a.key.cmp(&b.key).then(a.value.cmp(&b.value)));
         let mut key = format!(
             "{}:{}:{}:",
             env.agg_id,
             env.metric_name.len(),
             env.metric_name
         );
-        for label in labels {
-            key.push_str(&format!(
-                "{}:{}{}:{}",
-                label.key.len(),
-                label.key,
-                label.value.len(),
-                label.value
-            ));
-        }
+        append_labels_to_key(&mut key, &env.resource_labels);
+        append_labels_to_key(&mut key, &env.labels);
         if let Some(series_id) = self.series_ids.get(&key) {
             return *series_id;
         }
@@ -275,6 +266,36 @@ fn validate_self_describing_payload(encoding: Encoding, payload: &[u8]) -> Resul
     Ok(())
 }
 
+fn append_labels_to_key(key: &mut String, labels: &[KeyValue]) {
+    let mut labels = labels.iter().collect::<Vec<_>>();
+    labels.sort_by(|a, b| a.key.cmp(&b.key).then(a.value.cmp(&b.value)));
+    for label in labels {
+        key.push_str(&format!(
+            "{}:{}{}:{}",
+            label.key.len(),
+            label.key,
+            label.value.len(),
+            label.value
+        ));
+    }
+}
+
+fn same_resource(left: &SketchEnvelope, right: &SketchEnvelope) -> bool {
+    if left.agg_id != right.agg_id
+        || left.sketch_type != right.sketch_type
+        || left.encoding != right.encoding
+        || left.schema_version != right.schema_version
+        || left.hash_spec != right.hash_spec
+    {
+        return false;
+    }
+    let mut left_key = String::new();
+    let mut right_key = String::new();
+    append_labels_to_key(&mut left_key, &left.resource_labels);
+    append_labels_to_key(&mut right_key, &right.resource_labels);
+    left_key == right_key
+}
+
 /// Zero-copy adapter presenting a `&[SketchEnvelope]` as a
 /// `MetricsView` directly — one Resource (empty), one Scope (unnamed),
 /// one Metric per series, using SummaryDataPoints for sketch envelopes and
@@ -307,7 +328,7 @@ impl<'a> AsapMetricsView<'a> {
         for (row, env) in envelopes.iter().enumerate() {
             let resource_pos = resources
                 .iter()
-                .position(|group| envelopes[group.representative].agg_id == env.agg_id)
+                .position(|group| same_resource(&envelopes[group.representative], env))
                 .unwrap_or_else(|| {
                     let (hash_seed, hash_function) =
                         resolve_hash_seed(env.sketch_type, env.hash_spec.as_ref());
@@ -861,7 +882,15 @@ impl<'v, 'a> ResourceView for AsapResourceView<'v, 'a> {
             .iter()
             .find(|group| group.representative == self.row)
             .expect("resource group exists");
-        let mut attrs = vec![
+        let mut attrs = env
+            .resource_labels
+            .iter()
+            .map(|label| AsapAttribute {
+                key: label.key.as_str(),
+                value: AsapAnyValue::Str(label.value.as_str()),
+            })
+            .collect::<Vec<_>>();
+        attrs.extend([
             AsapAttribute {
                 key: ATTR_AGG_ID,
                 value: AsapAnyValue::Int(env.agg_id),
@@ -878,7 +907,7 @@ impl<'v, 'a> ResourceView for AsapResourceView<'v, 'a> {
                 key: ATTR_SCHEMA_VERSION,
                 value: AsapAnyValue::Int(u64::from(env.schema_version)),
             },
-        ];
+        ]);
         if let Some(value) = group.sketch_size.as_deref() {
             attrs.push(AsapAttribute {
                 key: ATTR_SKETCH_SIZE,
@@ -1822,6 +1851,33 @@ mod tests {
         assert_eq!(obs.labels.len(), 1);
         assert_eq!(obs.labels[0].key, "path");
         assert_eq!(obs.labels[0].value, "/api");
+    }
+
+    /// Two otherwise identical series belonging to different OTel resources
+    /// must remain distinct and retain their resource attributes.
+    #[test]
+    fn encode_then_decode_preserves_distinct_resource_series() {
+        let mut checkout = one_envelope("requests", 1.0, "route", "/api");
+        checkout.resource_labels = vec![Kv::new("service.name", "checkout")];
+        let mut payments = checkout.clone();
+        payments.value = 2.0;
+        payments.resource_labels = vec![Kv::new("service.name", "payments")];
+
+        let pdata = encode_envelopes_to_pdata(&[checkout, payments]).expect("encode");
+        let mut observations = decode_pdata_to_observations(pdata)
+            .expect("decode")
+            .observations;
+        observations.sort_by(|left, right| left.value.float.total_cmp(&right.value.float));
+
+        assert_eq!(observations.len(), 2);
+        assert_eq!(
+            observations[0].resource_labels,
+            vec![Kv::new("service.name", "checkout")]
+        );
+        assert_eq!(
+            observations[1].resource_labels,
+            vec![Kv::new("service.name", "payments")]
+        );
     }
 
     #[test]
