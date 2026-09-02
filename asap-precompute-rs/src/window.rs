@@ -229,13 +229,9 @@ impl WindowState {
         };
         self.init_window(ref_ms, cfg);
 
-        // Envelopes carry a single flat labels list (the upstream
-        // sender already collapsed any resource/datapoint
-        // distinction), so resource labels are empty in this path.
-        // We still route through series_key_for_entry so
-        // GlobalAggregation collapses inbound envelopes into the
-        // same global bucket as the scalar path.
-        let key = cfg.series_key_for_entry(&[], &env.labels);
+        // Native OTAP envelopes preserve resource and data-point labels
+        // separately. Keep both in the series identity across merge stages.
+        let key = cfg.series_key_for_entry(&env.resource_labels, &env.labels);
 
         if !self.series.contains_key(&key) {
             if cfg.max_series > 0
@@ -247,7 +243,7 @@ impl WindowState {
             let sketch = sketch_factory();
             let entry = SeriesEntry {
                 sketch,
-                resource_labels: Vec::new(),
+                resource_labels: env.resource_labels.clone(),
                 labels: env.labels.clone(),
                 last_seen_ms: ref_ms,
                 count: 0,
