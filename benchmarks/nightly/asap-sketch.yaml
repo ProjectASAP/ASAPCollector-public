@@ -22,9 +22,10 @@ topology:
       quantiles: [0.5, 0.99]
       maximum_relative_error: 0.05
 comparisons:
-  - otap_pdata_roundtrip
-  - exact_sort
-  - asap_kll_4way_merge
+  - otap_control_pipeline
+  - asap_kll_pipeline
+references:
+  - exact_sort_reference
 measurements:
   - signals_per_second
   - wall_time
@@ -36,3 +37,6 @@ profiling:
   criterion: target/criterion
   symbols: strip-none
   follow_up: samply-or-otap-pprof
+limitations:
+  - internal Criterion replica; not yet published by the upstream shared runner
+  - traffic is pre-generated from the semantic-convention schema rather than the future annotation-generated SDK

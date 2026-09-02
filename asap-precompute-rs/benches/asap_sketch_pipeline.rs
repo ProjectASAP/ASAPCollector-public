@@ -1,15 +1,16 @@
-//! Criterion layer for the nightly end-to-end benchmark.
+//! Nightly traffic -> SUT -> backend benchmark.
 //!
-//! The input models the stable `http.server.request.duration` metric and its
-//! standard route/method/status dimensions. Values use a deterministic mixed
-//! latency distribution so correctness can be checked independently of timing.
+//! Both the no-sketch control and ASAP path consume the same pre-generated
+//! native `OtapPdata`, decode it at ingress, encode their results as native
+//! pdata, and decode/validate those results in the simulated backend.
 
 use asap_precompute_rs::envelope::{Encoding, SketchEnvelope, SketchType};
-use asap_precompute_rs::observation::KeyValue;
+use asap_precompute_rs::observation::{KeyValue, Observation};
 use asap_precompute_rs::otap::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata};
 use asap_precompute_rs::precompute::{QuantileSketch, Sketch};
 use asap_precompute_rs::sketches::KLLWrapper;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use otel_arrow_dfe_otap::pdata::OtapPdata;
 use std::hint::black_box;
 
 const SIGNAL_COUNTS: [usize; 3] = [1_024, 16_384, 131_072];
@@ -18,8 +19,6 @@ const SHARDS: usize = 4;
 fn semantic_http_durations(count: usize) -> Vec<f64> {
     (0..count)
         .map(|i| {
-            // 95% normal traffic plus deterministic slow requests. Seconds,
-            // matching the OTel HTTP metric semantic convention.
             if i % 20 == 0 {
                 1.0 + (i % 17) as f64 * 0.025
             } else {
@@ -29,6 +28,38 @@ fn semantic_http_durations(count: usize) -> Vec<f64> {
         .collect()
 }
 
+fn scalar_envelope(value: f64) -> SketchEnvelope {
+    SketchEnvelope {
+        schema_version: 1,
+        sketch_type: SketchType::Unspecified,
+        agg_id: 0,
+        resource_labels: vec![KeyValue::new("service.name", "checkout")],
+        labels: vec![
+            KeyValue::new("http.request.method", "GET"),
+            KeyValue::new("http.route", "/checkout"),
+            KeyValue::new("http.response.status_code", "200"),
+        ],
+        window_start_ms: 0,
+        window_end_ms: 1,
+        encoding: Encoding::Unspecified,
+        payload: vec![],
+        hash_spec: None,
+        metric_name: "http.server.request.duration".to_owned(),
+        count: 0,
+        aggregation_temporality: 0,
+        value,
+    }
+}
+
+fn generated_pdata(values: &[f64]) -> OtapPdata {
+    let envelopes = values
+        .iter()
+        .copied()
+        .map(scalar_envelope)
+        .collect::<Vec<_>>();
+    encode_envelopes_to_pdata(&envelopes).expect("traffic generator pdata")
+}
+
 fn exact_quantiles(values: &[f64]) -> (f64, f64) {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
@@ -36,63 +67,85 @@ fn exact_quantiles(values: &[f64]) -> (f64, f64) {
     (at(0.5), at(0.99))
 }
 
-fn sketch_quantiles(values: &[f64]) -> (f64, f64) {
+fn backend_decode(pdata: OtapPdata) -> Vec<Observation> {
+    decode_pdata_to_observations(pdata)
+        .expect("simulated backend decode")
+        .observations
+}
+
+fn control_pipeline(input: OtapPdata) -> Vec<Observation> {
+    let observations = backend_decode(input);
+    let output = observations
+        .iter()
+        .map(|observation| {
+            let mut envelope = scalar_envelope(observation.value.float);
+            envelope.resource_labels = observation.resource_labels.clone();
+            envelope.labels = observation.labels.clone();
+            envelope.metric_name = observation.metric.clone();
+            envelope
+        })
+        .collect::<Vec<_>>();
+    backend_decode(encode_envelopes_to_pdata(&output).expect("control output pdata"))
+}
+
+fn asap_pipeline(input: OtapPdata) -> Vec<Observation> {
+    let observations = backend_decode(input);
     let mut shards = (0..SHARDS)
         .map(|seed| {
             KLLWrapper::new(200, Some(seed as u64 + 1)).with_wire_encoding(Encoding::Msgpack)
         })
         .collect::<Vec<_>>();
-    for (index, value) in values.iter().copied().enumerate() {
-        shards[index % SHARDS].update(value);
+    for (index, observation) in observations.iter().enumerate() {
+        shards[index % SHARDS].update(observation.value.float);
     }
     let mut merged = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
     for shard in &shards {
-        merged.merge(shard).expect("merge KLL shard");
+        merged.merge(shard).expect("ASAPv1 KLL shard merge");
     }
-    (merged.quantile(0.5), merged.quantile(0.99))
+    let output = [
+        ("0.5", merged.quantile(0.5)),
+        ("0.99", merged.quantile(0.99)),
+    ]
+    .into_iter()
+    .map(|(quantile, value)| {
+        let mut envelope = scalar_envelope(value);
+        envelope.metric_name = "http.server.request.duration.estimate".into();
+        envelope.labels.push(KeyValue::new("quantile", quantile));
+        envelope
+    })
+    .collect::<Vec<_>>();
+    backend_decode(encode_envelopes_to_pdata(&output).expect("ASAP output pdata"))
 }
 
-fn otap_passthrough(values: &[f64]) -> usize {
-    let input = values
-        .iter()
-        .copied()
-        .map(|value| SketchEnvelope {
-            schema_version: 1,
-            sketch_type: SketchType::Unspecified,
-            agg_id: 0,
-            resource_labels: vec![KeyValue::new("service.name", "checkout")],
-            labels: vec![
-                KeyValue::new("http.request.method", "GET"),
-                KeyValue::new("http.route", "/checkout"),
-                KeyValue::new("http.response.status_code", "200"),
-            ],
-            window_start_ms: 0,
-            window_end_ms: 1,
-            encoding: Encoding::Unspecified,
-            payload: vec![],
-            hash_spec: None,
-            metric_name: "http.server.request.duration".to_owned(),
-            count: 0,
-            aggregation_temporality: 0,
-            value,
-        })
-        .collect::<Vec<_>>();
-    let pdata = encode_envelopes_to_pdata(&input).expect("encode OTAP baseline");
-    decode_pdata_to_observations(pdata)
-        .expect("decode OTAP baseline")
-        .observations
-        .len()
+fn assert_control(input: &OtapPdata, values: &[f64]) {
+    let output = control_pipeline(input.clone());
+    assert_eq!(output.len(), values.len());
+    assert_eq!(output[0].value.float, values[0]);
+    assert!(output[0]
+        .resource_labels
+        .contains(&KeyValue::new("service.name", "checkout")));
+    assert!(output[0]
+        .labels
+        .contains(&KeyValue::new("http.route", "/checkout")));
 }
 
-fn assert_accuracy(values: &[f64]) {
+fn assert_accuracy(input: &OtapPdata, values: &[f64]) {
     let exact = exact_quantiles(values);
-    let sketch = sketch_quantiles(values);
-    for (name, got, want) in [("p50", sketch.0, exact.0), ("p99", sketch.1, exact.1)] {
+    let output = asap_pipeline(input.clone());
+    assert_eq!(output.len(), 2);
+    for (name, quantile, want) in [("p50", "0.5", exact.0), ("p99", "0.99", exact.1)] {
+        let got = output
+            .iter()
+            .find(|observation| {
+                observation
+                    .labels
+                    .contains(&KeyValue::new("quantile", quantile))
+            })
+            .unwrap_or_else(|| panic!("missing {name}"))
+            .value
+            .float;
         let relative_error = (got - want).abs() / want.max(f64::EPSILON);
-        assert!(
-            relative_error <= 0.05,
-            "{name}: got {got}, want {want}, relative error {relative_error}"
-        );
+        assert!(relative_error <= 0.05, "{name}: got {got}, want {want}");
     }
 }
 
@@ -100,22 +153,24 @@ fn benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("http.server.request.duration");
     for count in SIGNAL_COUNTS {
         let values = semantic_http_durations(count);
-        assert_accuracy(&values);
+        let input = generated_pdata(&values);
+        assert_control(&input, &values);
+        assert_accuracy(&input, &values);
         group.throughput(Throughput::Elements(count as u64));
         group.bench_with_input(
-            BenchmarkId::new("exact_sort", count),
+            BenchmarkId::new("exact_sort_reference", count),
             &values,
-            |b, input| b.iter(|| black_box(exact_quantiles(black_box(input)))),
+            |b, v| b.iter(|| black_box(exact_quantiles(black_box(v)))),
         );
         group.bench_with_input(
-            BenchmarkId::new("otap_pdata_roundtrip", count),
-            &values,
-            |b, input| b.iter(|| black_box(otap_passthrough(black_box(input)))),
+            BenchmarkId::new("otap_control_pipeline", count),
+            &input,
+            |b, p| b.iter(|| black_box(control_pipeline(black_box(p.clone())))),
         );
         group.bench_with_input(
-            BenchmarkId::new("asap_kll_4way_merge", count),
-            &values,
-            |b, input| b.iter(|| black_box(sketch_quantiles(black_box(input)))),
+            BenchmarkId::new("asap_kll_pipeline", count),
+            &input,
+            |b, p| b.iter(|| black_box(asap_pipeline(black_box(p.clone())))),
         );
     }
     group.finish();

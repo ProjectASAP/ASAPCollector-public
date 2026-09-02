@@ -16,10 +16,18 @@ Run locally:
 ./benchmarks/run-nightly.sh
 ```
 
-Criterion records throughput and latency for native `OtapPdata` round-trip,
-exact aggregation, and the ASAP sketch path. `/usr/bin/time -v` records CPU time, CPU percentage, wall time,
-and peak RSS for the complete benchmark process. Results and the exact scenario
-manifest are written to `benchmark-results/` and uploaded by CI.
+Criterion records throughput and latency for two pipelines with identical
+native pdata ingress and backend encode/decode boundaries: a no-sketch OTAP
+control and the four-shard ASAP KLL path. Exact sorting is reported separately
+as an algorithmic reference, not as an engine comparison. Before timing, the
+backend validates values, metric labels, resource labels, p50/p99 presence, and
+the 5% accuracy bound.
+
+The runner compiles first, outside measurement, then starts a separate benchmark
+process for every scenario and signal count. Each `resource-*.txt` therefore
+contains `/usr/bin/time -v` CPU, wall-time, and peak-RSS measurements attributable
+to one case rather than to Cargo/rustc and the entire suite. Results and the exact
+scenario manifest are written to `benchmark-results/` and uploaded by CI.
 
 This is deliberately an internal replica, not an upstream OTAP nightly suite.
 Once the ASAP processor is ready to move into `otel-arrow`, the manifest maps to
