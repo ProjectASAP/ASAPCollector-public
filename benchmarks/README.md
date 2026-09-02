@@ -5,10 +5,11 @@ processor is still maintained outside the upstream `otel-arrow` tree.
 
 The logical topology is `traffic generator → ASAP sketch SUT → simulated
 backend`. The generator uses a deterministic metric shaped like the OpenTelemetry
-`http.server.request.duration` semantic convention. The SUT creates four KLL
-shards, merges their self-describing ASAPv1 state, and estimates p50/p99. The
-backend compares both estimates with exact sorted quantiles and fails above 5%
-relative error.
+`http.server.request.duration` semantic convention. Three SUT workloads are
+compared: transmitting every raw value, collecting and sorting every raw value
+for exact p50/p99, and creating then merging four self-describing ASAPv1 KLL
+shards for approximate p50/p99. The backend requires exact results from the sort
+path and fails the KLL path above 5% relative error.
 
 Run locally:
 
@@ -16,12 +17,12 @@ Run locally:
 ./benchmarks/run-nightly.sh
 ```
 
-Criterion records throughput and latency for two pipelines with identical
-native pdata ingress and backend encode/decode boundaries: a no-sketch OTAP
-control and the four-shard ASAP KLL path. Exact sorting is reported separately
-as an algorithmic reference, not as an engine comparison. Before timing, the
-backend validates values, metric labels, resource labels, p50/p99 presence, and
-the 5% accuracy bound.
+Criterion records throughput and latency for three pipelines with identical
+native pdata ingress and backend encode/decode boundaries: a no-computation OTAP
+raw pass-through, an OTAP exact-quantile processor that sorts all raw values,
+and the four-shard ASAP KLL path. Both quantile pipelines emit the same p50/p99
+Gauge shape. Before timing, the backend validates values, metric labels,
+resource labels, exact p50/p99 results, and the KLL 5% accuracy bound.
 
 The runner compiles first, outside measurement, then starts a separate benchmark
 process for every scenario and signal count. Each `resource-*.txt` therefore
@@ -29,7 +30,18 @@ contains `/usr/bin/time -v` CPU, wall-time, and peak-RSS measurements attributab
 to one case rather than to Cargo/rustc and the entire suite. Results and the exact
 scenario manifest are written to `benchmark-results/` and uploaded by CI.
 
+The comparison answers two separate questions. Raw pass-through measures the
+cost of retaining and transmitting all observations, so its output cardinality
+is intentionally much larger. Exact sort and KLL both emit two Gauge values and
+are directly comparable for this fixed batch workload. At these input sizes,
+OTAP pdata decode and harness costs can dominate both quantile implementations;
+larger streams and bounded-memory tests are needed to expose their different
+scaling behavior. Peak RSS is for the whole Criterion process, including input,
+OTAP/Arrow dependencies, and the harness—not just the algorithm state.
+
 This is deliberately an internal replica, not an upstream OTAP nightly suite.
+The three processor workloads operate on native `OtapPdata` inside Criterion;
+they are not yet instantiated as complete OTAP `RuntimePipeline` graphs.
 Once the ASAP processor is ready to move into `otel-arrow`, the manifest maps to
 their three-component orchestrator and shared bare-metal runner. PR 3830 only
 adds the declarative Weaver v2 registry today; switching the input generator to

@@ -17,7 +17,7 @@ bench_bin=$(find "$target_root/release/deps" -maxdepth 1 -type f -perm -111 \
 test -n "$bench_bin"
 
 : > "$result_dir/criterion-output.txt"
-for scenario in otap_control_pipeline asap_kll_pipeline exact_sort_reference; do
+for scenario in otap_control_pipeline otap_exact_quantile_pipeline asap_kll_pipeline; do
   for count in 1024 16384 131072; do
     resource_file="$result_dir/resource-${scenario}-${count}.txt"
     /usr/bin/time -v -o "$resource_file" \
