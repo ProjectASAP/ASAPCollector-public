@@ -213,23 +213,14 @@ impl OtapSketchEncoder {
     }
 
     fn series_id_for(&mut self, env: &SketchEnvelope) -> u32 {
-        let mut labels = env.labels.iter().collect::<Vec<_>>();
-        labels.sort_by(|a, b| a.key.cmp(&b.key).then(a.value.cmp(&b.value)));
         let mut key = format!(
             "{}:{}:{}:",
             env.agg_id,
             env.metric_name.len(),
             env.metric_name
         );
-        for label in labels {
-            key.push_str(&format!(
-                "{}:{}{}:{}",
-                label.key.len(),
-                label.key,
-                label.value.len(),
-                label.value
-            ));
-        }
+        append_labels_to_key(&mut key, &env.resource_labels);
+        append_labels_to_key(&mut key, &env.labels);
         if let Some(series_id) = self.series_ids.get(&key) {
             return *series_id;
         }
@@ -254,46 +245,39 @@ fn validate_self_describing_payload(encoding: Encoding, payload: &[u8]) -> Resul
             encoding.name()
         ));
     }
-    const MAGIC: &[u8; 6] = b"ASAPv1";
-    const HEADER_PREFIX_LEN: usize = MAGIC.len() + 2;
-    if payload.len() < HEADER_PREFIX_LEN + 8 || !payload.starts_with(MAGIC) {
-        return Err("invalid self-describing sketch.envelope: missing ASAPv1 magic".into());
-    }
-    if payload[MAGIC.len()] != 1 {
-        return Err(format!(
-            "invalid self-describing sketch.envelope: unsupported ASAPv1 version {}",
-            payload[MAGIC.len()]
+    asap_sketchlib::sketches::KLL::<f64>::deserialize_from_bytes(payload)
+        .map(|_| ())
+        .map_err(|error| format!("invalid self-describing KLL sketch.envelope: {error}"))
+}
+
+fn append_labels_to_key(key: &mut String, labels: &[KeyValue]) {
+    let mut labels = labels.iter().collect::<Vec<_>>();
+    labels.sort_by(|a, b| a.key.cmp(&b.key).then(a.value.cmp(&b.value)));
+    for label in labels {
+        key.push_str(&format!(
+            "{}:{}{}:{}",
+            label.key.len(),
+            label.key,
+            label.value.len(),
+            label.value
         ));
     }
-    let kind_len = payload[MAGIC.len() + 1] as usize;
-    let lengths_at = HEADER_PREFIX_LEN
-        .checked_add(kind_len)
-        .ok_or_else(|| "invalid self-describing sketch.envelope: length overflow".to_string())?;
-    if payload.len() < lengths_at + 8 || kind_len == 0 {
-        return Err("invalid self-describing sketch.envelope: truncated kind or lengths".into());
+}
+
+fn same_resource(left: &SketchEnvelope, right: &SketchEnvelope) -> bool {
+    if left.agg_id != right.agg_id
+        || left.sketch_type != right.sketch_type
+        || left.encoding != right.encoding
+        || left.schema_version != right.schema_version
+        || left.hash_spec != right.hash_spec
+    {
+        return false;
     }
-    let metadata_len = u32::from_be_bytes(
-        payload[lengths_at..lengths_at + 4]
-            .try_into()
-            .expect("four-byte metadata length"),
-    ) as usize;
-    let sketch_len = u32::from_be_bytes(
-        payload[lengths_at + 4..lengths_at + 8]
-            .try_into()
-            .expect("four-byte payload length"),
-    ) as usize;
-    let expected_len = lengths_at
-        .checked_add(8)
-        .and_then(|len| len.checked_add(metadata_len))
-        .and_then(|len| len.checked_add(sketch_len))
-        .ok_or_else(|| "invalid self-describing sketch.envelope: length overflow".to_string())?;
-    if payload.len() != expected_len {
-        return Err(format!(
-            "invalid self-describing sketch.envelope: framed length {expected_len}, actual {}",
-            payload.len()
-        ));
-    }
-    Ok(())
+    let mut left_key = String::new();
+    let mut right_key = String::new();
+    append_labels_to_key(&mut left_key, &left.resource_labels);
+    append_labels_to_key(&mut right_key, &right.resource_labels);
+    left_key == right_key
 }
 
 /// Zero-copy adapter presenting a `&[SketchEnvelope]` as a
@@ -328,7 +312,7 @@ impl<'a> AsapMetricsView<'a> {
         for (row, env) in envelopes.iter().enumerate() {
             let resource_pos = resources
                 .iter()
-                .position(|group| envelopes[group.representative].agg_id == env.agg_id)
+                .position(|group| same_resource(&envelopes[group.representative], env))
                 .unwrap_or_else(|| {
                     let (hash_seed, hash_function) =
                         resolve_hash_seed(env.sketch_type, env.hash_spec.as_ref());
@@ -882,7 +866,15 @@ impl<'v, 'a> ResourceView for AsapResourceView<'v, 'a> {
             .iter()
             .find(|group| group.representative == self.row)
             .expect("resource group exists");
-        let mut attrs = vec![
+        let mut attrs = env
+            .resource_labels
+            .iter()
+            .map(|label| AsapAttribute {
+                key: label.key.as_str(),
+                value: AsapAnyValue::Str(label.value.as_str()),
+            })
+            .collect::<Vec<_>>();
+        attrs.extend([
             AsapAttribute {
                 key: ATTR_AGG_ID,
                 value: AsapAnyValue::Int(env.agg_id),
@@ -899,7 +891,7 @@ impl<'v, 'a> ResourceView for AsapResourceView<'v, 'a> {
                 key: ATTR_SCHEMA_VERSION,
                 value: AsapAnyValue::Int(u64::from(env.schema_version)),
             },
-        ];
+        ]);
         if let Some(value) = group.sketch_size.as_deref() {
             attrs.push(AsapAttribute {
                 key: ATTR_SKETCH_SIZE,
@@ -1845,6 +1837,33 @@ mod tests {
         assert_eq!(obs.labels[0].value, "/api");
     }
 
+    /// Two otherwise identical series belonging to different OTel resources
+    /// must remain distinct and retain their resource attributes.
+    #[test]
+    fn encode_then_decode_preserves_distinct_resource_series() {
+        let mut checkout = one_envelope("requests", 1.0, "route", "/api");
+        checkout.resource_labels = vec![Kv::new("service.name", "checkout")];
+        let mut payments = checkout.clone();
+        payments.value = 2.0;
+        payments.resource_labels = vec![Kv::new("service.name", "payments")];
+
+        let pdata = encode_envelopes_to_pdata(&[checkout, payments]).expect("encode");
+        let mut observations = decode_pdata_to_observations(pdata)
+            .expect("decode")
+            .observations;
+        observations.sort_by(|left, right| left.value.float.total_cmp(&right.value.float));
+
+        assert_eq!(observations.len(), 2);
+        assert_eq!(
+            observations[0].resource_labels,
+            vec![Kv::new("service.name", "checkout")]
+        );
+        assert_eq!(
+            observations[1].resource_labels,
+            vec![Kv::new("service.name", "payments")]
+        );
+    }
+
     #[test]
     fn summary_carrier_round_trips_a_self_describing_sketch_envelope() {
         let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
@@ -1884,7 +1903,7 @@ mod tests {
         let error = encode_envelopes_to_pdata(&[env]).expect_err("invalid ASAPv1 must fail");
         assert!(error
             .to_string()
-            .contains("self-describing sketch.envelope"));
+            .contains("self-describing KLL sketch.envelope"));
     }
 
     #[test]
