@@ -15,14 +15,23 @@ use std::hint::black_box;
 
 const SIGNAL_COUNTS: [usize; 3] = [1_024, 16_384, 131_072];
 const SHARDS: usize = 4;
+const INPUT_BATCH_SIZE: usize = 4_096;
 
 fn semantic_http_durations(count: usize) -> Vec<f64> {
     (0..count)
         .map(|i| {
+            // Deterministic SplitMix64 output gives the duration field the
+            // high-diversity continuous distribution produced by a traffic
+            // generator, without making benchmark runs non-reproducible.
+            let mut mixed = (i as u64).wrapping_add(0x9e37_79b9_7f4a_7c15);
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            mixed ^= mixed >> 31;
+            let unit = (mixed >> 11) as f64 / (1_u64 << 53) as f64;
             if i % 20 == 0 {
-                1.0 + (i % 17) as f64 * 0.025
+                1.0 + unit * 0.4
             } else {
-                0.005 + (i % 200) as f64 * 0.0005
+                0.005 + unit * 0.1
             }
         })
         .collect()
@@ -51,13 +60,18 @@ fn scalar_envelope(value: f64) -> SketchEnvelope {
     }
 }
 
-fn generated_pdata(values: &[f64]) -> OtapPdata {
-    let envelopes = values
-        .iter()
-        .copied()
-        .map(scalar_envelope)
-        .collect::<Vec<_>>();
-    encode_envelopes_to_pdata(&envelopes).expect("traffic generator pdata")
+fn generated_pdata(values: &[f64]) -> Vec<OtapPdata> {
+    values
+        .chunks(INPUT_BATCH_SIZE)
+        .map(|batch| {
+            let envelopes = batch
+                .iter()
+                .copied()
+                .map(scalar_envelope)
+                .collect::<Vec<_>>();
+            encode_envelopes_to_pdata(&envelopes).expect("traffic generator pdata")
+        })
+        .collect()
 }
 
 fn exact_quantiles(values: &[f64]) -> (f64, f64) {
@@ -86,50 +100,67 @@ fn backend_decode(pdata: OtapPdata) -> Vec<Observation> {
         .observations
 }
 
-fn control_pipeline(input: OtapPdata) -> Vec<Observation> {
-    let observations = backend_decode(input);
-    let output = observations
-        .iter()
-        .map(|observation| {
-            let mut envelope = scalar_envelope(observation.value.float);
-            envelope.resource_labels = observation.resource_labels.clone();
-            envelope.labels = observation.labels.clone();
-            envelope.metric_name = observation.metric.clone();
-            envelope
-        })
-        .collect::<Vec<_>>();
-    backend_decode(encode_envelopes_to_pdata(&output).expect("control output pdata"))
+fn control_pipeline(input: Vec<OtapPdata>) -> Vec<Observation> {
+    let mut backend = Vec::new();
+    for batch in input {
+        let observations = backend_decode(batch);
+        let output = observations
+            .iter()
+            .map(|observation| {
+                let mut envelope = scalar_envelope(observation.value.float);
+                envelope.resource_labels = observation.resource_labels.clone();
+                envelope.labels = observation.labels.clone();
+                envelope.metric_name = observation.metric.clone();
+                envelope
+            })
+            .collect::<Vec<_>>();
+        backend.extend(backend_decode(
+            encode_envelopes_to_pdata(&output).expect("control output pdata"),
+        ));
+    }
+    backend
 }
 
-fn otap_exact_quantile_pipeline(input: OtapPdata) -> Vec<Observation> {
-    let observations = backend_decode(input);
-    let values = observations
-        .iter()
-        .map(|observation| observation.value.float)
-        .collect::<Vec<_>>();
+fn otap_exact_quantile_pipeline(input: Vec<OtapPdata>) -> Vec<Observation> {
+    let mut values = Vec::new();
+    for batch in input {
+        values.extend(
+            backend_decode(batch)
+                .into_iter()
+                .map(|observation| observation.value.float),
+        );
+    }
     let (p50, p99) = exact_quantiles(&values);
     quantile_output(p50, p99)
 }
 
-fn asap_pipeline(input: OtapPdata) -> Vec<Observation> {
-    let observations = backend_decode(input);
+fn asap_pipeline(input: Vec<OtapPdata>) -> Vec<Observation> {
     let mut shards = (0..SHARDS)
         .map(|seed| {
             KLLWrapper::new(200, Some(seed as u64 + 1)).with_wire_encoding(Encoding::Msgpack)
         })
         .collect::<Vec<_>>();
-    for (index, observation) in observations.iter().enumerate() {
-        shards[index % SHARDS].update(observation.value.float);
+    let mut index = 0;
+    for batch in input {
+        for observation in backend_decode(batch) {
+            shards[index % SHARDS].update(observation.value.float);
+            index += 1;
+        }
     }
     let mut merged = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
     for shard in &shards {
-        merged.merge(shard).expect("ASAPv1 KLL shard merge");
+        let bytes = shard.snapshot().expect("ASAPv1 KLL shard snapshot");
+        let mut decoded = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
+        decoded
+            .apply_delta_encoded(&bytes, Encoding::Msgpack)
+            .expect("ASAPv1 KLL shard decode");
+        merged.merge(&decoded).expect("ASAPv1 KLL shard merge");
     }
     quantile_output(merged.quantile(0.5), merged.quantile(0.99))
 }
 
-fn assert_control(input: &OtapPdata, values: &[f64]) {
-    let output = control_pipeline(input.clone());
+fn assert_control(input: &[OtapPdata], values: &[f64]) {
+    let output = control_pipeline(input.to_vec());
     assert_eq!(output.len(), values.len());
     assert_eq!(output[0].value.float, values[0]);
     assert!(output[0]
@@ -140,15 +171,15 @@ fn assert_control(input: &OtapPdata, values: &[f64]) {
         .contains(&KeyValue::new("http.route", "/checkout")));
 }
 
-fn assert_quantile_pipelines(input: &OtapPdata, values: &[f64]) {
+fn assert_quantile_pipelines(input: &[OtapPdata], values: &[f64]) {
     let exact = exact_quantiles(values);
     for (pipeline, output, maximum_error) in [
         (
             "OTAP exact",
-            otap_exact_quantile_pipeline(input.clone()),
+            otap_exact_quantile_pipeline(input.to_vec()),
             0.0,
         ),
-        ("ASAP KLL", asap_pipeline(input.clone()), 0.05),
+        ("ASAP KLL", asap_pipeline(input.to_vec()), 0.05),
     ] {
         assert_eq!(output.len(), 2, "{pipeline} output shape");
         for (name, quantile, want) in [("p50", "0.5", exact.0), ("p99", "0.99", exact.1)] {

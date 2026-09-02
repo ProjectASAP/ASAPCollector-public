@@ -10,6 +10,8 @@ topology:
       - http.response.status_code
       - service.name
     generation_strategy: pre_generated
+    input_batch_size: 4096
+    value_distribution: deterministic_high_diversity_with_5_percent_slow_tail
     batch_sizes: [1024, 16384, 131072]
   systems-under-test:
     - name: otap_control_pipeline
