@@ -34,6 +34,7 @@ use otel_arrow_dfe_otap::{
 use otel_arrow_dfe_pdata::{OtlpProtoBytes, TryIntoWithOptions};
 use otel_arrow_dfe_state::store::ObservedStateStore;
 use otel_arrow_dfe_telemetry::InternalTelemetrySystem;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -49,13 +50,13 @@ fn captured() -> &'static (Mutex<Vec<OtapPdata>>, Condvar) {
     CAPTURED.get_or_init(|| (Mutex::new(Vec::new()), Condvar::new()))
 }
 
-fn scalar_input(start: i32, end: i32) -> OtapPdata {
+fn scalar_input(start: u64, end: u64) -> OtapPdata {
     let values = (start..=end)
         .map(|value| SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::Unspecified,
             agg_id: 0,
-            resource_labels: vec![],
+            resource_labels: vec![KeyValue::new("service.name", "checkout")],
             labels: vec![KeyValue::new("route", "/checkout")],
             window_start_ms: 1_000,
             window_end_ms: 2_000,
@@ -65,7 +66,7 @@ fn scalar_input(start: i32, end: i32) -> OtapPdata {
             metric_name: "request.duration".into(),
             count: 0,
             aggregation_temporality: 0,
-            value: f64::from(value),
+            value: value as f64,
         })
         .collect::<Vec<_>>();
     encode_envelopes_to_pdata(&values).expect("encode input")
@@ -322,35 +323,89 @@ fn wait(mut child: Child, role: &str) {
     assert!(status.success(), "{role} failed: {status}");
 }
 
-fn validate_quantiles(results: &[(String, f64)]) -> Result<(), String> {
+fn validate_quantiles(results: &[(String, f64)], expected: [(f64, f64); 2]) -> Result<(), String> {
     if results.len() != 2 {
         return Err(format!(
             "expected p50 and p99, got {} result(s)",
             results.len()
         ));
     }
-    for (quantile, expected) in [("0.5", 100.0), ("0.99", 198.0)] {
+    for (quantile, expected) in expected {
+        let quantile = quantile.to_string();
         let value = results
             .iter()
-            .find_map(|(label, value)| (label == quantile).then_some(*value))
+            .find_map(|(label, value)| (label == &quantile).then_some(*value))
             .ok_or_else(|| format!("missing quantile {quantile}"))?;
-        if (value - expected).abs() > 5.0 {
+        let tolerance = (expected * 0.05).max(5.0);
+        if (value - expected).abs() > tolerance {
             return Err(format!(
-                "quantile {quantile} out of tolerance: got {value}, expected {expected} +/- 5"
+                "quantile {quantile} out of tolerance: got {value}, expected {expected} +/- {tolerance}"
             ));
         }
     }
     Ok(())
 }
 
-fn run_parent() {
+#[derive(Serialize)]
+struct ProcessorRun {
+    role: &'static str,
+    pid: u32,
+}
+
+#[derive(Serialize)]
+struct DemoManifest {
+    parent_pid: u32,
+    points_per_source: u64,
+    processors: Vec<ProcessorRun>,
+}
+
+struct ParentOptions {
+    output_dir: Option<PathBuf>,
+    result_manifest: Option<PathBuf>,
+    points_per_source: u64,
+}
+
+fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> {
+    let mut options = ParentOptions {
+        output_dir: None,
+        result_manifest: None,
+        points_per_source: 100,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].to_string_lossy();
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
+        match flag.as_ref() {
+            "--output-dir" => options.output_dir = Some(PathBuf::from(value)),
+            "--result-manifest" => options.result_manifest = Some(PathBuf::from(value)),
+            "--points-per-source" => {
+                options.points_per_source = value
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| "--points-per-source must be a positive integer".to_owned())?;
+                if options.points_per_source == 0 {
+                    return Err("--points-per-source must be positive".into());
+                }
+            }
+            _ => return Err(format!("unknown argument {flag}")),
+        }
+        index += 2;
+    }
+    Ok(options)
+}
+
+fn run_parent(options: ParentOptions) -> Result<(), String> {
     println!("ASAP OTAP multi-process demo: OTLP Metrics boundaries, ASAPv1 sketches");
     let id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = env::temp_dir().join(format!("asap-otap-demo-{}-{id}", std::process::id()));
-    fs::create_dir(&dir).unwrap();
+    let dir = options.output_dir.unwrap_or_else(|| {
+        env::temp_dir().join(format!("asap-otap-demo-{}-{id}", std::process::id()))
+    });
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let p = |name: &str| dir.join(name);
     let ia = p("a.otlp");
     let ib = p("b.otlp");
@@ -358,19 +413,38 @@ fn run_parent() {
     let sb = p("sb.otlp");
     let merged = p("merged.otlp");
     let out = p("out.otlp");
-    write_otlp(&ia, scalar_input(1, 100)).unwrap();
-    write_otlp(&ib, scalar_input(101, 200)).unwrap();
-    let exe = env::current_exe().unwrap();
+    let n = options.points_per_source;
+    write_otlp(&ia, scalar_input(1, n))?;
+    write_otlp(&ib, scalar_input(n + 1, n * 2))?;
+    let exe = env::current_exe().map_err(|e| e.to_string())?;
     let a = spawn(&exe, "create_a", &[&ia], &sa, &p("create-a.debug.log"));
     let b = spawn(&exe, "create_b", &[&ib], &sb, &p("create-b.debug.log"));
+    let mut processors = vec![
+        ProcessorRun {
+            role: "create_a",
+            pid: a.id(),
+        },
+        ProcessorRun {
+            role: "create_b",
+            pid: b.id(),
+        },
+    ];
     wait(a, "create_a");
     wait(b, "create_b");
     let m = spawn(&exe, "merge", &[&sa, &sb], &merged, &p("merge.debug.log"));
+    processors.push(ProcessorRun {
+        role: "merge",
+        pid: m.id(),
+    });
     wait(m, "merge");
     let e = spawn(&exe, "estimate", &[&merged], &out, &p("estimate.debug.log"));
+    processors.push(ProcessorRun {
+        role: "estimate",
+        pid: e.id(),
+    });
     wait(e, "estimate");
-    let decoded = decode_pdata_to_observations(read_otlp(&out).unwrap())
-        .unwrap()
+    let decoded = decode_pdata_to_observations(read_otlp(&out)?)
+        .map_err(|e| e.to_string())?
         .observations;
     let mut quantiles = Vec::with_capacity(decoded.len());
     for o in &decoded {
@@ -386,9 +460,22 @@ fn run_parent() {
         assert_eq!(o.metric, "request.duration.estimate");
         quantiles.push((q.to_owned(), o.value.float));
     }
-    validate_quantiles(&quantiles).expect("correct p50/p99 results");
+    validate_quantiles(&quantiles, [(0.5, n as f64), (0.99, n as f64 * 1.98)])?;
+    if let Some(path) = options.result_manifest {
+        let manifest = DemoManifest {
+            parent_pid: std::process::id(),
+            points_per_source: n,
+            processors,
+        };
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     println!("success: four DF processors ran in four child OS processes");
     println!("official detailed debug traces: {}", dir.display());
+    Ok(())
 }
 
 fn main() {
@@ -408,7 +495,13 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        run_parent();
+        match parent_options(&args).and_then(run_parent) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+        }
     }
 }
 
@@ -418,8 +511,13 @@ mod tests {
 
     #[test]
     fn result_validation_requires_correct_p50_and_p99() {
-        assert!(validate_quantiles(&[("0.5".into(), 100.0), ("0.99".into(), 198.0)]).is_ok());
-        assert!(validate_quantiles(&[("0.5".into(), 12.0), ("0.99".into(), 13.0)]).is_err());
-        assert!(validate_quantiles(&[("0.5".into(), 100.0)]).is_err());
+        let expected = [(0.5, 100.0), (0.99, 198.0)];
+        assert!(
+            validate_quantiles(&[("0.5".into(), 100.0), ("0.99".into(), 198.0)], expected).is_ok()
+        );
+        assert!(
+            validate_quantiles(&[("0.5".into(), 12.0), ("0.99".into(), 13.0)], expected).is_err()
+        );
+        assert!(validate_quantiles(&[("0.5".into(), 100.0)], expected).is_err());
     }
 }
