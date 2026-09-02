@@ -335,13 +335,11 @@ mod tests {
     /// sample weight, not reduce it to the number of retained items.
     #[test]
     fn asapv1_merge_preserves_compacted_sample_count() {
-        let mut source =
-            KLLWrapper::new(200, Some(42)).with_wire_encoding(Encoding::Msgpack);
+        let mut source = KLLWrapper::new(200, Some(42)).with_wire_encoding(Encoding::Msgpack);
         for value in 0..50_000 {
             source.update(value as f64);
         }
-        let mut target =
-            KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
+        let mut target = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
 
         target.merge(&source).expect("merge compacted KLL");
 
