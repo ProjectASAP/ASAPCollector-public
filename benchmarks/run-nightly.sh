@@ -2,30 +2,36 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-result_dir=${ASAP_BENCH_RESULT_DIR:-"$repo_root/benchmark-results"}
-mkdir -p "$result_dir"
+otap_rev=${OTAP_BENCH_REV:-3e85c3460361446ebfce99e9f35fffd2dd5ab740}
+framework_dir=${OTAP_PIPELINE_PERF_DIR:-"$repo_root/.cache/otel-arrow-$otap_rev"}
+python_deps=${OTAP_PIPELINE_PERF_PYTHON_DEPS:-"$repo_root/.cache/pipeline-perf-python"}
+python_bin=${PYTHON:-python3}
 
-cd "$repo_root/asap-precompute-rs"
-command -v /usr/bin/time >/dev/null
+if ! "$python_bin" -c 'import sys; raise SystemExit(sys.version_info < (3, 13))'; then
+  echo "OTAP's pinned benchmark dependencies require Python 3.13 or newer." >&2
+  echo "Set PYTHON to a compatible interpreter." >&2
+  exit 2
+fi
 
-# Compilation is deliberately outside every measurement. Each timed process
-# executes exactly one scenario and signal count, making CPU/RSS attributable.
-cargo bench --features otap-engine --bench asap_sketch_pipeline --no-run
-target_root=${CARGO_TARGET_DIR:-"$repo_root/asap-precompute-rs/target"}
-bench_bin=$(find "$target_root/release/deps" -maxdepth 1 -type f -perm -111 \
-  -name 'asap_sketch_pipeline-*' | head -n 1)
-test -n "$bench_bin"
+cargo build --manifest-path "$repo_root/asap-precompute-rs/Cargo.toml" \
+  --release --features otap-engine --bin asap-otap-demo
+docker build -f "$repo_root/benchmarks/Dockerfile" \
+  -t asap-quantile-benchmark:local "$repo_root"
 
-: > "$result_dir/criterion-output.txt"
-for scenario in otap_control_pipeline otap_exact_quantile_pipeline asap_kll_pipeline; do
-  for count in 1024 16384 131072; do
-    resource_file="$result_dir/resource-${scenario}-${count}.txt"
-    /usr/bin/time -v -o "$resource_file" \
-      "$bench_bin" "${scenario}/${count}" --bench --noplot \
-        --sample-size 20 --warm-up-time 1 --measurement-time 5 \
-      2>&1 | tee -a "$result_dir/criterion-output.txt"
-  done
-done
+if [[ ! -f "$framework_dir/tools/pipeline_perf_test/orchestrator/run_orchestrator.py" ]]; then
+  mkdir -p "$(dirname "$framework_dir")"
+  git clone --filter=blob:none --no-checkout \
+    https://github.com/open-telemetry/otel-arrow.git "$framework_dir"
+  git -C "$framework_dir" checkout "$otap_rev"
+fi
 
-cp "$repo_root/benchmarks/nightly/asap-sketch.yaml" "$result_dir/scenario.yaml"
-echo "results=$result_dir"
+if ! PYTHONPATH="$python_deps${PYTHONPATH:+:$PYTHONPATH}" "$python_bin" -c \
+  'import docker, duckdb, pandas, pyarrow, pydantic, yaml' 2>/dev/null; then
+  "$python_bin" -m pip install --quiet --target "$python_deps" \
+    -r "$framework_dir/tools/pipeline_perf_test/orchestrator/requirements.txt"
+fi
+
+cd "$repo_root"
+PYTHONPATH="$python_deps${PYTHONPATH:+:$PYTHONPATH}" \
+"$python_bin" "$framework_dir/tools/pipeline_perf_test/orchestrator/run_orchestrator.py" \
+  --config "$repo_root/benchmarks/nightly/asap-sketch.yaml"
