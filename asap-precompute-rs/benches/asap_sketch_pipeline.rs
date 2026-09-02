@@ -171,63 +171,101 @@ fn assert_control(input: &[OtapPdata], values: &[f64]) {
         .contains(&KeyValue::new("http.route", "/checkout")));
 }
 
-fn assert_quantile_pipelines(input: &[OtapPdata], values: &[f64]) {
-    let exact = exact_quantiles(values);
-    for (pipeline, output, maximum_error) in [
-        (
-            "OTAP exact",
-            otap_exact_quantile_pipeline(input.to_vec()),
-            0.0,
-        ),
-        ("ASAP KLL", asap_pipeline(input.to_vec()), 0.05),
-    ] {
-        assert_eq!(output.len(), 2, "{pipeline} output shape");
-        for (name, quantile, want) in [("p50", "0.5", exact.0), ("p99", "0.99", exact.1)] {
-            let observation = output
-                .iter()
-                .find(|observation| {
-                    observation
-                        .labels
-                        .contains(&KeyValue::new("quantile", quantile))
-                })
-                .unwrap_or_else(|| panic!("{pipeline} missing {name}"));
-            assert_eq!(observation.metric, "http.server.request.duration.estimate");
-            assert!(observation
-                .resource_labels
-                .contains(&KeyValue::new("service.name", "checkout")));
-            let got = observation.value.float;
-            let relative_error = (got - want).abs() / want.max(f64::EPSILON);
-            assert!(
-                relative_error <= maximum_error,
-                "{pipeline} {name}: got {got}, want {want}"
-            );
-        }
+fn assert_quantile_output(
+    pipeline: &str,
+    output: Vec<Observation>,
+    exact: (f64, f64),
+    maximum_error: f64,
+) {
+    assert_eq!(output.len(), 2, "{pipeline} output shape");
+    for (name, quantile, want) in [("p50", "0.5", exact.0), ("p99", "0.99", exact.1)] {
+        let observation = output
+            .iter()
+            .find(|observation| {
+                observation
+                    .labels
+                    .contains(&KeyValue::new("quantile", quantile))
+            })
+            .unwrap_or_else(|| panic!("{pipeline} missing {name}"));
+        assert_eq!(observation.metric, "http.server.request.duration.estimate");
+        assert!(observation
+            .resource_labels
+            .contains(&KeyValue::new("service.name", "checkout")));
+        let got = observation.value.float;
+        let relative_error = (got - want).abs() / want.max(f64::EPSILON);
+        assert!(
+            relative_error <= maximum_error,
+            "{pipeline} {name}: got {got}, want {want}"
+        );
     }
+}
+
+fn requested(scenario: &str, count: usize) -> bool {
+    let filters = std::env::args()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .collect::<Vec<_>>();
+    filters.is_empty()
+        || filters
+            .iter()
+            .any(|filter| filter.contains(&format!("{scenario}/{count}")))
+}
+
+fn assert_exact(input: &[OtapPdata], values: &[f64]) {
+    let exact = exact_quantiles(values);
+    assert_quantile_output(
+        "OTAP exact",
+        otap_exact_quantile_pipeline(input.to_vec()),
+        exact,
+        0.0,
+    );
+}
+
+fn assert_kll(input: &[OtapPdata], values: &[f64]) {
+    assert_quantile_output(
+        "ASAP KLL",
+        asap_pipeline(input.to_vec()),
+        exact_quantiles(values),
+        0.05,
+    );
 }
 
 fn benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("http.server.request.duration");
     for count in SIGNAL_COUNTS {
+        let run_control = requested("otap_control_pipeline", count);
+        let run_exact = requested("otap_exact_quantile_pipeline", count);
+        let run_kll = requested("asap_kll_pipeline", count);
+        if !run_control && !run_exact && !run_kll {
+            continue;
+        }
         let values = semantic_http_durations(count);
         let input = generated_pdata(&values);
-        assert_control(&input, &values);
-        assert_quantile_pipelines(&input, &values);
         group.throughput(Throughput::Elements(count as u64));
-        group.bench_with_input(
-            BenchmarkId::new("otap_exact_quantile_pipeline", count),
-            &input,
-            |b, p| b.iter(|| black_box(otap_exact_quantile_pipeline(black_box(p.clone())))),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("otap_control_pipeline", count),
-            &input,
-            |b, p| b.iter(|| black_box(control_pipeline(black_box(p.clone())))),
-        );
-        group.bench_with_input(
-            BenchmarkId::new("asap_kll_pipeline", count),
-            &input,
-            |b, p| b.iter(|| black_box(asap_pipeline(black_box(p.clone())))),
-        );
+        if run_exact {
+            assert_exact(&input, &values);
+            group.bench_with_input(
+                BenchmarkId::new("otap_exact_quantile_pipeline", count),
+                &input,
+                |b, p| b.iter(|| black_box(otap_exact_quantile_pipeline(black_box(p.clone())))),
+            );
+        }
+        if run_control {
+            assert_control(&input, &values);
+            group.bench_with_input(
+                BenchmarkId::new("otap_control_pipeline", count),
+                &input,
+                |b, p| b.iter(|| black_box(control_pipeline(black_box(p.clone())))),
+            );
+        }
+        if run_kll {
+            assert_kll(&input, &values);
+            group.bench_with_input(
+                BenchmarkId::new("asap_kll_pipeline", count),
+                &input,
+                |b, p| b.iter(|| black_box(asap_pipeline(black_box(p.clone())))),
+            );
+        }
     }
     group.finish();
 }
