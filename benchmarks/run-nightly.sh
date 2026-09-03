@@ -6,12 +6,17 @@ otap_rev=${OTAP_BENCH_REV:-3e85c3460361446ebfce99e9f35fffd2dd5ab740}
 framework_dir=${OTAP_PIPELINE_PERF_DIR:-"$repo_root/.cache/otel-arrow-$otap_rev"}
 python_deps=${OTAP_PIPELINE_PERF_PYTHON_DEPS:-"$repo_root/.cache/pipeline-perf-python"}
 python_bin=${PYTHON:-python3}
+result_root="$repo_root/benchmark-results"
 
 if ! "$python_bin" -c 'import sys; raise SystemExit(sys.version_info < (3, 13))'; then
   echo "OTAP's pinned benchmark dependencies require Python 3.13 or newer." >&2
   echo "Set PYTHON to a compatible interpreter." >&2
   exit 2
 fi
+
+# Docker creates a missing bind-mount source as root. Create it as the caller so
+# the host-side orchestrator can write process reports alongside container data.
+mkdir -p "$result_root"
 
 cargo build --manifest-path "$repo_root/asap-precompute-rs/Cargo.toml" \
   --release --features otap-engine --bin asap-otap-demo
