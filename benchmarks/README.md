@@ -89,6 +89,57 @@ component writes completed input count, elapsed time, and signals/s below
 `benchmark-results/{raw,exact,kll}/throughput.env`; the orchestrator writes its
 three process reports under `benchmark-results/`. They are uploaded by CI.
 
+## Viewing nightly results today
+
+There is not yet a published ASAP dashboard. Results are available as GitHub
+Actions artifacts:
+
+1. Open the repository's **Actions** tab and select **ASAP sketch benchmark**.
+2. Open a successful scheduled, manual, or pull-request run.
+3. Download the `asap-sketch-benchmark-<run-id>` artifact from **Artifacts**.
+4. Compare `raw/throughput.env`, `exact/throughput.env`, and
+   `kll/throughput.env` for completed input throughput and serialized boundary
+   bytes. Read `otap-raw-resources.md`, `otap-exact-quantile-resources.md`, and
+   `asap-kll-resources.md` for the upstream orchestrator's CPU and memory
+   summaries.
+
+Artifacts expire after 30 days. Pull-request runs are useful for reviewing a
+specific change; the scheduled run at 02:30 UTC is the consistent source for
+day-over-day comparisons after this workflow is merged to the default branch.
+GitHub-hosted runners are shared infrastructure, so small differences between
+runs should not be treated as regressions without repeated measurements.
+
+The serialized byte rates describe the current file-backed processor boundary.
+They are not network-bandwidth measurements: the processors exchange files
+inside one container, and Docker network RX/TX is therefore expected to remain
+near zero.
+
+## Future dashboard publication
+
+A repository-owned dashboard can be added without changing the benchmark
+topologies:
+
+```text
+nightly artifact
+  -> extract one versioned summary.json per run
+  -> append the commit, timestamp, correctness, throughput, CPU, and RSS history
+  -> render a static comparison page
+  -> publish the page and compact JSON history with GitHub Pages
+```
+
+Only compact summaries should be retained in the Pages history. Raw `.otlp`
+files, debug logs, and complete intermediate artifacts should continue to use
+the existing 30-day artifact retention instead of being committed or published.
+Each dashboard point should link to its commit and Actions run and record the
+benchmark schema version, OTAP revision, runner type, scenario parameters, and
+observation duration so incompatible runs are not plotted as one series.
+
+The first dashboard should remain informational and require manual review.
+Automated regression thresholds should be introduced only after enough
+scheduled runs establish normal GitHub-hosted-runner variance. If stable
+cross-project numbers are required later, the same summary format can be fed by
+an isolated runner or an upstream OTAP shared-server contribution.
+
 The local comparison answers two separate questions. Raw pass-through measures the
 cost of retaining and transmitting all observations, so its output cardinality
 is intentionally much larger. Exact sort and KLL both emit two Gauge values and
