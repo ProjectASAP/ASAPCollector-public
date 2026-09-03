@@ -18,7 +18,7 @@ overlay step:
 | Feature | What it adds | Extra dependency |
 |---|---|---|
 | *(default, no features)* | Host-neutral precompute runtime — the five sketch types, windowing, overflow policy. No Arrow, no OTAP, no Tokio. | none |
-| `otap` | The Arrow codec (`encode_batch`/`decode_batch`, `OtapMetricRecords`), the legacy `SeriesDictionary`/`otap::wire` transport, and `AsapSketchesPlugin`'s Tokio-task lifecycle. | `arrow-*`, `tokio` |
+| `otap` | The standalone Arrow codec (`encode_batch`/`decode_batch`, `OtapMetricRecords`). | `arrow-array`, `arrow-schema` |
 | `otap-engine` | The real OTAP node: `AsapSketchesProcessor` (a genuine `local::Processor<OtapPdata>`, `linkme`-registered) and its direct `SketchEnvelope <-> OtapPdata` binding (`otap::codec`). | the real `otel-arrow-dfe-*` crates, via a plain git dependency pinned to a specific `open-telemetry/otel-arrow` commit — see `Cargo.toml` |
 
 `otap-engine`'s git dependency is what used to require staging this
@@ -55,8 +55,7 @@ sends only via `effect_handler.send_message_with_source_node` — an
 earlier revision also carried a direct-TCP "wire lane" as a second
 transport; that's been removed. It turned out to be solving a problem
 OTAP's real Arrow encoding already solves: the custom wire lane
-existed to give sketch traffic dictionary/schema-reuse economics (the
-legacy `SeriesDictionary` SCHEMA/DICTIONARY/RECORD tiering), but
+existed to give sketch traffic dictionary/schema-reuse economics, but
 `codec.rs`'s real `OtapPdata` gets that for free — OTAP's own Arrow
 encoder dictionary-encodes the metric name and every string-valued
 attribute key/value by construction. Confirmed against the real
@@ -71,15 +70,13 @@ pipeline", for the full rationale and the real schema this produces.
 `cargo fmt --check`, against `open-telemetry/otel-arrow` commit
 `3e85c346` (2026-08-24, pinned in `Cargo.toml`).
 
-## The rest of the runtime lifecycle + Arrow codec
+## Configuration + standalone Arrow codec
 
 | File | Responsibility |
 |---|---|
-| [`lifecycle.rs`](./asap-precompute-rs/src/otap/lifecycle.rs) | `AsapSketchesPlugin` — Tokio runtime with three tasks: **input** (`Stream<OtapMetricRecords>` → `flatten` → `decode_batch` → `observe`), **flush ticker** (modeled on `NodeControlMsg::Wakeup`; `tick` → `encode_batch` → `lift` → emit), **control-channel** poll (`update_config`), plus a graceful drain on shutdown. Also how `otap::processor` constructs its bare `Precompute`. |
 | [`config.rs`](./asap-precompute-rs/src/otap/config.rs) | `PluginConfig` + `resolve()` — the 5-sketch `sketch_type` dispatch table (factory + observer + `SketchType`). |
-| [`decode.rs`](./asap-precompute-rs/src/otap/decode.rs) / [`encode.rs`](./asap-precompute-rs/src/otap/encode.rs) | Arrow codec: `RecordBatch ↔ Vec<Observation>` / `[SketchEnvelope]`, keyed on well-known columns + Strategy-B `_asap_*` carrier keys ([`schema.rs`](./asap-precompute-rs/src/otap/schema.rs)). Backs the legacy `dictionary`/`wire` transport below, not `otap::codec`. |
+| [`decode.rs`](./asap-precompute-rs/src/otap/decode.rs) / [`encode.rs`](./asap-precompute-rs/src/otap/encode.rs) | Standalone Arrow codec: `RecordBatch ↔ Vec<Observation>` / `[SketchEnvelope]`, keyed on well-known columns + Strategy-B `_asap_*` carrier keys ([`schema.rs`](./asap-precompute-rs/src/otap/schema.rs)). |
 | [`records.rs`](./asap-precompute-rs/src/otap/records.rs) | `OtapMetricRecords` + `flatten`/`lift` — projects an `OtapArrowRecords`-shaped sibling-batch family (metrics + per-row attribute child batch joined by `parent_id`) ↔ flat `RecordBatch`. Real-OTAP-free; same scope note as above. |
-| [`dictionary.rs`](./asap-precompute-rs/src/otap/dictionary.rs) / [`wire.rs`](./asap-precompute-rs/src/otap/wire.rs) | `SeriesDictionary`/`SketchStreamBatch` — the SCHEMA/DICTIONARY/RECORD wire economics, and its Arrow-IPC/TCP transport. Tested, but not part of the `otap-engine` path — kept for the standalone `sketch_producer_node`/`sketch_receiver_node` example binaries. |
 
 All of this sits on the host-neutral runtime in the same crate
 (`precompute`, `window`, `snapshot_cache`, `sketches/*`).
@@ -112,8 +109,8 @@ a specific commit in `Cargo.toml`.
 
 ## Status
 
-Phases **B** (Arrow codec) and **C** (full 5-sketch plugin lifecycle)
-are complete and tested. Phase **D** (the `linkme` registration + the
+Phases **B** (Arrow codec) and **C** (five-sketch runtime) are complete and
+tested. Phase **D** (the `linkme` registration + the
 real `OtapPdata` binding) is complete and build/lint/test-verified by
 this repo's own build. `tests/otap_pipeline_e2e.rs` parses a genuine
 OTAP pipeline YAML, builds it through `OTAP_PIPELINE_FACTORY`, runs the
@@ -128,9 +125,11 @@ cargo run --bin asap-otap-demo --features otap-engine
 ```
 
 The real OTAP adapter merges an upstream processor's self-describing sketch
-directly from `OtapPdata`; the separate legacy `SketchStreamBatch` format has
-its own standalone example binaries. Cross-host byte-parity (Phase **E**) is
-the remaining work.
+directly from `OtapPdata`. The multi-process demo uses standard OTLP metrics
+protobuf at OS-process boundaries and reconstructs native `OtapPdata` in each
+worker. Every worker is a separate `RuntimePipeline` OS process and routes its
+output through OTAP's official `urn:otel:processor:debug` in detailed mode;
+debug payload/type views go to per-worker files rather than stdout.
 
 ---
 
