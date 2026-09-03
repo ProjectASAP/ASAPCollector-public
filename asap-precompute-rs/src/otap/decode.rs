@@ -70,42 +70,6 @@ pub enum OtapDecodeError {
         /// Raw string value observed.
         value: String,
     },
-
-    /// A `RECORD` row referenced a `series_id` with no matching
-    /// `DICTIONARY` entry in [`super::dictionary::SeriesDictionaryDecoder`]'s
-    /// retained state.
-    ///
-    /// Per `docs/data_model.md`'s "Where the Schema/Dictionary
-    /// statefulness guarantee actually comes from": `DICTIONARY`'s
-    /// incremental-append economics assume a continuous-stream
-    /// contract (stable routing, no replica hand-off mid-stream). This
-    /// error surfaces a violation of that contract rather than
-    /// silently decoding a `RECORD` with an empty series identity.
-    #[error("otap decode: record references unknown series_id {series_id}")]
-    UnknownSeriesId {
-        /// The unresolved `series_id`.
-        series_id: u32,
-    },
-
-    /// A `DICTIONARY` row referenced an `agg_id` with no matching
-    /// `SCHEMA` entry in the decoder's retained state. Same
-    /// continuous-stream caveat as [`Self::UnknownSeriesId`].
-    #[error("otap decode: dictionary entry references unknown agg_id {agg_id}")]
-    UnknownAggId {
-        /// The unresolved `agg_id`.
-        agg_id: u64,
-    },
-
-    /// A required column was missing entirely from one of
-    /// [`super::dictionary::SketchStreamBatch`]'s four sub-batches.
-    #[error("otap decode: batch {batch:?} missing required column {column:?}")]
-    MissingColumn {
-        /// Which sub-batch (`"schema"` / `"dictionary"` / `"labels"` /
-        /// `"record"`) is missing the column.
-        batch: &'static str,
-        /// Column name.
-        column: &'static str,
-    },
 }
 
 /// Decode an OTAP `RecordBatch` into a `Vec<Observation>`.
