@@ -13,28 +13,33 @@ use otel_arrow_dfe_config::policy::{ChannelCapacityPolicy, TelemetryPolicy};
 use otel_arrow_dfe_config::{DeployedPipelineKey, PipelineGroupId, PipelineId, SignalType};
 use otel_arrow_dfe_core_nodes as _;
 use otel_arrow_dfe_engine::capability::registry::Capabilities;
-use otel_arrow_dfe_engine::config::{ExporterConfig, ReceiverConfig};
+use otel_arrow_dfe_engine::config::{ExporterConfig, ProcessorConfig, ReceiverConfig};
 use otel_arrow_dfe_engine::context::{ControllerContext, PipelineContext};
 use otel_arrow_dfe_engine::control::{
     pipeline_completion_msg_channel, runtime_ctrl_msg_channel, NodeControlMsg, RuntimeControlMsg,
 };
+use otel_arrow_dfe_engine::error::ProcessorErrorKind;
 use otel_arrow_dfe_engine::exporter::ExporterWrapper;
-use otel_arrow_dfe_engine::local::{exporter as local_exporter, receiver as local_receiver};
+use otel_arrow_dfe_engine::local::{
+    exporter as local_exporter, processor as local_processor, receiver as local_receiver,
+};
 use otel_arrow_dfe_engine::message::{ExporterInbox, Message};
 use otel_arrow_dfe_engine::node::NodeId;
+use otel_arrow_dfe_engine::processor::ProcessorWrapper;
 use otel_arrow_dfe_engine::receiver::ReceiverWrapper;
 use otel_arrow_dfe_engine::terminal_state::TerminalState;
 use otel_arrow_dfe_engine::{
-    ExporterFactory, MessageSourceLocalEffectHandlerExtension, ReceiverFactory,
+    ExporterFactory, MessageSourceLocalEffectHandlerExtension, ProcessorFactory, ReceiverFactory,
 };
 use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::{
-    OTAP_EXPORTER_FACTORIES, OTAP_PIPELINE_FACTORY, OTAP_RECEIVER_FACTORIES,
+    OTAP_EXPORTER_FACTORIES, OTAP_PIPELINE_FACTORY, OTAP_PROCESSOR_FACTORIES,
+    OTAP_RECEIVER_FACTORIES,
 };
 use otel_arrow_dfe_pdata::{OtlpProtoBytes, TryIntoWithOptions};
 use otel_arrow_dfe_state::store::ObservedStateStore;
 use otel_arrow_dfe_telemetry::InternalTelemetrySystem;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -44,6 +49,7 @@ use std::{env, fs};
 const WORKER_ARG: &str = "--df-worker";
 const SOURCE_URN: &str = "urn:asap:receiver:otlp_file";
 const SINK_URN: &str = "urn:asap:exporter:otlp_file";
+const BASELINE_URN: &str = "urn:asap:processor:benchmark_baseline";
 static INPUTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 static CAPTURED: OnceLock<(Mutex<Vec<OtapPdata>>, Condvar)> = OnceLock::new();
 fn captured() -> &'static (Mutex<Vec<OtapPdata>>, Condvar) {
@@ -57,13 +63,17 @@ fn scalar_input(start: u64, end: u64) -> OtapPdata {
             sketch_type: SketchType::Unspecified,
             agg_id: 0,
             resource_labels: vec![KeyValue::new("service.name", "checkout")],
-            labels: vec![KeyValue::new("route", "/checkout")],
+            labels: vec![
+                KeyValue::new("http.request.method", "GET"),
+                KeyValue::new("http.route", "/checkout"),
+                KeyValue::new("http.response.status_code", "200"),
+            ],
             window_start_ms: 1_000,
             window_end_ms: 2_000,
             encoding: Encoding::Unspecified,
             payload: vec![],
             hash_spec: None,
-            metric_name: "request.duration".into(),
+            metric_name: "http.server.request.duration".into(),
             count: 0,
             aggregation_temporality: 0,
             value: value as f64,
@@ -168,20 +178,214 @@ static SINK_FACTORY: ExporterFactory<OtapPdata> = ExporterFactory {
     validate_config: otel_arrow_dfe_config::validation::no_config,
 };
 
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BaselineConfig {
+    operation: String,
+    #[serde(default = "one_input")]
+    expected_inputs: usize,
+}
+
+const fn one_input() -> usize {
+    1
+}
+
+struct BaselineProcessor {
+    config: BaselineConfig,
+    values: Vec<f64>,
+    runs: Vec<Vec<f64>>,
+    received: usize,
+}
+
+fn merge_sorted_runs(left: &[f64], right: &[f64]) -> Vec<f64> {
+    let (mut left_index, mut right_index) = (0, 0);
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    while left_index < left.len() && right_index < right.len() {
+        if left[left_index].total_cmp(&right[right_index]).is_le() {
+            merged.push(left[left_index]);
+            left_index += 1;
+        } else {
+            merged.push(right[right_index]);
+            right_index += 1;
+        }
+    }
+    merged.extend_from_slice(&left[left_index..]);
+    merged.extend_from_slice(&right[right_index..]);
+    merged
+}
+
+fn values_from_pdata(pdata: OtapPdata) -> Result<Vec<f64>, String> {
+    Ok(decode_pdata_to_observations(pdata)
+        .map_err(|error| error.to_string())?
+        .observations
+        .into_iter()
+        .map(|observation| observation.value.float)
+        .collect())
+}
+
+fn values_pdata(values: &[f64], metric_name: &str) -> Result<OtapPdata, String> {
+    let envelopes = values
+        .iter()
+        .copied()
+        .map(|value| SketchEnvelope {
+            schema_version: 1,
+            sketch_type: SketchType::Unspecified,
+            agg_id: 0,
+            resource_labels: vec![KeyValue::new("service.name", "checkout")],
+            labels: vec![
+                KeyValue::new("http.request.method", "GET"),
+                KeyValue::new("http.route", "/checkout"),
+                KeyValue::new("http.response.status_code", "200"),
+            ],
+            window_start_ms: 1_000,
+            window_end_ms: 2_000,
+            encoding: Encoding::Unspecified,
+            payload: vec![],
+            hash_spec: None,
+            metric_name: metric_name.into(),
+            count: 0,
+            aggregation_temporality: 0,
+            value,
+        })
+        .collect::<Vec<_>>();
+    encode_envelopes_to_pdata(&envelopes).map_err(|error| error.to_string())
+}
+
+fn exact_quantile_pdata(p50: f64, p99: f64) -> Result<OtapPdata, String> {
+    let mut envelopes = Vec::new();
+    for (quantile, value) in [("0.5", p50), ("0.99", p99)] {
+        let mut envelope = SketchEnvelope {
+            schema_version: 1,
+            sketch_type: SketchType::Unspecified,
+            agg_id: 0,
+            resource_labels: vec![KeyValue::new("service.name", "checkout")],
+            labels: vec![KeyValue::new("http.route", "/checkout")],
+            window_start_ms: 1_000,
+            window_end_ms: 2_000,
+            encoding: Encoding::Unspecified,
+            payload: vec![],
+            hash_spec: None,
+            metric_name: "request.duration.exact_estimate".into(),
+            count: 0,
+            aggregation_temporality: 0,
+            value,
+        };
+        envelope.labels.push(KeyValue::new("quantile", quantile));
+        envelopes.push(envelope);
+    }
+    encode_envelopes_to_pdata(&envelopes).map_err(|error| error.to_string())
+}
+
+#[async_trait(?Send)]
+impl local_processor::Processor<OtapPdata> for BaselineProcessor {
+    async fn process(
+        &mut self,
+        msg: Message<OtapPdata>,
+        effects: &mut local_processor::EffectHandler<OtapPdata>,
+    ) -> Result<(), otel_arrow_dfe_engine::error::Error> {
+        if let Message::PData(pdata) = msg {
+            if self.config.operation == "pass" && self.config.expected_inputs == 1 {
+                effects.send_message_with_source_node(pdata).await?;
+                return Ok(());
+            }
+            let mut values = values_from_pdata(pdata).map_err(|error| {
+                otel_arrow_dfe_engine::error::Error::ProcessorError {
+                    processor: effects.processor_id(),
+                    kind: ProcessorErrorKind::Other,
+                    error,
+                    source_detail: String::new(),
+                }
+            })?;
+            if self.config.operation == "sort" {
+                values.sort_by(f64::total_cmp);
+            }
+            if self.config.operation == "merge_sorted" {
+                self.runs.push(values);
+            } else {
+                self.values.extend(values);
+            }
+            self.received += 1;
+            if self.received == self.config.expected_inputs {
+                if self.config.operation == "merge_sorted" {
+                    self.values = merge_sorted_runs(&self.runs[0], &self.runs[1]);
+                }
+                let output = if self.config.operation == "estimate" {
+                    let at =
+                        |q: f64| self.values[((self.values.len() - 1) as f64 * q).round() as usize];
+                    exact_quantile_pdata(at(0.5), at(0.99))
+                } else {
+                    values_pdata(&self.values, "request.duration")
+                }
+                .map_err(|error| {
+                    otel_arrow_dfe_engine::error::Error::ProcessorError {
+                        processor: effects.processor_id(),
+                        kind: ProcessorErrorKind::Other,
+                        error,
+                        source_detail: String::new(),
+                    }
+                })?;
+                effects.send_message_with_source_node(output).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn create_baseline(
+    _ctx: PipelineContext,
+    node: NodeId,
+    config: Arc<NodeUserConfig>,
+    runtime: &ProcessorConfig,
+    _caps: &Capabilities,
+) -> Result<ProcessorWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
+    let parsed = serde_json::from_value(config.config.clone()).map_err(|error| {
+        otel_arrow_dfe_config::error::Error::InvalidUserConfig {
+            error: error.to_string(),
+        }
+    })?;
+    Ok(ProcessorWrapper::local(
+        BaselineProcessor {
+            config: parsed,
+            values: Vec::new(),
+            runs: Vec::new(),
+            received: 0,
+        },
+        node,
+        config,
+        runtime,
+    ))
+}
+
+#[distributed_slice(OTAP_PROCESSOR_FACTORIES)]
+static BASELINE_FACTORY: ProcessorFactory<OtapPdata> = ProcessorFactory {
+    name: BASELINE_URN,
+    create: create_baseline,
+    wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
+    validate_config: otel_arrow_dfe_config::validation::no_config,
+};
+
 fn pipeline_yaml(role: &str, trace: &Path) -> Result<String, String> {
-    let (name, transmit, quantiles) = match role {
-        "create_a" | "create_b" => ("request.duration.sketch", true, "[]"),
-        "merge" => ("request.duration.merged_sketch", true, "[]"),
-        "estimate" => ("request.duration.estimate", false, "[0.5, 0.99]"),
-        _ => return Err(format!("unknown role {role}")),
-    };
-    let trace = serde_json::to_string(&trace.to_string_lossy()).unwrap();
-    Ok(format!(
-        r#"
-nodes:
-  source: {{ type: "{SOURCE_URN}" }}
-  sketch:
-    type: "urn:asap:processor:asap_sketches"
+    let processor = match role {
+        "create_a" | "create_b" => format!(
+            r#"type: "urn:asap:processor:asap_sketches"
+    config:
+      sketch_type: "kll"
+      encoding: "Msgpack"
+      window_size: "20ms"
+      output_metric_name: "request.duration.sketch"
+      agg_id: 7
+      sketch_params: {{ k: 200 }}
+      transmit_sketch: true
+      quantiles: []"#
+        ),
+        "merge" | "estimate" => {
+            let (name, transmit, quantiles) = if role == "merge" {
+                ("request.duration.merged_sketch", true, "[]")
+            } else {
+                ("request.duration.estimate", false, "[0.5, 0.99]")
+            };
+            format!(
+                r#"type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "kll"
       encoding: "Msgpack"
@@ -190,7 +394,40 @@ nodes:
       agg_id: 7
       sketch_params: {{ k: 200 }}
       transmit_sketch: {transmit}
-      quantiles: {quantiles}
+      quantiles: {quantiles}"#
+            )
+        }
+        "raw_a" | "raw_b" | "raw_final" => {
+            format!(
+                r#"type: "{BASELINE_URN}"
+    config: {{ operation: "pass", expected_inputs: 1 }}"#
+            )
+        }
+        "raw_merge" => format!(
+            r#"type: "{BASELINE_URN}"
+    config: {{ operation: "pass", expected_inputs: 2 }}"#
+        ),
+        "exact_a" | "exact_b" => format!(
+            r#"type: "{BASELINE_URN}"
+    config: {{ operation: "sort", expected_inputs: 1 }}"#
+        ),
+        "exact_merge" => format!(
+            r#"type: "{BASELINE_URN}"
+    config: {{ operation: "merge_sorted", expected_inputs: 2 }}"#
+        ),
+        "exact_estimate" => format!(
+            r#"type: "{BASELINE_URN}"
+    config: {{ operation: "estimate", expected_inputs: 1 }}"#
+        ),
+        _ => return Err(format!("unknown role {role}")),
+    };
+    let trace = serde_json::to_string(&trace.to_string_lossy()).unwrap();
+    Ok(format!(
+        r#"
+nodes:
+  source: {{ type: "{SOURCE_URN}" }}
+  processor:
+    {processor}
   debug:
     type: "urn:otel:processor:debug"
     config:
@@ -200,8 +437,8 @@ nodes:
       output: {trace}
   sink: {{ type: "{SINK_URN}" }}
 connections:
-  - {{ from: source, to: sketch }}
-  - {{ from: sketch, to: debug }}
+  - {{ from: source, to: processor }}
+  - {{ from: processor, to: debug }}
   - {{ from: debug, to: sink }}
 "#
     ))
@@ -363,6 +600,7 @@ struct ParentOptions {
     output_dir: Option<PathBuf>,
     result_manifest: Option<PathBuf>,
     points_per_source: u64,
+    scenario: String,
 }
 
 fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> {
@@ -370,6 +608,7 @@ fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> 
         output_dir: None,
         result_manifest: None,
         points_per_source: 100,
+        scenario: "kll".into(),
     };
     let mut index = 0;
     while index < args.len() {
@@ -389,6 +628,7 @@ fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> 
                     return Err("--points-per-source must be positive".into());
                 }
             }
+            "--scenario" => options.scenario = value.to_string_lossy().into_owned(),
             _ => return Err(format!("unknown argument {flag}")),
         }
         index += 2;
@@ -417,37 +657,71 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
     write_otlp(&ia, scalar_input(1, n))?;
     write_otlp(&ib, scalar_input(n + 1, n * 2))?;
     let exe = env::current_exe().map_err(|e| e.to_string())?;
-    let a = spawn(&exe, "create_a", &[&ia], &sa, &p("create-a.debug.log"));
-    let b = spawn(&exe, "create_b", &[&ib], &sb, &p("create-b.debug.log"));
+    let (role_a, role_b, role_merge, role_estimate) = match options.scenario.as_str() {
+        "kll" => ("create_a", "create_b", "merge", "estimate"),
+        "raw" => ("raw_a", "raw_b", "raw_merge", "raw_final"),
+        "exact" => ("exact_a", "exact_b", "exact_merge", "exact_estimate"),
+        other => {
+            return Err(format!(
+                "unknown scenario {other}; expected raw, exact, or kll"
+            ))
+        }
+    };
+    let a = spawn(&exe, role_a, &[&ia], &sa, &p("create-a.debug.log"));
+    let b = spawn(&exe, role_b, &[&ib], &sb, &p("create-b.debug.log"));
     let mut processors = vec![
         ProcessorRun {
-            role: "create_a",
+            role: role_a,
             pid: a.id(),
         },
         ProcessorRun {
-            role: "create_b",
+            role: role_b,
             pid: b.id(),
         },
     ];
-    wait(a, "create_a");
-    wait(b, "create_b");
-    let m = spawn(&exe, "merge", &[&sa, &sb], &merged, &p("merge.debug.log"));
+    wait(a, role_a);
+    wait(b, role_b);
+    let m = spawn(
+        &exe,
+        role_merge,
+        &[&sa, &sb],
+        &merged,
+        &p("merge.debug.log"),
+    );
     processors.push(ProcessorRun {
-        role: "merge",
+        role: role_merge,
         pid: m.id(),
     });
-    wait(m, "merge");
-    let e = spawn(&exe, "estimate", &[&merged], &out, &p("estimate.debug.log"));
+    wait(m, role_merge);
+    let e = spawn(
+        &exe,
+        role_estimate,
+        &[&merged],
+        &out,
+        &p("estimate.debug.log"),
+    );
     processors.push(ProcessorRun {
-        role: "estimate",
+        role: role_estimate,
         pid: e.id(),
     });
-    wait(e, "estimate");
+    wait(e, role_estimate);
     let decoded = decode_pdata_to_observations(read_otlp(&out)?)
         .map_err(|e| e.to_string())?
         .observations;
+    if options.scenario == "raw" {
+        if decoded.len() != (n * 2) as usize {
+            return Err(format!(
+                "raw backend received {} of {} signals",
+                decoded.len(),
+                n * 2
+            ));
+        }
+    }
     let mut quantiles = Vec::with_capacity(decoded.len());
     for o in &decoded {
+        if options.scenario == "raw" {
+            continue;
+        }
         let q = o
             .labels
             .iter()
@@ -457,10 +731,33 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
             "result metric={} quantile={} value={:.3}",
             o.metric, q, o.value.float
         );
-        assert_eq!(o.metric, "request.duration.estimate");
+        if options.scenario != "raw" {
+            let expected_metric = if options.scenario == "kll" {
+                "request.duration.estimate"
+            } else {
+                "request.duration.exact_estimate"
+            };
+            assert_eq!(o.metric, expected_metric);
+        }
         quantiles.push((q.to_owned(), o.value.float));
     }
-    validate_quantiles(&quantiles, [(0.5, n as f64), (0.99, n as f64 * 1.98)])?;
+    if options.scenario == "kll" {
+        validate_quantiles(&quantiles, [(0.5, n as f64), (0.99, n as f64 * 1.98)])?;
+    } else if options.scenario == "exact" {
+        let exact_at = |q: f64| ((n * 2 - 1) as f64 * q).round() + 1.0;
+        let expected = [("0.5", exact_at(0.5)), ("0.99", exact_at(0.99))];
+        for (quantile, expected) in expected {
+            let actual = quantiles
+                .iter()
+                .find_map(|(label, value)| (label == quantile).then_some(*value))
+                .ok_or_else(|| format!("missing exact quantile {quantile}"))?;
+            if actual != expected {
+                return Err(format!(
+                    "exact quantile {quantile}: got {actual}, expected {expected}"
+                ));
+            }
+        }
+    }
     if let Some(path) = options.result_manifest {
         let manifest = DemoManifest {
             parent_pid: std::process::id(),
@@ -473,7 +770,10 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
-    println!("success: four DF processors ran in four child OS processes");
+    println!(
+        "success: {} ran four DF processors in four child OS processes",
+        options.scenario
+    );
     println!("official detailed debug traces: {}", dir.display());
     Ok(())
 }
@@ -509,6 +809,8 @@ fn main() {
 mod tests {
     use super::validate_quantiles;
 
+    /// Scenario: The backend receives correct, incorrect, and incomplete quantile outputs.
+    /// Guarantees: KLL result validation accepts bounded error and rejects bad or missing values.
     #[test]
     fn result_validation_requires_correct_p50_and_p99() {
         let expected = [(0.5, 100.0), (0.99, 198.0)];

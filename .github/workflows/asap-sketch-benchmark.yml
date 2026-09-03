@@ -1,0 +1,48 @@
+name: ASAP sketch benchmark
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/asap-sketch-benchmark.yml"
+      - "asap-precompute-rs/**"
+      - "benchmarks/**"
+  schedule:
+    - cron: "30 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: asap-sketch-nightly
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: asap-precompute-rs
+      - name: Run official OTAP pipeline_perf_test suite
+        run: ./benchmarks/run-nightly.sh
+      - name: Verify completed traffic
+        run: |
+          for scenario in raw exact kll; do
+            source "benchmark-results/$scenario/throughput.env"
+            test "$input_signals" -gt 0
+            test "$signals_per_second" -gt 0
+          done
+      - name: Upload review artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: asap-sketch-benchmark-${{ github.run_id }}
+          path: |
+            benchmark-results/
+          retention-days: 30

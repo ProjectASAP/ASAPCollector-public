@@ -1,0 +1,56 @@
+name: Nightly - aligned OTAP quantile pipelines
+
+# Every scenario uses the same image, two 65,536-signal sources, four
+# RuntimePipeline worker processes, 30-second observation window, cgroup limits,
+# file-backed OTLP boundary, and correctness-checking backend.
+components:
+  otap-raw:
+    deployment:
+      docker:
+        image: asap-quantile-benchmark:local
+        network: asap-benchmark
+        volumes: ['./benchmark-results:/results']
+        environment:
+          - ASAP_BENCH_SCENARIO=raw
+          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_RESULT_DIR=/results/raw
+    monitoring:
+      docker_component: { allocated_cores: 2 }
+  otap-exact-quantile:
+    deployment:
+      docker:
+        image: asap-quantile-benchmark:local
+        network: asap-benchmark
+        volumes: ['./benchmark-results:/results']
+        environment:
+          - ASAP_BENCH_SCENARIO=exact
+          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_RESULT_DIR=/results/exact
+    monitoring:
+      docker_component: { allocated_cores: 2 }
+  asap-kll:
+    deployment:
+      docker:
+        image: asap-quantile-benchmark:local
+        network: asap-benchmark
+        volumes: ['./benchmark-results:/results']
+        environment:
+          - ASAP_BENCH_SCENARIO=kll
+          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_RESULT_DIR=/results/kll
+    monitoring:
+      docker_component: { allocated_cores: 2 }
+
+tests:
+  - name: OTAP-RAW
+    from_template:
+      path: benchmarks/nightly/scenario-steps.yaml.j2
+      variables: { component: otap-raw, report_name: otap-raw-resources }
+  - name: OTAP-EXACT-QUANTILE
+    from_template:
+      path: benchmarks/nightly/scenario-steps.yaml.j2
+      variables: { component: otap-exact-quantile, report_name: otap-exact-quantile-resources }
+  - name: ASAP-KLL
+    from_template:
+      path: benchmarks/nightly/scenario-steps.yaml.j2
+      variables: { component: asap-kll, report_name: asap-kll-resources }
