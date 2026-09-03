@@ -205,42 +205,46 @@ nodes:
   create_sketch_a:
     type: "urn:asap:processor:asap_sketches"
     config:
-      sketch_type: "ddsketch"
+      sketch_type: "kll"
+      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.sketch"
       agg_id: 7
       sketch_params:
-        relative_accuracy: 0.01
+        k: 200
       transmit_sketch: true
   create_sketch_b:
     type: "urn:asap:processor:asap_sketches"
     config:
-      sketch_type: "ddsketch"
+      sketch_type: "kll"
+      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.sketch"
       agg_id: 7
       sketch_params:
-        relative_accuracy: 0.01
+        k: 200
       transmit_sketch: true
   merge_sketch:
     type: "urn:asap:processor:asap_sketches"
     config:
-      sketch_type: "ddsketch"
+      sketch_type: "kll"
+      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.merged_sketch"
       agg_id: 7
       sketch_params:
-        relative_accuracy: 0.01
+        k: 200
       transmit_sketch: true
   estimate_sketch:
     type: "urn:asap:processor:asap_sketches"
     config:
-      sketch_type: "ddsketch"
+      sketch_type: "kll"
+      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.estimate"
       agg_id: 7
       sketch_params:
-        relative_accuracy: 0.01
+        k: 200
       transmit_sketch: false
       quantiles: [0.5, 0.99]
   sink:
@@ -267,7 +271,7 @@ fn main() {
     println!("ASAP native OTAP sketch protocol demo");
     println!("input A: 100 request.duration values (1..=100), route=/checkout");
     println!("input B: 100 request.duration values (101..=200), route=/checkout");
-    println!("pipeline: two DDSketch creates -> merge both sketches -> estimate p50/p99");
+    println!("pipeline: two ASAPv1 KLL creates -> merge both sketches -> estimate p50/p99");
 
     captured().lock().expect("capture mutex").clear();
     let config = PipelineConfig::from_yaml("asap-demo".into(), "sketches".into(), &pipeline_yaml())

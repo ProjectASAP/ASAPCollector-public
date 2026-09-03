@@ -51,9 +51,9 @@ Field reference:
 | `omit_resource_attrs` | optional | Exclude resource attributes from series identity. Default `false`. |
 | `global_aggregation` | optional | Collapse all observations into one series. Default `false`. |
 | `emit_window_stats` | optional | Add `sample_count` and `window_duration_seconds` labels. Default `false`. |
-| `encoding` | optional | `ProtoFull`, `Msgpack`, or a delta variant. Default `ProtoFull`. |
+| `encoding` | optional | Sketch transport uses KLL `Msgpack`/`MsgpackDelta`, the canonical self-describing ASAPv1 format. Default `Msgpack`. Other sketch/encoding combinations require estimate mode. |
 | `delta_transmission` | optional | Emit deltas after the initial full snapshot. Default `false`. |
-| `transmit_sketch` | optional | `true` emits sketch state; `false` emits scalar estimates. Default `true`. |
+| `transmit_sketch` | optional | `true` emits canonical KLL ASAPv1 state; `false` permits supported scalar estimates from other algorithms. Default `true`. |
 | `quantiles` | estimate mode | DDSketch/KLL quantiles to emit, such as `[0.5, 0.99]`. |
 | `controller_url` | optional | Legacy bootstrap field, predates the engine's own OpAMP controller extension (which now owns `instance_uid`/`endpoint`/`agent_description` centrally) — likely a deprecation candidate rather than something to keep pushing new values into. |
 | `agent_id` | optional | Same caveat as `controller_url`. |

@@ -191,23 +191,17 @@ async fn run_lifecycle(
 }
 
 #[tokio::test]
-async fn lifecycle_ddsketch_emits_envelope_with_correct_sketch_type() {
-    let records = run_lifecycle(
-        "ddsketch",
-        "http_request_duration_ms",
-        &[
-            (1.0, "h1"),
-            (2.0, "h1"),
-            (3.0, "h1"),
-            (4.0, "h1"),
-            (5.0, "h1"),
-        ],
-    )
-    .await;
-    assert!(!records.is_empty(), "no records emitted on drain");
-    let envelopes = decode_all(&records);
-    let payload = extract_envelope_payload(&envelopes, "DDSketch");
-    assert!(!payload.is_empty(), "DDSketch payload must not be empty");
+async fn non_asapv1_sketch_transports_are_rejected_at_construction() {
+    for sketch_type in ["ddsketch", "hll", "countsketch", "countminsketch"] {
+        let cfg = PluginConfig {
+            sketch_type: sketch_type.into(),
+            ..Default::default()
+        };
+        assert!(
+            AsapSketchesPlugin::from_plugin_config(&cfg).is_err(),
+            "{sketch_type} must not emit a private sketch payload"
+        );
+    }
 }
 
 #[tokio::test]
@@ -224,75 +218,20 @@ async fn lifecycle_kll_emits_envelope_with_correct_sketch_type() {
 }
 
 #[tokio::test]
-async fn lifecycle_hll_emits_envelope_with_correct_sketch_type() {
-    // HLL counts distinct values within ONE series; pin all inputs
-    // to the same `host` label so the runtime collapses them into a
-    // single series. The distinct-value count then comes from the
-    // `value` column (HLLObserver hashes it).
-    let records = run_lifecycle(
-        "hll",
-        "unique_users",
-        &[(1.0, "h1"), (2.0, "h1"), (3.0, "h1"), (4.0, "h1")],
-    )
-    .await;
-    let envelopes = decode_all(&records);
-    let payload = extract_envelope_payload(&envelopes, "HLLSketch");
-    assert!(!payload.is_empty());
-}
-
-#[tokio::test]
-async fn lifecycle_countsketch_emits_envelope_with_correct_sketch_type() {
-    // CountSketch keys by `bytes` field with `default_key` fallback;
-    // pin all rows to a single `host` series so the runtime emits
-    // one envelope.
-    let records = run_lifecycle(
-        "countsketch",
-        "events_per_path",
-        &[(1.0, "h1"), (1.0, "h1"), (1.0, "h1"), (1.0, "h1")],
-    )
-    .await;
-    let envelopes = decode_all(&records);
-    let payload = extract_envelope_payload(&envelopes, "CountSketch");
-    assert!(!payload.is_empty());
-}
-
-#[tokio::test]
-async fn lifecycle_countminsketch_emits_envelope_with_correct_sketch_type() {
-    // CMS now keys off the observation's attribute set (the OTAP
-    // scalar path: Float-kind, empty bytes -> AttributesKey(labels))
-    // and accepts Float-kind input. Pin all rows to a single `host`
-    // series so the runtime collapses them into one envelope. (Before
-    // the B6 fix CMS rejected Float-kind input and emitted nothing; it
-    // now records the attribute-set frequency.)
-    let records = run_lifecycle(
-        "countminsketch",
-        "flow_count",
-        &[(1.0, "h1"), (1.0, "h1"), (1.0, "h1"), (1.0, "h1")],
-    )
-    .await;
-    let envelopes = decode_all(&records);
-    let payload = extract_envelope_payload(&envelopes, "CountMinSketch");
-    assert!(
-        !payload.is_empty(),
-        "CountMinSketch payload must not be empty"
-    );
-}
-
-#[tokio::test]
 async fn drain_flushes_in_flight_observations_before_window_boundary() {
     // Set up a long window (60s) and feed observations, then issue
     // shutdown immediately. Without the explicit drain, no envelope
     // would be emitted because the window hasn't naturally rotated.
     // The drain path must produce at least one batch.
     let records = run_lifecycle(
-        "ddsketch",
+        "kll",
         "drain_metric",
         &[(1.0, "h1"), (2.0, "h1"), (3.0, "h1"), (4.0, "h1")],
     )
     .await;
     assert!(!records.is_empty(), "drain must emit at least one batch");
     let envelopes = decode_all(&records);
-    let payload = extract_envelope_payload(&envelopes, "DDSketch");
+    let payload = extract_envelope_payload(&envelopes, "KLLSketch");
     assert!(!payload.is_empty());
 }
 
@@ -326,7 +265,7 @@ impl ControlChannel for OnceChannel {
 #[tokio::test]
 async fn control_channel_plan_change_acks_after_apply() {
     let cfg = PluginConfig {
-        sketch_type: "ddsketch".into(),
+        sketch_type: "kll".into(),
         window_size: Duration::from_secs(60),
         output_metric_name: "before".into(),
         agg_id: 1,
@@ -338,13 +277,13 @@ async fn control_channel_plan_change_acks_after_apply() {
         version: 42,
         configs: vec![PrecomputeConfig {
             agg_id: 1,
-            sketch_type: SketchType::DDSketch,
+            sketch_type: SketchType::KLLSketch,
             window: WindowSpec {
                 size: Duration::from_secs(60),
                 ..Default::default()
             },
             metric_name: "after".into(),
-            encoding: Encoding::ProtoFull,
+            encoding: Encoding::Msgpack,
             transmit_sketch: true,
             ..Default::default()
         }],
@@ -413,7 +352,7 @@ async fn shutdown_without_inputs_is_clean_no_op() {
     // must not panic, must not emit a stale empty batch, and the
     // handle must complete cleanly.
     let cfg = PluginConfig {
-        sketch_type: "ddsketch".into(),
+        sketch_type: "kll".into(),
         window_size: Duration::from_secs(60),
         ..Default::default()
     };
