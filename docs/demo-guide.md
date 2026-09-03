@@ -3,7 +3,7 @@
 This guide demonstrates the `asap_sketches` processor running inside a real
 OTAP Dataflow `RuntimePipeline`. Two sources each send 100 scalar OTAP metrics
 through their own create processor. A fan-in processor merges the two
-self-describing DDSketches without expanding them back into samples, and a
+self-describing KLL sketches without expanding them back into samples, and a
 final processor estimates p50 and p99 as ordinary scalar OTAP metrics.
 
 The demo is available both as a runnable binary that prints its estimates and
@@ -19,7 +19,7 @@ The test performs the following operations using the real OTAP engine APIs:
 3. Builds and starts an OTAP `RuntimePipeline`.
 4. Injects 100 values (`1..=100`) from source A and 100 values (`101..=200`)
    from source B, all carrying `route=/checkout`.
-5. Creates one DDSketch per source and emits both self-describing payloads.
+5. Creates one KLL sketch per source and emits both self-describing payloads.
 6. Fans both payloads into one processor, merges them as sketch state (never
    reconstructed scalar samples), and emits one merged sketch.
 7. Merges the second payload in an estimate-mode processor and emits p50/p99
@@ -79,6 +79,15 @@ records and the physical OTAP Arrow child batches (row counts plus schemas).
 Large input batches are abbreviated, and binary envelopes are shown by byte
 length. The final p50/p99 scalar metrics are printed in full.
 
+Sketch-bearing metrics use OTLP Summary semantics. The `sketch.envelope` bytes
+attribute in OTAP `SummaryDpAttrs` is the canonical, self-describing sketchlib
+ASAPv1 format: it starts with `b"ASAPv1"` and carries the version, kind ID,
+length-prefixed metadata, and sketch payload. The remaining `sketch.*`
+attributes are routing and index fields; they are not required to interpret
+the binary sketch state. Final estimates remain Gauge metrics represented by
+`NumberDataPoints`. Protobuf, legacy unframed MessagePack, and bare delta
+payloads are rejected at the codec boundary.
+
 ## Run the automated assertion
 
 Run only the live-pipeline scenario:
@@ -114,17 +123,17 @@ flowchart LR
   subgraph RP["one RuntimePipeline — single process, in-memory OTAP channels"]
     SA["<b>source_a</b><br/>100 values · 1..100<br/><i>demo/test node</i>"]
     SB["<b>source_b</b><br/>100 values · 101..200<br/><i>demo/test node</i>"]
-    CA["<b>create_sketch_a</b> · asap_sketches<br/>DDSketch · agg_id 7<br/>transmit_sketch = true"]
-    CB["<b>create_sketch_b</b> · asap_sketches<br/>DDSketch · agg_id 7<br/>transmit_sketch = true"]
-    M["<b>merge_sketch</b> · asap_sketches<br/>DDSketch · agg_id 7<br/>transmit_sketch = true"]
+    CA["<b>create_sketch_a</b> · asap_sketches<br/>KLL / ASAPv1 · agg_id 7<br/>transmit_sketch = true"]
+    CB["<b>create_sketch_b</b> · asap_sketches<br/>KLL / ASAPv1 · agg_id 7<br/>transmit_sketch = true"]
+    M["<b>merge_sketch</b> · asap_sketches<br/>KLL / ASAPv1 · agg_id 7<br/>transmit_sketch = true"]
     E["<b>estimate_sketch</b> · asap_sketches<br/>quantiles [0.5, 0.99]<br/>transmit_sketch = false"]
     X["<b>sink</b><br/>scalar p50 / p99<br/><i>demo/test node</i>"]
 
     SA -->|"100 scalar NumberDataPoints"| CA
     SB -->|"100 scalar NumberDataPoints"| CB
-    CA -->|"DDSketch A · native OTAP protocol"| M
-    CB -->|"DDSketch B · native OTAP protocol"| M
-    M -->|"one merged 200-point DDSketch<br/>never re-sampled"| E
+    CA -->|"KLL A · ASAPv1 OTAP envelope"| M
+    CB -->|"KLL B · ASAPv1 OTAP envelope"| M
+    M -->|"one merged 200-point KLL<br/>ASAPv1 envelope"| E
     E -->|"2 scalar NumberDataPoints<br/>p50 ≈ 100 · p99 ≈ 198"| X
   end
 
@@ -147,42 +156,46 @@ nodes:
   create_sketch_a:
     type: "urn:asap:processor:asap_sketches"
     config:
-      sketch_type: "ddsketch"
+      sketch_type: "kll"
+      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.sketch"
       agg_id: 7
       sketch_params:
-        relative_accuracy: 0.01
+        k: 200
       transmit_sketch: true
   create_sketch_b:
     type: "urn:asap:processor:asap_sketches"
     config:
-      sketch_type: "ddsketch"
+      sketch_type: "kll"
+      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.sketch"
       agg_id: 7
       sketch_params:
-        relative_accuracy: 0.01
+        k: 200
       transmit_sketch: true
   merge_sketch:
     type: "urn:asap:processor:asap_sketches"
     config:
-      sketch_type: "ddsketch"
+      sketch_type: "kll"
+      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.merged_sketch"
       agg_id: 7
       sketch_params:
-        relative_accuracy: 0.01
+        k: 200
       transmit_sketch: true
   estimate_sketch:
     type: "urn:asap:processor:asap_sketches"
     config:
-      sketch_type: "ddsketch"
+      sketch_type: "kll"
+      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.estimate"
       agg_id: 7
       sketch_params:
-        relative_accuracy: 0.01
+        k: 200
       transmit_sketch: false
       quantiles: [0.5, 0.99]
 ```

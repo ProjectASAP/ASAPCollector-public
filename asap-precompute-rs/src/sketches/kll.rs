@@ -5,7 +5,6 @@
 //! (`init_with_seed` lands a deterministic compaction RNG).
 
 use asap_sketchlib::sketches::KLL;
-use asap_sketchlib::{KllSketchData, MessagePackCodec};
 use prost::Message;
 
 use asap_sketchlib::proto::sketchlib::{
@@ -39,7 +38,7 @@ pub struct KLLWrapper {
     /// actual state, not this history vec.
     history: Vec<f64>,
     /// Outbound wire format. KLL is full-only, so msgpack means the
-    /// portable `KllSketchData` form; proto means the `KllState` envelope.
+    /// self-describing ASAPv1 form; proto means the legacy `KllState` envelope.
     /// Baked from `cfg.encoding` by the OTAP sketch factory.
     wire_encoding: Encoding,
 }
@@ -64,41 +63,24 @@ impl KLLWrapper {
         self
     }
 
-    /// Portable KLL msgpack full form — byte-identical to
-    /// `asap_sketchlib::KllSketch::to_msgpack` for the same compactor
-    /// state. Built straight from the backend's `serialize_to_bytes` so no
-    /// `KllSketch` facade is needed.
+    /// Canonical self-describing ASAPv1 KLL envelope.
+    ///
+    /// `asap_sketchlib` owns the framing, metadata, and payload encoding;
+    /// in particular these bytes start with the `b"ASAPv1"` magic number.
     fn encode_msgpack(&self) -> Result<Vec<u8>, PrecomputeError> {
-        let sketch_bytes = self
-            .sk
+        self.sk
             .serialize_to_bytes()
-            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper msgpack serialize: {e}")))?;
-        KllSketchData {
-            k: self.k as u16,
-            sketch_bytes,
-        }
-        .to_msgpack()
-        .map_err(|e| PrecomputeError::Other(format!("KLLWrapper msgpack encode: {e}")))
+            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper ASAPv1 serialize: {e}")))
     }
 
-    /// Merge a msgpack-encoded portable KLL frame in.
+    /// Merge a self-describing ASAPv1 KLL frame in.
     ///
-    /// Replays the peer's retained items (`wire_items`) into our compactor
-    /// — the same approach the proto ingest path uses — rather than
-    /// `KLL::merge`, which loses weight when the target is empty (skewing
-    /// quantiles). This keeps msgpack KLL ingest behaviorally identical to
-    /// the proto path.
+    /// Uses sketchlib's level-aware merge so each retained item keeps its
+    /// `2^level` weight after compaction.
     fn merge_msgpack(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError> {
-        let data = KllSketchData::from_msgpack(bytes)
-            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper msgpack decode: {e}")))?;
-        let other: KLL<f64> = KLL::deserialize_from_bytes(&data.sketch_bytes)
-            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper msgpack deserialize: {e}")))?;
-        for v in other.wire_items() {
-            if v.is_finite() {
-                self.history.push(v);
-                self.sk.update(&v);
-            }
-        }
+        let other: KLL<f64> = KLL::deserialize_from_bytes(bytes)
+            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper ASAPv1 decode: {e}")))?;
+        self.sk.merge(&other);
         Ok(())
     }
 
@@ -276,7 +258,7 @@ impl Sketch for KLLWrapper {
 
 impl QuantileSketch for KLLWrapper {
     fn quantile(&self, q: f64) -> f64 {
-        if self.history.is_empty() {
+        if self.sk.count() == 0 {
             return f64::NAN;
         }
         self.sk.quantile(q.clamp(0.0, 1.0))
@@ -347,5 +329,22 @@ mod tests {
             b.update(i as f64);
         }
         assert_eq!(a.snapshot().unwrap(), b.snapshot().unwrap());
+    }
+
+    /// Merging a compacted ASAPv1 sketch must preserve the source's logical
+    /// sample weight, not reduce it to the number of retained items.
+    #[test]
+    fn asapv1_merge_preserves_compacted_sample_count() {
+        let mut source = KLLWrapper::new(200, Some(42)).with_wire_encoding(Encoding::Msgpack);
+        for value in 0..50_000 {
+            source.update(value as f64);
+        }
+        let mut target = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
+
+        target.merge(&source).expect("merge compacted KLL");
+
+        assert_eq!(target.inner().count(), source.inner().count());
+        let p50 = target.quantile(0.5);
+        assert!((23_000.0..=27_000.0).contains(&p50), "p50={p50}");
     }
 }

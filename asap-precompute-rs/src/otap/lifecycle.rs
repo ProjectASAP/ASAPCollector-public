@@ -702,7 +702,7 @@ mod tests {
         // Smoke test: dropping the handle without calling shutdown
         // doesn't deadlock or panic. Uses a no-op input stream.
         let cfg = PluginConfig {
-            sketch_type: "ddsketch".into(),
+            sketch_type: "kll".into(),
             window_size: Duration::from_millis(50),
             ..Default::default()
         };
@@ -732,7 +732,7 @@ mod tests {
         // start_from_envelopes must compile and run against an empty
         // SketchStreamBatch stream without deadlocking or panicking.
         let cfg = PluginConfig {
-            sketch_type: "ddsketch".into(),
+            sketch_type: "kll".into(),
             window_size: Duration::from_millis(50),
             ..Default::default()
         };
@@ -753,7 +753,7 @@ mod tests {
         use tokio_stream::wrappers::UnboundedReceiverStream;
 
         let producer_cfg = PluginConfig {
-            sketch_type: "ddsketch".into(),
+            sketch_type: "kll".into(),
             window_size: Duration::from_secs(60), // drained explicitly below.
             output_metric_name: "latency_ms".into(),
             agg_id: 1,
@@ -778,7 +778,7 @@ mod tests {
         );
 
         let receiver_cfg = PluginConfig {
-            sketch_type: "ddsketch".into(),
+            sketch_type: "kll".into(),
             window_size: Duration::from_secs(60),
             output_metric_name: "latency_ms_p99".into(),
             agg_id: 1,

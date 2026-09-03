@@ -8,7 +8,7 @@
 # (asap-precompute-rs/src/otap/processor.rs, `otap-engine` feature).
 
 [[pipelines.metrics.processors]]
-id     = "asap_ddsketch"
+id     = "asap_kll"
 plugin = "asap_sketches"
 
   [pipelines.metrics.processors.config]
@@ -18,7 +18,7 @@ plugin = "asap_sketches"
   ##   "hll"              (cardinality)
   ##   "countsketch"      (frequency / top-k)
   ##   "countminsketch"   (frequency, biased upward)
-  sketch_type = "ddsketch"
+  sketch_type = "kll"
 
   ## Window size. Rust duration string, parsed via humantime;
   ## passed verbatim into `PrecomputeConfig::window`.
@@ -36,7 +36,7 @@ plugin = "asap_sketches"
   ## supplies quantiles (DDSketch/KLL) instead.
   transmit_sketch = true
   # quantiles = [0.5, 0.99]
-  # encoding = "Msgpack"       # default: "ProtoFull"
+  encoding = "Msgpack"         # canonical ASAPv1 self-describing envelope
   # delta_transmission = false
   # default_key = "fallback"   # CountSketch only
   # omit_resource_attrs = false
@@ -56,8 +56,8 @@ plugin = "asap_sketches"
   ## Sketch-specific tuning knobs. Only the keys relevant to
   ## `sketch_type` are read; others are ignored.
   [pipelines.metrics.processors.config.sketch_params]
-  relative_accuracy = 0.01   # ddsketch — relative error
-  # k = 200                  # kll — buffer size
+  k = 200                    # kll — buffer size
+  # relative_accuracy = 0.01 # ddsketch estimate mode — relative error
   # precision = 12           # hll — register count exponent (4-18)
   # width = 2048             # countsketch / countminsketch — width
   # depth = 4                # countsketch / countminsketch — depth
