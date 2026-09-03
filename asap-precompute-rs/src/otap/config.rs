@@ -1,5 +1,4 @@
-//! `AsapSketchesPlugin` configuration + 5-sketch `sketch_type`
-//! dispatch factory.
+//! ASAP processor configuration and five-sketch `sketch_type` dispatch.
 //!
 //! A single plugin parameterized by `sketch_type` with a
 //! dispatch table that maps the user-facing string to:

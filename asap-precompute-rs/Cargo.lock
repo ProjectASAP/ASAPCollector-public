@@ -316,11 +316,9 @@ name = "asap-precompute-rs"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
- "arrow-ipc",
  "arrow-schema",
  "asap_sketchlib",
  "async-trait",
- "futures",
  "humantime-serde",
  "linkme",
  "otel-arrow-dfe-config",
@@ -336,7 +334,6 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "tokio-stream",
 ]
 
 [[package]]
