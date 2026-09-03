@@ -37,7 +37,8 @@ use otel_arrow_dfe_otap::{
 use otel_arrow_dfe_state::store::ObservedStateStore;
 use otel_arrow_dfe_telemetry::InternalTelemetrySystem;
 
-const SOURCE_URN: &str = "urn:asap:receiver:one_metric";
+const SOURCE_A_URN: &str = "urn:asap:receiver:metrics_a";
+const SOURCE_B_URN: &str = "urn:asap:receiver:metrics_b";
 const SINK_URN: &str = "urn:asap:exporter:capture";
 
 static CAPTURED: OnceLock<Mutex<Vec<OtapPdata>>> = OnceLock::new();
@@ -46,8 +47,8 @@ fn captured() -> &'static Mutex<Vec<OtapPdata>> {
     CAPTURED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-fn scalar_input() -> OtapPdata {
-    let observations = (1..=100)
+fn scalar_input(start: i32, end: i32) -> OtapPdata {
+    let observations = (start..=end)
         .map(|value| SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::Unspecified,
@@ -68,17 +69,20 @@ fn scalar_input() -> OtapPdata {
     encode_envelopes_to_pdata(&observations).expect("encode scalar input")
 }
 
-struct OneMetricReceiver;
+struct MetricReceiver {
+    start: i32,
+    end: i32,
+}
 
 #[async_trait(?Send)]
-impl local_receiver::Receiver<OtapPdata> for OneMetricReceiver {
+impl local_receiver::Receiver<OtapPdata> for MetricReceiver {
     async fn start(
         self: Box<Self>,
         mut ctrl: local_receiver::ControlChannel<OtapPdata>,
         effect_handler: local_receiver::EffectHandler<OtapPdata>,
     ) -> Result<TerminalState, otel_arrow_dfe_engine::error::Error> {
         effect_handler
-            .send_message_with_source_node(scalar_input())
+            .send_message_with_source_node(scalar_input(self.start, self.end))
             .await?;
         loop {
             match ctrl.recv().await {
@@ -90,7 +94,7 @@ impl local_receiver::Receiver<OtapPdata> for OneMetricReceiver {
     }
 }
 
-fn create_source(
+fn create_source_a(
     _ctx: PipelineContext,
     node: NodeId,
     config: Arc<NodeUserConfig>,
@@ -98,7 +102,7 @@ fn create_source(
     _capabilities: &Capabilities,
 ) -> Result<ReceiverWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
     Ok(ReceiverWrapper::local(
-        OneMetricReceiver,
+        MetricReceiver { start: 1, end: 100 },
         node,
         config,
         runtime,
@@ -106,9 +110,35 @@ fn create_source(
 }
 
 #[distributed_slice(OTAP_RECEIVER_FACTORIES)]
-static SOURCE_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
-    name: SOURCE_URN,
-    create: create_source,
+static SOURCE_A_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
+    name: SOURCE_A_URN,
+    create: create_source_a,
+    wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
+    validate_config: otel_arrow_dfe_config::validation::no_config,
+};
+
+fn create_source_b(
+    _ctx: PipelineContext,
+    node: NodeId,
+    config: Arc<NodeUserConfig>,
+    runtime: &ReceiverConfig,
+    _capabilities: &Capabilities,
+) -> Result<ReceiverWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
+    Ok(ReceiverWrapper::local(
+        MetricReceiver {
+            start: 101,
+            end: 200,
+        },
+        node,
+        config,
+        runtime,
+    ))
+}
+
+#[distributed_slice(OTAP_RECEIVER_FACTORIES)]
+static SOURCE_B_FACTORY: ReceiverFactory<OtapPdata> = ReceiverFactory {
+    name: SOURCE_B_URN,
+    create: create_source_b,
     wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
     validate_config: otel_arrow_dfe_config::validation::no_config,
 };
@@ -162,9 +192,21 @@ fn yaml_pipeline_creates_merges_and_estimates_a_sketch() {
     let yaml = format!(
         r#"
 nodes:
-  source:
-    type: "{SOURCE_URN}"
-  create_sketch:
+  source_a:
+    type: "{SOURCE_A_URN}"
+  source_b:
+    type: "{SOURCE_B_URN}"
+  create_sketch_a:
+    type: "urn:asap:processor:asap_sketches"
+    config:
+      sketch_type: "ddsketch"
+      window_size: "20ms"
+      output_metric_name: "request.duration.sketch"
+      agg_id: 7
+      sketch_params:
+        relative_accuracy: 0.01
+      transmit_sketch: true
+  create_sketch_b:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "ddsketch"
@@ -198,9 +240,13 @@ nodes:
   sink:
     type: "{SINK_URN}"
 connections:
-  - from: source
-    to: create_sketch
-  - from: create_sketch
+  - from: source_a
+    to: create_sketch_a
+  - from: source_b
+    to: create_sketch_b
+  - from: create_sketch_a
+    to: merge_sketch
+  - from: create_sketch_b
     to: merge_sketch
   - from: merge_sketch
     to: estimate_sketch
@@ -316,12 +362,12 @@ connections:
         "estimate must be scalar OTAP data"
     );
     assert!(
-        (p50.value.float - 50.0).abs() / 50.0 < 0.05,
+        (p50.value.float - 100.0).abs() / 100.0 < 0.05,
         "unexpected p50: {}",
         p50.value.float
     );
     assert!(
-        (p99.value.float - 99.0).abs() / 99.0 < 0.05,
+        (p99.value.float - 198.0).abs() / 198.0 < 0.05,
         "unexpected p99: {}",
         p99.value.float
     );
