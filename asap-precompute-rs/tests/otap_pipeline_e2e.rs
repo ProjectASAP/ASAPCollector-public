@@ -47,23 +47,25 @@ fn captured() -> &'static Mutex<Vec<OtapPdata>> {
 }
 
 fn scalar_input() -> OtapPdata {
-    let envelope = SketchEnvelope {
-        schema_version: 1,
-        sketch_type: SketchType::Unspecified,
-        agg_id: 0,
-        resource_labels: vec![],
-        labels: vec![KeyValue::new("route", "/checkout")],
-        window_start_ms: 1_000,
-        window_end_ms: 2_000,
-        encoding: Encoding::Unspecified,
-        payload: vec![],
-        hash_spec: None,
-        metric_name: "request.duration".to_owned(),
-        count: 0,
-        aggregation_temporality: 0,
-        value: 42.5,
-    };
-    encode_envelopes_to_pdata(&[envelope]).expect("encode scalar input")
+    let observations = (1..=100)
+        .map(|value| SketchEnvelope {
+            schema_version: 1,
+            sketch_type: SketchType::Unspecified,
+            agg_id: 0,
+            resource_labels: vec![],
+            labels: vec![KeyValue::new("route", "/checkout")],
+            window_start_ms: 1_000,
+            window_end_ms: 2_000,
+            encoding: Encoding::Unspecified,
+            payload: vec![],
+            hash_spec: None,
+            metric_name: "request.duration".to_owned(),
+            count: 0,
+            aggregation_temporality: 0,
+            value: f64::from(value),
+        })
+        .collect::<Vec<_>>();
+    encode_envelopes_to_pdata(&observations).expect("encode scalar input")
 }
 
 struct OneMetricReceiver;
@@ -155,26 +157,54 @@ static SINK_FACTORY: ExporterFactory<OtapPdata> = ExporterFactory {
 };
 
 #[test]
-fn yaml_pipeline_ingests_flushes_and_exports_a_sketch() {
+fn yaml_pipeline_creates_merges_and_estimates_a_sketch() {
     captured().lock().expect("capture mutex").clear();
     let yaml = format!(
         r#"
 nodes:
   source:
     type: "{SOURCE_URN}"
-  sketches:
+  create_sketch:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "ddsketch"
       window_size: "20ms"
-      output_metric_name: "request.duration.p99"
-      agg_id: 0
+      output_metric_name: "request.duration.sketch"
+      agg_id: 7
+      sketch_params:
+        relative_accuracy: 0.01
+      transmit_sketch: true
+  merge_sketch:
+    type: "urn:asap:processor:asap_sketches"
+    config:
+      sketch_type: "ddsketch"
+      window_size: "20ms"
+      output_metric_name: "request.duration.merged_sketch"
+      agg_id: 7
+      sketch_params:
+        relative_accuracy: 0.01
+      transmit_sketch: true
+  estimate_sketch:
+    type: "urn:asap:processor:asap_sketches"
+    config:
+      sketch_type: "ddsketch"
+      window_size: "20ms"
+      output_metric_name: "request.duration.estimate"
+      agg_id: 7
+      sketch_params:
+        relative_accuracy: 0.01
+      transmit_sketch: false
+      quantiles: [0.5, 0.99]
   sink:
     type: "{SINK_URN}"
 connections:
   - from: source
-    to: sketches
-  - from: sketches
+    to: create_sketch
+  - from: create_sketch
+    to: merge_sketch
+  - from: merge_sketch
+    to: estimate_sketch
+  - from: estimate_sketch
     to: sink
 "#
     );
@@ -210,7 +240,7 @@ connections:
     let observed = ObservedStateStore::new(&ObservedStateSettings::default(), telemetry.registry());
     let shutdown_tx = runtime_tx.clone();
     let shutdown = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(200));
         shutdown_tx
             .try_send(RuntimeControlMsg::Shutdown {
                 deadline: Instant::now() + Duration::from_secs(1),
@@ -248,7 +278,7 @@ connections:
     shutdown.join().expect("shutdown thread");
 
     let outputs = captured().lock().expect("capture mutex");
-    assert!(!outputs.is_empty(), "pipeline exported no sketch window");
+    assert!(!outputs.is_empty(), "pipeline exported no estimate window");
     let mut decoded = Vec::new();
     for pdata in outputs.iter().cloned() {
         decoded.extend(
@@ -257,12 +287,48 @@ connections:
                 .observations,
         );
     }
-    let envelope = decoded
+    let p50 = decoded
         .iter()
-        .find_map(|observation| observation.value.envelope.as_ref())
-        .expect("export contains a serialized sketch envelope");
-    assert_eq!(envelope.metric_name, "request.duration.p99");
-    assert_eq!(envelope.sketch_type, SketchType::DDSketch);
-    assert_eq!(envelope.labels, vec![KeyValue::new("route", "/checkout")]);
-    assert!(!envelope.payload.is_empty());
+        .find(|observation| {
+            observation.metric == "request.duration.estimate"
+                && observation
+                    .labels
+                    .iter()
+                    .any(|kv| kv.key == "quantile" && kv.value == "0.5")
+        })
+        .expect("export contains the p50 estimate");
+    let p99 = decoded
+        .iter()
+        .find(|observation| {
+            observation.metric == "request.duration.estimate"
+                && observation
+                    .labels
+                    .iter()
+                    .any(|kv| kv.key == "quantile" && kv.value == "0.99")
+        })
+        .expect("export contains the p99 estimate");
+    assert!(
+        p50.value.envelope.is_none(),
+        "estimate must be scalar OTAP data"
+    );
+    assert!(
+        p99.value.envelope.is_none(),
+        "estimate must be scalar OTAP data"
+    );
+    assert!(
+        (p50.value.float - 50.0).abs() / 50.0 < 0.05,
+        "unexpected p50: {}",
+        p50.value.float
+    );
+    assert!(
+        (p99.value.float - 99.0).abs() / 99.0 < 0.05,
+        "unexpected p99: {}",
+        p99.value.float
+    );
+    assert!(
+        p99.labels
+            .iter()
+            .any(|kv| kv.key == "route" && kv.value == "/checkout"),
+        "series labels must survive creation, merge, and estimation"
+    );
 }

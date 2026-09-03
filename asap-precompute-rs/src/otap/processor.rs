@@ -114,7 +114,7 @@ use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 
 use crate::config::PrecomputeConfigSet;
-use crate::envelope::SketchEnvelope;
+use crate::envelope::{Encoding, SketchEnvelope};
 use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::{AsapSketchesPlugin, PluginConfig};
 use crate::precompute::{Precompute, PrecomputeError};
@@ -150,6 +150,30 @@ pub struct AsapSketchesUserConfig {
     /// `sketch_type` are read; others are ignored.
     #[serde(default)]
     pub sketch_params: serde_json::Map<String, serde_json::Value>,
+    /// Optional fallback key for CountSketch observations without labels.
+    #[serde(default)]
+    pub default_key: Option<String>,
+    /// Exclude resource attributes from series identity.
+    #[serde(default)]
+    pub omit_resource_attrs: bool,
+    /// Collapse every observation into one series.
+    #[serde(default)]
+    pub global_aggregation: bool,
+    /// Add sample-count and window-duration labels to emitted rows.
+    #[serde(default)]
+    pub emit_window_stats: bool,
+    /// Sketch payload encoding. Defaults to `ProtoFull`.
+    #[serde(default)]
+    pub encoding: Option<Encoding>,
+    /// Emit deltas after the first full snapshot.
+    #[serde(default)]
+    pub delta_transmission: bool,
+    /// Emit sketch envelopes when true; emit scalar estimates when false.
+    #[serde(default = "default_transmit_sketch")]
+    pub transmit_sketch: bool,
+    /// Quantiles emitted by DDSketch/KLL in estimate mode.
+    #[serde(default)]
+    pub quantiles: Vec<f64>,
     /// Bootstrap controller URL. Optional.
     #[serde(default)]
     pub controller_url: Option<String>,
@@ -181,7 +205,14 @@ impl AsapSketchesUserConfig {
             output_metric_name: self.output_metric_name,
             agg_id: self.agg_id,
             sketch_params: params,
-            ..PluginConfig::default()
+            default_key: self.default_key,
+            omit_resource_attrs: self.omit_resource_attrs,
+            global_aggregation: self.global_aggregation,
+            emit_window_stats: self.emit_window_stats,
+            encoding: self.encoding.unwrap_or(Encoding::ProtoFull),
+            delta_transmission: self.delta_transmission,
+            transmit_sketch: self.transmit_sketch,
+            quantiles: self.quantiles,
         };
         // Bounce the config through the resolver so config mistakes
         // (unsupported sketch_type, zero window) surface here rather
@@ -193,9 +224,21 @@ impl AsapSketchesUserConfig {
     }
 }
 
+const fn default_transmit_sketch() -> bool {
+    true
+}
+
 fn requires_precompute_rebuild(current: &PluginConfig, next: &PluginConfig) -> bool {
     !current.sketch_type.eq_ignore_ascii_case(&next.sketch_type)
         || current.sketch_params != next.sketch_params
+        || current.encoding != next.encoding
+        || current.default_key != next.default_key
+        || current.agg_id != next.agg_id
+        || current.omit_resource_attrs != next.omit_resource_attrs
+        || current.global_aggregation != next.global_aggregation
+        || (current.sketch_type.eq_ignore_ascii_case("countsketch")
+            && current.default_key.is_none()
+            && current.output_metric_name != next.output_metric_name)
 }
 
 /// `linkme` registration entry — the static the OTAP runtime walks at
@@ -512,6 +555,9 @@ mod tests {
         assert_eq!(cfg.window_size, Duration::from_secs(10));
         assert_eq!(cfg.output_metric_name, "http_request_duration_ms");
         assert_eq!(cfg.agg_id, 0);
+        assert!(cfg.transmit_sketch);
+        assert!(cfg.quantiles.is_empty());
+        assert!(cfg.encoding.is_none());
         assert!(cfg.controller_url.is_none());
     }
 
@@ -584,6 +630,31 @@ mod tests {
     }
 
     #[test]
+    fn estimate_and_wire_controls_are_threaded_through() {
+        let user: AsapSketchesUserConfig = serde_json::from_value(json!({
+            "sketch_type": "ddsketch",
+            "window_size": "5s",
+            "output_metric_name": "request.duration.p99",
+            "encoding": "Msgpack",
+            "delta_transmission": true,
+            "transmit_sketch": false,
+            "quantiles": [0.5, 0.99],
+            "omit_resource_attrs": true,
+            "global_aggregation": true,
+            "emit_window_stats": true
+        }))
+        .expect("extended control-plane shape parses");
+        let plugin = user.into_plugin_config().expect("extended config resolves");
+        assert_eq!(plugin.encoding, Encoding::Msgpack);
+        assert!(plugin.delta_transmission);
+        assert!(!plugin.transmit_sketch);
+        assert_eq!(plugin.quantiles, vec![0.5, 0.99]);
+        assert!(plugin.omit_resource_attrs);
+        assert!(plugin.global_aggregation);
+        assert!(plugin.emit_window_stats);
+    }
+
+    #[test]
     fn registered_factory_carries_expected_urn() {
         // Sanity check: the registry static the binary discovers via
         // linkme exposes the canonical URN.
@@ -615,5 +686,32 @@ mod tests {
         runtime_only_change.output_metric_name = "renamed".to_string();
         runtime_only_change.window_size = Duration::from_secs(60);
         assert!(!requires_precompute_rebuild(&current, &runtime_only_change));
+
+        let mut encoding_change = current.clone();
+        encoding_change.encoding = Encoding::Msgpack;
+        assert!(requires_precompute_rebuild(&current, &encoding_change));
+
+        let mut series_identity_change = current.clone();
+        series_identity_change.global_aggregation = true;
+        assert!(requires_precompute_rebuild(
+            &current,
+            &series_identity_change
+        ));
+
+        let mut aggregation_plan_change = current.clone();
+        aggregation_plan_change.agg_id = 9;
+        assert!(requires_precompute_rebuild(
+            &current,
+            &aggregation_plan_change
+        ));
+
+        let mut countsketch = current.clone();
+        countsketch.sketch_type = "countsketch".to_string();
+        let mut countsketch_rename = countsketch.clone();
+        countsketch_rename.output_metric_name = "renamed".to_string();
+        assert!(requires_precompute_rebuild(
+            &countsketch,
+            &countsketch_rename
+        ));
     }
 }
