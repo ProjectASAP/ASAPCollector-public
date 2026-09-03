@@ -1,13 +1,13 @@
 # ASAPCollector live OTAP pipeline demo
 
 This guide demonstrates the `asap_sketches` processor running inside a real
-OTAP Dataflow `RuntimePipeline`. The demo sends scalar OTAP metrics through
-three independently configured dataflow processors: one creates a DDSketch,
-one merges that self-describing sketch without expanding it back into samples,
-and one estimates p50 and p99 as ordinary scalar OTAP metrics.
+OTAP Dataflow `RuntimePipeline`. Two sources each send 100 scalar OTAP metrics
+through their own create processor. A fan-in processor merges the two
+self-describing DDSketches without expanding them back into samples, and a
+final processor estimates p50 and p99 as ordinary scalar OTAP metrics.
 
-The demo is automated as an integration test so it is repeatable and ends with
-a clear pass/fail result.
+The demo is available both as a runnable binary that prints its estimates and
+as an integration test with strict pass/fail assertions.
 
 ## What the demo proves
 
@@ -17,16 +17,16 @@ The test performs the following operations using the real OTAP engine APIs:
    `urn:asap:processor:asap_sketches`.
 2. Resolves the registered receiver, processor, and exporter factories.
 3. Builds and starts an OTAP `RuntimePipeline`.
-4. Injects 100 scalar `OtapPdata` values for `request.duration`, all carrying
-   `route=/checkout`.
-5. Creates a DDSketch and emits its self-describing payload through OTAP.
-6. Decodes and merges that payload in a second processor as sketch state—not
-   reconstructed scalar samples—and emits the merged sketch.
+4. Injects 100 values (`1..=100`) from source A and 100 values (`101..=200`)
+   from source B, all carrying `route=/checkout`.
+5. Creates one DDSketch per source and emits both self-describing payloads.
+6. Fans both payloads into one processor, merges them as sketch state (never
+   reconstructed scalar samples), and emits one merged sketch.
 7. Merges the second payload in an estimate-mode processor and emits p50/p99
    scalar gauges.
 8. Captures and decodes the exporter output.
 9. Verifies p50/p99 accuracy, scalar output shape, metric name, and label
-   preservation across all three processor hops.
+   preservation across all four processor paths.
 10. Shuts down the running pipeline through OTAP's runtime control channel.
 
 ## Prerequisites
@@ -68,6 +68,19 @@ cargo test --features otap-engine --test otap_pipeline_e2e --no-run
 
 ## Run the demo
 
+Run the presentation binary:
+
+```sh
+cargo run --bin asap-otap-demo --features otap-engine
+```
+
+It prints every pipeline boundary in two forms: the logical OTLP metric
+records and the physical OTAP Arrow child batches (row counts plus schemas).
+Large input batches are abbreviated, and binary envelopes are shown by byte
+length. The final p50/p99 scalar metrics are printed in full.
+
+## Run the automated assertion
+
 Run only the live-pipeline scenario:
 
 ```sh
@@ -97,29 +110,33 @@ Before running the command, show the YAML embedded in
 Its effective topology is:
 
 ```mermaid
-flowchart TD
+flowchart LR
   subgraph RP["one RuntimePipeline — single process, in-memory OTAP channels"]
-    direction TB
-    S["<b>source</b><br/>urn:asap:receiver:one_metric<br/><i>test node</i>"]
-    C["<b>create_sketch</b> · asap_sketches<br/>ddsketch · agg_id 7 · window 20ms<br/>transmit_sketch = true"]
-    M["<b>merge_sketch</b> · asap_sketches<br/>ddsketch · agg_id 7 · window 20ms<br/>transmit_sketch = true"]
-    E["<b>estimate_sketch</b> · asap_sketches<br/>ddsketch · agg_id 7 · window 20ms<br/>transmit_sketch = false · quantiles [0.5, 0.99]"]
-    X["<b>sink</b><br/>urn:asap:exporter:capture<br/><i>test node</i>"]
+    SA["<b>source_a</b><br/>100 values · 1..100<br/><i>demo/test node</i>"]
+    SB["<b>source_b</b><br/>100 values · 101..200<br/><i>demo/test node</i>"]
+    CA["<b>create_sketch_a</b> · asap_sketches<br/>DDSketch · agg_id 7<br/>transmit_sketch = true"]
+    CB["<b>create_sketch_b</b> · asap_sketches<br/>DDSketch · agg_id 7<br/>transmit_sketch = true"]
+    M["<b>merge_sketch</b> · asap_sketches<br/>DDSketch · agg_id 7<br/>transmit_sketch = true"]
+    E["<b>estimate_sketch</b> · asap_sketches<br/>quantiles [0.5, 0.99]<br/>transmit_sketch = false"]
+    X["<b>sink</b><br/>scalar p50 / p99<br/><i>demo/test node</i>"]
 
-    S -->|"100 scalar OtapPdata gauges<br/>request.duration{route=/checkout}"| C
-    C -->|"self-describing DDSketch<br/>_asap_envelope on OtapPdata (ProtoFull)"| M
-    M -->|"merged DDSketch<br/>folded as sketch state, never re-sampled"| E
-    E -->|"scalar p50 / p99 OtapPdata gauges<br/>request.duration.estimate{quantile=…, route=/checkout}"| X
+    SA -->|"100 scalar NumberDataPoints"| CA
+    SB -->|"100 scalar NumberDataPoints"| CB
+    CA -->|"DDSketch A · native OTAP protocol"| M
+    CB -->|"DDSketch B · native OTAP protocol"| M
+    M -->|"one merged 200-point DDSketch<br/>never re-sampled"| E
+    E -->|"2 scalar NumberDataPoints<br/>p50 ≈ 100 · p99 ≈ 198"| X
   end
 
-  style C fill:#2b6cb0,color:#fff
+  style CA fill:#2b6cb0,color:#fff
+  style CB fill:#2b6cb0,color:#fff
   style M fill:#2b6cb0,color:#fff
   style E fill:#2b6cb0,color:#fff
 ```
 
 Every edge is an in-process OTAP pipeline channel
 (`effect_handler.send_message_with_source_node`) — there is no network hop in
-this demo. `source` and `sink` are deterministic test nodes; the three
+this demo. The two sources and sink are deterministic demo/test nodes; the four
 `asap_sketches` nodes, the YAML parser, factory registration, timer, runtime,
 `OtapPdata` codec, and shutdown path are the real implementations.
 
@@ -127,7 +144,17 @@ The important processor portion of the YAML is:
 
 ```yaml
 nodes:
-  create_sketch:
+  create_sketch_a:
+    type: "urn:asap:processor:asap_sketches"
+    config:
+      sketch_type: "ddsketch"
+      window_size: "20ms"
+      output_metric_name: "request.duration.sketch"
+      agg_id: 7
+      sketch_params:
+        relative_accuracy: 0.01
+      transmit_sketch: true
+  create_sketch_b:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "ddsketch"
@@ -164,14 +191,14 @@ nodes:
 
 Use this short sequence during a live presentation:
 
-1. Show the YAML and point out that the same stable processor URN takes three
+1. Show the YAML and point out that the same stable processor URN takes four
    independent control-plane configs.
 2. Explain that the input is an ordinary OTAP scalar metric—not a custom ASAP
    transport message.
 3. Run the single-test command.
 4. When it passes, explain that the assertion is made at the exporter boundary,
-   after the metrics passed through creation, merge, estimate, and three real
-   timer flushes.
+   after the metrics passed through two creates, fan-in merge, estimate, and
+   four real timer flushes.
 5. Show the assertions near the end of `otap_pipeline_e2e.rs`: they check the
    p50/p99 relative accuracy, scalar output shape, output metric name, and the
    preserved `route` label.
@@ -231,7 +258,7 @@ external service.
 ## Current boundary
 
 This demo is a genuine running OTAP pipeline, but it is deliberately
-self-contained: the source and sink are test nodes linked into the integration
+self-contained: the sources and sink are test nodes linked into the integration
 test binary. It does not yet demonstrate separate hosts, an external OTLP
 client, an external exporter backend, OpAMP configuration delivery, or
 distributed shuffle.
