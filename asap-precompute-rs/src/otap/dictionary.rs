@@ -371,7 +371,7 @@ impl SeriesDictionary {
 /// populates [`SketchEnvelope::hash_spec`] yet) or when the resolved
 /// index is out of bounds for `seed_list` (a malformed spec — better
 /// to omit the seed than fabricate one).
-fn resolve_hash_seed(
+pub(crate) fn resolve_hash_seed(
     sketch_type: SketchType,
     spec: Option<&asap_sketchlib::proto::sketchlib::HashSpec>,
 ) -> (Option<u64>, Option<String>) {
