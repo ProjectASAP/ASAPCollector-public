@@ -1,0 +1,47 @@
+steps:
+  - name: Deploy {{component}}
+    action:
+      component_action: { phase: deploy, target: "{{component}}" }
+  - name: Start monitoring {{component}}
+    action:
+      component_action: { phase: start_monitoring, target: "{{component}}" }
+  - name: Warm up
+    action:
+      wait: { delay_seconds: 5 }
+  - name: Observe load
+    action:
+      wait: { delay_seconds: 30 }
+    hooks:
+      run:
+        pre:
+          - record_event: { name: "{{component}}_observation_start" }
+        post:
+          - record_event: { name: "{{component}}_observation_stop" }
+  - name: Stop monitoring {{component}}
+    action:
+      component_action: { phase: stop_monitoring, target: "{{component}}" }
+  - name: Destroy {{component}}
+    action:
+      component_action: { phase: destroy, target: "{{component}}" }
+  - name: Write {{component}} report
+    action:
+      no_op: {}
+    hooks:
+      run:
+        post:
+          - process_report:
+              name: "{{component}} container resources"
+              components: ["{{component}}"]
+              between_events:
+                start: { name: "{{component}}_observation_start" }
+                end: { name: "{{component}}_observation_stop" }
+              include_sections: { component_summary: true, component_detail: true }
+              output:
+                - format: { template: {} }
+                  destination: { console: {} }
+                - format: { template: {} }
+                  destination:
+                    file:
+                      directory: benchmark-results
+                      name: "{{report_name}}"
+                      extension: .md
