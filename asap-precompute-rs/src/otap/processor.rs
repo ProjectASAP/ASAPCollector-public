@@ -54,21 +54,13 @@
 //! `AsapSketchesReceiver` node) as an alternative transport; that's
 //! gone.
 //!
-//! It's gone because it turned out to be solving a problem OTAP's real
-//! Arrow-native metrics protocol already solves. The custom wire lane
-//! existed to give sketch traffic real dictionary/schema-reuse
-//! economics — the SCHEMA-once-per-`agg_id`, DICTIONARY-once-per-series
-//! design in [`super::dictionary`] (`SeriesDictionary` /
-//! `SketchStreamBatch`). But [`super::codec`]'s real `OtapPdata`
-//! already gets that for free, without any hand-rolled scheme: OTAP's
-//! Arrow encoder (`encode_metrics_otap_batch`) dictionary-encodes the
-//! metric name and every string-valued attribute key/value by
-//! construction — see `codec.rs`'s
-//! `real_otap_encoding_dictionary_encodes_metric_name_and_string_attributes`
-//! test. `SeriesDictionary` / `SketchStreamBatch` stay in the tree —
-//! tested, and still the transport for the legacy
-//! `crate::otap::wire` example binaries — but they aren't part of this
-//! adapter's path.
+//! The real OTAP path now expresses the protocol structurally: aggregation
+//! SCHEMA is attached to Resource rows, series DICTIONARY/LABELS to Scope
+//! rows, and per-window RECORD fields to NumberDataPoint rows. OTAP's own
+//! parent IDs carry the joins, while its stateful IPC producer retains Arrow
+//! schemas and emits dictionary deltas. `SeriesDictionary` /
+//! `SketchStreamBatch` remain only for the legacy `crate::otap::wire`
+//! examples.
 //!
 //! ## Scope not covered here
 //!
@@ -119,7 +111,7 @@ use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::{AsapSketchesPlugin, PluginConfig};
 use crate::precompute::{Precompute, PrecomputeError};
 
-use super::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata};
+use super::codec::{decode_pdata_to_observations, OtapSketchEncoder};
 
 /// Public URN for the unified ASAP `asap_sketches` processor. Survives
 /// across hosts unchanged so a controller plan addressed at this URN
@@ -345,17 +337,22 @@ pub struct AsapSketchesProcessor {
     /// of any external controller's own versioning since this
     /// adapter's `Precompute` never talks to a `ControlChannel`.
     next_config_version: Arc<AtomicU64>,
+    /// Stable SCHEMA/DICTIONARY identity for this processor's output stream.
+    sketch_encoder: OtapSketchEncoder,
 }
 
 impl AsapSketchesProcessor {
     fn new(precompute: Arc<dyn Precompute>, plugin_config: PluginConfig) -> Self {
         let window_size = plugin_config.window_size;
+        let sketch_encoder =
+            OtapSketchEncoder::with_sketch_params(plugin_config.sketch_params.clone());
         Self {
             precompute,
             plugin_config,
             window_size,
             timer: None,
             next_config_version: Arc::new(AtomicU64::new(1)),
+            sketch_encoder,
         }
     }
 
@@ -364,15 +361,12 @@ impl AsapSketchesProcessor {
     /// (final drain) paths. `envs` empty is a no-op, matching
     /// `Precompute::tick`/`drain`'s own "nothing to flush" contract.
     ///
-    /// [`encode_envelopes_to_pdata`] builds the real `OtapPdata`
-    /// directly from `envs` — no flat-`RecordBatch`/`OtapMetricRecords`
-    /// hop, and deliberately not `SeriesDictionary::encode` (the
-    /// SCHEMA/DICTIONARY/RECORD wire economics from PR #5/#6, the
-    /// older `crate::otap::wire` format) — see this module's doc,
-    /// "There is exactly one transport: the pipeline", for why that
-    /// scheme is redundant on this path.
+    /// [`OtapSketchEncoder`] builds the real `OtapPdata` directly from
+    /// `envs`, retains stable series IDs across calls, and maps the protocol
+    /// tiers onto native Resource/Scope/DataPoint joins. There is no
+    /// flat-`RecordBatch` or legacy `crate::otap::wire` hop.
     async fn emit_envelopes(
-        &self,
+        &mut self,
         envs: &[SketchEnvelope],
         effect_handler: &mut local::EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
@@ -381,7 +375,7 @@ impl AsapSketchesProcessor {
         if envs.is_empty() {
             return Ok(());
         }
-        let pdata = match encode_envelopes_to_pdata(envs) {
+        let pdata = match self.sketch_encoder.encode(envs) {
             Ok(pdata) => pdata,
             Err(_e) => return Ok(()), // drop the bad window, keep the processor alive
         };
@@ -496,6 +490,8 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                     let pending = self.precompute.drain();
                     self.emit_envelopes(&pending, effect_handler).await?;
                     self.precompute = replacement;
+                    self.sketch_encoder =
+                        OtapSketchEncoder::with_sketch_params(plugin_config.sketch_params.clone());
                 } else {
                     let version = self.next_config_version.fetch_add(1, Ordering::Relaxed);
                     self.precompute.update_config(&PrecomputeConfigSet {
