@@ -20,8 +20,17 @@ mkdir -p "$result_root"
 
 cargo build --manifest-path "$repo_root/asap-precompute-rs/Cargo.toml" \
   --release --features otap-engine --bin asap-otap-demo
+cargo bench --manifest-path "$repo_root/asap-precompute-rs/Cargo.toml" \
+  --features otap-engine --bench asap_sketch_pipeline -- \
+  kll_isolated_stages --sample-size 10 --warm-up-time 1 --measurement-time 1 \
+  | tee "$result_root/kll-isolated-stages.txt"
+docker_context="$repo_root/.cache/asap-benchmark-image"
+mkdir -p "$docker_context"
+cp "$repo_root/asap-precompute-rs/target/release/asap-otap-demo" "$docker_context/asap-otap-demo"
+strip --strip-debug "$docker_context/asap-otap-demo"
+cp "$repo_root/benchmarks/run-pipeline-component.sh" "$repo_root/benchmarks/summarize-stages.py" "$docker_context/"
 docker build -f "$repo_root/benchmarks/Dockerfile" \
-  -t asap-quantile-benchmark:local "$repo_root"
+  -t asap-quantile-benchmark:local "$docker_context"
 
 if [[ ! -f "$framework_dir/tools/pipeline_perf_test/orchestrator/run_orchestrator.py" ]]; then
   mkdir -p "$(dirname "$framework_dir")"
@@ -40,3 +49,7 @@ cd "$repo_root"
 PYTHONPATH="$python_deps${PYTHONPATH:+:$PYTHONPATH}" \
 "$python_bin" "$framework_dir/tools/pipeline_perf_test/orchestrator/run_orchestrator.py" \
   --config "$repo_root/benchmarks/nightly/asap-sketch.yaml"
+
+"$python_bin" "$repo_root/benchmarks/run-scale-sweep.py" \
+  --binary "$docker_context/asap-otap-demo" \
+  --output "$result_root/scale-sweep"

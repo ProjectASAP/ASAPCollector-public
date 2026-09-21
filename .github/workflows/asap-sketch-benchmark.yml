@@ -39,6 +39,26 @@ jobs:
             test "$input_signals" -gt 0
             test "$signals_per_second" -gt 0
           done
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for scenario in ("raw", "exact", "kll"):
+              root = Path("benchmark-results") / scenario
+              config = json.loads((root / "config.json").read_text())
+              stages = json.loads((root / "stages.json").read_text())["stages"]
+              assert set(stages) == {"a", "b", "sa", "sb", "merged", "out"}
+              assert set(config["generator_cores"].split(",")).isdisjoint(config["processor_cores"].split(","))
+              assert config["debug_disabled"]
+              assert all(stage["input_count"] > 0 for stage in stages.values())
+          sweep = Path("benchmark-results/scale-sweep")
+          rows = json.loads((sweep / "summary.json").read_text())
+          resources = json.loads((sweep / "resources.json").read_text())
+          assert len(rows) == 12
+          assert len(resources) == 72
+          assert all(row["repetitions"] == 2 and row["median_signals_per_second"] > 0 for row in rows)
+          for chart in ("throughput.svg", "raw-resources.svg", "exact-resources.svg", "kll-resources.svg"):
+              assert (sweep / chart).is_file()
+          PY
       - name: Upload review artifacts
         uses: actions/upload-artifact@v4
         with:

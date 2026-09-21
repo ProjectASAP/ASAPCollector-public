@@ -102,6 +102,39 @@ fn exact_baseline_uses_four_processes_and_returns_exact_quantiles() {
     );
 }
 
+#[test]
+fn semantic_traffic_uses_generator_processes_and_records_stage_resources() {
+    let dir = unique_dir();
+    fs::create_dir_all(&dir).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_asap-otap-demo"))
+        .args([
+            "--scenario",
+            "kll",
+            "--traffic",
+            "semantic",
+            "--generator-threads",
+            "2",
+            "--points-per-source",
+            "1000",
+            "--output-dir",
+            dir.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for stage in ["a", "b", "sa", "sb", "merged", "out"] {
+        let metric: Value =
+            serde_json::from_slice(&fs::read(dir.join(format!("{stage}.metrics.json"))).unwrap())
+                .unwrap();
+        assert!(metric["elapsed_nanoseconds"].as_u64().unwrap() > 0);
+        assert!(metric["output_bytes"].as_u64().unwrap() > 0);
+    }
+}
+
 /// Scenario: KLL demo processes two sources through create, merge, and estimate workers.
 /// Guarantees: Four distinct processes preserve ASAPv1 sketches and emit bounded-error quantiles.
 #[test]

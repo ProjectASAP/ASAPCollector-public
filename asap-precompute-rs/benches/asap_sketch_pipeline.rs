@@ -186,7 +186,7 @@ fn otap_exact_quantile_pipeline(input: [Vec<OtapPdata>; SOURCES]) -> Vec<Observa
 }
 
 fn kll_create_stage(input: Vec<OtapPdata>, seed: u64) -> OtapPdata {
-    let mut sketch = KLLWrapper::new(200, Some(seed)).with_wire_encoding(Encoding::Msgpack);
+    let mut sketch = KLLWrapper::new(400, Some(seed)).with_wire_encoding(Encoding::Msgpack);
     let mut count = 0;
     for batch in input {
         for observation in backend_decode(batch) {
@@ -207,7 +207,7 @@ fn kll_create_stage(input: Vec<OtapPdata>, seed: u64) -> OtapPdata {
 fn decode_kll(input: OtapPdata) -> KLLWrapper {
     let obs = backend_decode(input).pop().expect("one sketch");
     let env = obs.value.envelope.expect("sketch envelope");
-    let mut sketch = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
+    let mut sketch = KLLWrapper::new(400, Some(99)).with_wire_encoding(Encoding::Msgpack);
     sketch
         .apply_delta_encoded(&env.payload, env.encoding)
         .expect("ASAPv1 decode");
@@ -215,7 +215,7 @@ fn decode_kll(input: OtapPdata) -> KLLWrapper {
 }
 
 fn kll_merge_stage(left: OtapPdata, right: OtapPdata) -> OtapPdata {
-    let mut merged = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
+    let mut merged = KLLWrapper::new(400, Some(99)).with_wire_encoding(Encoding::Msgpack);
     merged.merge(&decode_kll(left)).expect("merge left");
     merged.merge(&decode_kll(right)).expect("merge right");
     let mut env = scalar_envelope(0.0);
@@ -345,5 +345,54 @@ fn benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark);
+fn benchmark_kll_stages(c: &mut Criterion) {
+    let mut group = c.benchmark_group("kll_isolated_stages");
+    for count in SIGNAL_COUNTS {
+        let values = semantic_http_durations(count);
+        let make_sketch = |slice: &[f64], seed| {
+            let mut sketch = KLLWrapper::new(400, Some(seed)).with_wire_encoding(Encoding::Msgpack);
+            for value in slice {
+                sketch.update(*value);
+            }
+            sketch
+        };
+        let left = make_sketch(&values[..count / 2], 1);
+        let right = make_sketch(&values[count / 2..], 2);
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_function(BenchmarkId::new("create", count), |b| {
+            b.iter(|| {
+                let sketch = make_sketch(black_box(&values), 3);
+                black_box(sketch);
+            })
+        });
+        group.bench_function(BenchmarkId::new("merge", count), |b| {
+            b.iter(|| {
+                let mut merged =
+                    KLLWrapper::new(400, Some(3)).with_wire_encoding(Encoding::Msgpack);
+                merged.merge(black_box(&left)).unwrap();
+                merged.merge(black_box(&right)).unwrap();
+                black_box(merged);
+            })
+        });
+        group.throughput(Throughput::Elements((count / 2) as u64));
+        group.bench_function(BenchmarkId::new("estimate", count), |b| {
+            b.iter(|| {
+                black_box((
+                    left.quantile(black_box(0.5)),
+                    left.quantile(black_box(0.99)),
+                ));
+            })
+        });
+        group.bench_function(BenchmarkId::new("serialize_asapv1", count), |b| {
+            b.iter(|| {
+                let bytes = left.snapshot().unwrap();
+                assert!(bytes.starts_with(b"ASAPv1"));
+                black_box(bytes);
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, benchmark, benchmark_kll_stages);
 criterion_main!(benches);

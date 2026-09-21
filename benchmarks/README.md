@@ -4,12 +4,11 @@ The nightly benchmark runs with OTAP's official Python `pipeline_perf_test`
 orchestrator. It deploys raw, exact-quantile, and ASAP KLL scenarios as
 identically configured Docker containers, observes each cgroup with the
 upstream `docker_component` monitor, and emits upstream process reports.
-Criterion remains available only as a local microbenchmark and is not used by
-the nightly workflow.
+Criterion also runs isolated KLL stage measurements in the nightly workflow.
 
 The logical topology is `traffic generator → ASAP sketch SUT → simulated
-backend`. The generator uses a deterministic metric shaped like the OpenTelemetry
-`http.server.request.duration` semantic convention. The local microbenchmark has
+backend`. The generator uses reproducible SplitMix64 durations with a long tail
+and OpenTelemetry `http.server.request.duration` semantic attributes. The local microbenchmark has
 three SUT workloads: transmitting every raw value, collecting and sorting every
 raw value for exact p50/p99, and creating then merging two self-describing
 ASAPv1 KLL shards for approximate p50/p99. The official-orchestrated nightly
@@ -25,9 +24,9 @@ runner fetches the pinned OTAP orchestrator revision on first use):
 
 ## Compared topologies
 
-All scenarios start from the same pre-generated, semantic-convention-shaped
+All scenarios generate the same reproducible semantic-convention-shaped
 `http.server.request.duration` values. Nightly gives each of two sources one
-native `OtapPdata` batch of 65,536 observations. The local Criterion workload
+native `OtapPdata` batch of 262,144 observations. The local Criterion workload
 uses 4,096-observation batches. Both timed boundaries end after the simulated
 backend decodes the scenario's output pdata.
 
@@ -66,14 +65,17 @@ source B -> KLL create B -> ASAPv1 KLL B --/                    |
                                                      KLL p50/p99 -> backend
 ```
 
-The KLL path uses two deterministic `k=200` creators. Merge operates on the
+The KLL path uses two deterministic `k=400` creators. Merge operates on the
 self-describing ASAPv1 representation supplied by `asap_sketchlib`; its p50/p99
 must remain within 5% of the exact result.
 
-In nightly, every topology has two branch workers, one merge worker, and one
+In nightly, every topology has two generator processes, two branch workers, one merge worker, and one
 final/estimate worker. Every worker is a separate OS process containing a real
-OTAP `RuntimePipeline`; the upstream Docker monitor includes the entire process
-tree in CPU and RSS measurements. All scenarios use the same input count and
+OTAP `RuntimePipeline`; the generators run outside OTAP. Two available CPUs
+are assigned to generation and two others to OTAP workers with `taskset`.
+Each process writes elapsed time, CPU use, peak RSS, output bytes, and OTLP
+file serialization time. The upstream Docker monitor includes the entire process
+tree in container CPU and RSS measurements. All scenarios use the same input count and
 the same warm-up and observation intervals.
 
 The local Criterion microbenchmark records throughput and latency for three pipelines with identical
@@ -88,6 +90,56 @@ window, OTAP's orchestrator samples CPU and RSS from the Docker cgroup. Each
 component writes completed input count, elapsed time, and signals/s below
 `benchmark-results/{raw,exact,kll}/throughput.env`; the orchestrator writes its
 three process reports under `benchmark-results/`. They are uploaded by CI.
+The per-role `stages.json` and `stages.jsonl` files report generator, create,
+merge, and estimate resources separately. `kll-isolated-stages.txt` contains
+Criterion throughput for KLL creation, merge, p50/p99 estimation, and ASAPv1
+serialization.
+
+## Nightly configuration
+
+| Setting | Current value |
+| --- | --- |
+| Scenarios | raw, exact, KLL |
+| Sources | 2 processes, 262,144 observations each |
+| Generator | 2 threads per source; SplitMix64 long-tail durations, seed `0x9e3779b97f4a7c15` |
+| KLL | `k=400`, Msgpack ASAPv1, p50/p99 |
+| CPU placement | first 2 available CPUs: generators; next 2: processors |
+| Observation | 5 s warm-up, 30 s monitored window |
+| Debug output | disabled in nightly measurements; enabled in the interactive demo |
+| Output | config.json, throughput.env, stages.json, stages.jsonl, process reports, Criterion text |
+
+Stage process rates include OTAP startup and file IO. `serialization_seconds`
+measures final OTLP file conversion and write. Criterion's `serialize_asapv1`
+result isolates sketch framing. Stages run sequentially after generation, so
+these rates describe stage work rather than simultaneous streaming capacity.
+
+## Input scale sweep
+
+The nightly runner also repeats each raw, exact, and KLL pipeline twice at
+32,768, 65,536, 262,144, and 524,288 observations **per source**. It uses the
+same semantic values, generator threads, CPU placement, and disabled debug
+output at every size. Run it locally after building `asap-otap-demo`:
+
+```sh
+python3 benchmarks/run-scale-sweep.py
+```
+
+Choose sizes and repetitions with `--points 65536 262144 524288` and
+`--repetitions 3`. Results appear under `benchmark-results/scale-sweep/`:
+
+- `throughput.svg` plots raw, exact, and KLL signals/s plus KLL speedup ratios.
+- `{raw,exact,kll}-resources.svg` plots CPU seconds and peak RSS for each of the
+  two traffic generators and four processor roles.
+- `summary.csv` and `resources.csv` contain median measurements; `runs.json`
+  retains every individual run, and `config.json` records CPU sets and sizes.
+
+Each scale point measures one complete batch, including traffic generation,
+OTAP startup, file boundaries, and backend validation. The charts describe
+this file-backed demo's scaling. Peak RSS is per process and should not be
+summed as a simultaneous container peak because merge and estimate run after
+the creators finish.
+The `branch_a` and `branch_b` roles pass values through in raw, sort values in
+exact, and create KLL sketches in KLL.
 
 ## Viewing nightly results today
 

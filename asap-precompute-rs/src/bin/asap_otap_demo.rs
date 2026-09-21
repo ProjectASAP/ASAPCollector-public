@@ -50,6 +50,7 @@ const WORKER_ARG: &str = "--df-worker";
 const SOURCE_URN: &str = "urn:asap:receiver:otlp_file";
 const SINK_URN: &str = "urn:asap:exporter:otlp_file";
 const BASELINE_URN: &str = "urn:asap:processor:benchmark_baseline";
+const TRAFFIC_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 static INPUTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
 static CAPTURED: OnceLock<(Mutex<Vec<OtapPdata>>, Condvar)> = OnceLock::new();
 fn captured() -> &'static (Mutex<Vec<OtapPdata>>, Condvar) {
@@ -80,6 +81,120 @@ fn scalar_input(start: u64, end: u64) -> OtapPdata {
         })
         .collect::<Vec<_>>();
     encode_envelopes_to_pdata(&values).expect("encode input")
+}
+
+// SplitMix64 gives reproducible, high-cardinality durations with a long tail.
+fn traffic_value(index: u64) -> f64 {
+    let mut x = index.wrapping_add(TRAFFIC_SEED);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    let unit = (x >> 11) as f64 / (1_u64 << 53) as f64;
+    if index.is_multiple_of(20) {
+        1.0 + unit * 0.4
+    } else {
+        0.005 + unit * 0.1
+    }
+}
+
+fn generated_input(start: u64, end: u64, threads: usize, semantic: bool) -> OtapPdata {
+    if !semantic {
+        return scalar_input(start, end);
+    }
+    let count = (end - start + 1) as usize;
+    let chunk = count.div_ceil(threads);
+    let mut handles = Vec::new();
+    for thread in 0..threads {
+        let first = start + (thread * chunk) as u64;
+        if first > end {
+            break;
+        }
+        let last = (first + chunk as u64 - 1).min(end);
+        handles.push(std::thread::spawn(move || {
+            (first..=last).map(traffic_value).collect::<Vec<_>>()
+        }));
+    }
+    let values = handles
+        .into_iter()
+        .flat_map(|handle| handle.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), count);
+    let envelopes = values
+        .into_iter()
+        .map(|value| SketchEnvelope {
+            schema_version: 1,
+            sketch_type: SketchType::Unspecified,
+            agg_id: 0,
+            resource_labels: vec![KeyValue::new("service.name", "checkout")],
+            labels: vec![
+                KeyValue::new("http.request.method", "GET"),
+                KeyValue::new("http.route", "/checkout"),
+                KeyValue::new("http.response.status_code", "200"),
+            ],
+            window_start_ms: 1_000,
+            window_end_ms: 2_000,
+            encoding: Encoding::Unspecified,
+            payload: vec![],
+            hash_spec: None,
+            metric_name: "http.server.request.duration".into(),
+            count: 0,
+            aggregation_temporality: 0,
+            value,
+        })
+        .collect::<Vec<_>>();
+    encode_envelopes_to_pdata(&envelopes).expect("encode generated input")
+}
+
+#[derive(Serialize)]
+struct StageMetrics {
+    elapsed_nanoseconds: u128,
+    cpu_jiffies: u64,
+    peak_rss_kib: u64,
+    serialization_nanoseconds: u128,
+    output_bytes: u64,
+}
+
+fn cpu_jiffies() -> u64 {
+    let stat = fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    let fields = stat
+        .rsplit_once(") ")
+        .map(|(_, tail)| tail.split_whitespace().collect::<Vec<_>>())
+        .unwrap_or_default();
+    fields
+        .get(11)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+        + fields
+            .get(12)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+}
+
+fn write_stage_metrics(
+    output: &Path,
+    start: Instant,
+    cpu_start: u64,
+    serialization_nanoseconds: u128,
+) -> Result<(), String> {
+    let status = fs::read_to_string("/proc/self/status").map_err(|e| e.to_string())?;
+    let peak_rss_kib = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let metrics = StageMetrics {
+        elapsed_nanoseconds: start.elapsed().as_nanos(),
+        cpu_jiffies: cpu_jiffies().saturating_sub(cpu_start),
+        peak_rss_kib,
+        serialization_nanoseconds,
+        output_bytes: fs::metadata(output).map_err(|e| e.to_string())?.len(),
+    };
+    fs::write(
+        output.with_extension("metrics.json"),
+        serde_json::to_vec(&metrics).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn write_otlp(path: &Path, pdata: OtapPdata) -> Result<(), String> {
@@ -366,18 +481,17 @@ static BASELINE_FACTORY: ProcessorFactory<OtapPdata> = ProcessorFactory {
 
 fn pipeline_yaml(role: &str, trace: &Path) -> Result<String, String> {
     let processor = match role {
-        "create_a" | "create_b" => format!(
-            r#"type: "urn:asap:processor:asap_sketches"
+        "create_a" | "create_b" => r#"type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "kll"
       encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.sketch"
       agg_id: 7
-      sketch_params: {{ k: 200 }}
+      sketch_params: { k: 400 }
       transmit_sketch: true
       quantiles: []"#
-        ),
+            .to_owned(),
         "merge" | "estimate" => {
             let (name, transmit, quantiles) = if role == "merge" {
                 ("request.duration.merged_sketch", true, "[]")
@@ -392,7 +506,7 @@ fn pipeline_yaml(role: &str, trace: &Path) -> Result<String, String> {
       window_size: "20ms"
       output_metric_name: "{name}"
       agg_id: 7
-      sketch_params: {{ k: 200 }}
+      sketch_params: {{ k: 400 }}
       transmit_sketch: {transmit}
       quantiles: {quantiles}"#
             )
@@ -421,6 +535,20 @@ fn pipeline_yaml(role: &str, trace: &Path) -> Result<String, String> {
         ),
         _ => return Err(format!("unknown role {role}")),
     };
+    if env::var("ASAP_BENCH_DISABLE_DEBUG").as_deref() == Ok("1") {
+        return Ok(format!(
+            r#"
+nodes:
+  source: {{ type: "{SOURCE_URN}" }}
+  processor:
+    {processor}
+  sink: {{ type: "{SINK_URN}" }}
+connections:
+  - {{ from: source, to: processor }}
+  - {{ from: processor, to: sink }}
+"#
+        ));
+    }
     let trace = serde_json::to_string(&trace.to_string_lossy()).unwrap();
     Ok(format!(
         r#"
@@ -450,6 +578,8 @@ fn run_worker(
     output: PathBuf,
     trace: PathBuf,
 ) -> Result<(), String> {
+    let stage_start = Instant::now();
+    let cpu_start = cpu_jiffies();
     INPUTS
         .set(inputs)
         .map_err(|_| "inputs already initialized".to_owned())?;
@@ -490,7 +620,7 @@ fn run_worker(
         let (outputs, ready) = captured();
         let guard = outputs.lock().expect("capture mutex");
         let (_guard, wait) = ready
-            .wait_timeout_while(guard, Duration::from_secs(10), |items| items.is_empty())
+            .wait_timeout_while(guard, Duration::from_secs(60), |items| items.is_empty())
             .expect("capture wait");
         shutdown_tx
             .try_send(RuntimeControlMsg::Shutdown {
@@ -537,11 +667,19 @@ fn run_worker(
     if outputs.len() != 1 {
         return Err(format!("expected one output, got {}", outputs.len()));
     }
-    write_otlp(&output, outputs.pop().unwrap())
+    let serialization_start = Instant::now();
+    write_otlp(&output, outputs.pop().unwrap())?;
+    write_stage_metrics(
+        &output,
+        stage_start,
+        cpu_start,
+        serialization_start.elapsed().as_nanos(),
+    )
 }
 
 fn spawn(exe: &Path, role: &str, inputs: &[&Path], output: &Path, trace: &Path) -> Child {
-    let mut cmd = Command::new(exe);
+    let cores = env::var("ASAP_PROCESSOR_CORES").ok();
+    let mut cmd = pinned_command(exe, cores.as_deref());
     cmd.arg(WORKER_ARG).arg(role);
     for input in inputs {
         cmd.arg(input);
@@ -554,6 +692,26 @@ fn spawn(exe: &Path, role: &str, inputs: &[&Path], output: &Path, trace: &Path) 
         trace.display()
     );
     child
+}
+
+fn pinned_command(exe: &Path, cores: Option<&str>) -> Command {
+    if let Some(cores) = cores {
+        let mut command = Command::new("taskset");
+        command.arg("-c").arg(cores).arg(exe);
+        command
+    } else {
+        Command::new(exe)
+    }
+}
+
+fn spawn_generator(exe: &Path, start: u64, end: u64, output: &Path, threads: usize) -> Child {
+    let mut cmd = pinned_command(exe, env::var("ASAP_GENERATOR_CORES").ok().as_deref());
+    cmd.arg("--generate")
+        .arg(start.to_string())
+        .arg(end.to_string())
+        .arg(output)
+        .arg(threads.to_string());
+    cmd.spawn().expect("launch traffic generator")
 }
 fn wait(mut child: Child, role: &str) {
     let status = child.wait().unwrap();
@@ -573,7 +731,7 @@ fn validate_quantiles(results: &[(String, f64)], expected: [(f64, f64); 2]) -> R
             .iter()
             .find_map(|(label, value)| (label == &quantile).then_some(*value))
             .ok_or_else(|| format!("missing quantile {quantile}"))?;
-        let tolerance = (expected * 0.05).max(5.0);
+        let tolerance = (expected.abs() * 0.05).max(0.001);
         if (value - expected).abs() > tolerance {
             return Err(format!(
                 "quantile {quantile} out of tolerance: got {value}, expected {expected} +/- {tolerance}"
@@ -593,6 +751,9 @@ struct ProcessorRun {
 struct DemoManifest {
     parent_pid: u32,
     points_per_source: u64,
+    traffic_mode: &'static str,
+    generator_threads: usize,
+    traffic_seed: u64,
     processors: Vec<ProcessorRun>,
 }
 
@@ -601,6 +762,8 @@ struct ParentOptions {
     result_manifest: Option<PathBuf>,
     points_per_source: u64,
     scenario: String,
+    semantic_traffic: bool,
+    generator_threads: usize,
 }
 
 fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> {
@@ -609,6 +772,8 @@ fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> 
         result_manifest: None,
         points_per_source: 100,
         scenario: "kll".into(),
+        semantic_traffic: false,
+        generator_threads: 1,
     };
     let mut index = 0;
     while index < args.len() {
@@ -629,6 +794,22 @@ fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> 
                 }
             }
             "--scenario" => options.scenario = value.to_string_lossy().into_owned(),
+            "--traffic" => {
+                options.semantic_traffic = match value.to_string_lossy().as_ref() {
+                    "sequential" => false,
+                    "semantic" => true,
+                    _ => return Err("--traffic must be sequential or semantic".into()),
+                }
+            }
+            "--generator-threads" => {
+                options.generator_threads = value
+                    .to_string_lossy()
+                    .parse()
+                    .map_err(|_| "--generator-threads must be positive".to_owned())?;
+                if options.generator_threads == 0 {
+                    return Err("--generator-threads must be positive".into());
+                }
+            }
             _ => return Err(format!("unknown argument {flag}")),
         }
         index += 2;
@@ -654,9 +835,16 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
     let merged = p("merged.otlp");
     let out = p("out.otlp");
     let n = options.points_per_source;
-    write_otlp(&ia, scalar_input(1, n))?;
-    write_otlp(&ib, scalar_input(n + 1, n * 2))?;
     let exe = env::current_exe().map_err(|e| e.to_string())?;
+    if options.semantic_traffic {
+        let ga = spawn_generator(&exe, 1, n, &ia, options.generator_threads);
+        let gb = spawn_generator(&exe, n + 1, n * 2, &ib, options.generator_threads);
+        wait(ga, "traffic_a");
+        wait(gb, "traffic_b");
+    } else {
+        write_otlp(&ia, scalar_input(1, n))?;
+        write_otlp(&ib, scalar_input(n + 1, n * 2))?;
+    }
     let (role_a, role_b, role_merge, role_estimate) = match options.scenario.as_str() {
         "kll" => ("create_a", "create_b", "merge", "estimate"),
         "raw" => ("raw_a", "raw_b", "raw_merge", "raw_final"),
@@ -708,14 +896,12 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
     let decoded = decode_pdata_to_observations(read_otlp(&out)?)
         .map_err(|e| e.to_string())?
         .observations;
-    if options.scenario == "raw" {
-        if decoded.len() != (n * 2) as usize {
-            return Err(format!(
-                "raw backend received {} of {} signals",
-                decoded.len(),
-                n * 2
-            ));
-        }
+    if options.scenario == "raw" && decoded.len() != (n * 2) as usize {
+        return Err(format!(
+            "raw backend received {} of {} signals",
+            decoded.len(),
+            n * 2
+        ));
     }
     let mut quantiles = Vec::with_capacity(decoded.len());
     for o in &decoded {
@@ -741,12 +927,18 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
         }
         quantiles.push((q.to_owned(), o.value.float));
     }
+    let expected = if options.semantic_traffic {
+        let mut values = (1..=n * 2).map(traffic_value).collect::<Vec<_>>();
+        values.sort_by(f64::total_cmp);
+        let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
+        [at(0.5), at(0.99)]
+    } else {
+        [n as f64 + 1.0, ((n * 2 - 1) as f64 * 0.99).round() + 1.0]
+    };
     if options.scenario == "kll" {
-        validate_quantiles(&quantiles, [(0.5, n as f64), (0.99, n as f64 * 1.98)])?;
+        validate_quantiles(&quantiles, [(0.5, expected[0]), (0.99, expected[1])])?;
     } else if options.scenario == "exact" {
-        let exact_at = |q: f64| ((n * 2 - 1) as f64 * q).round() + 1.0;
-        let expected = [("0.5", exact_at(0.5)), ("0.99", exact_at(0.99))];
-        for (quantile, expected) in expected {
+        for (quantile, expected) in [("0.5", expected[0]), ("0.99", expected[1])] {
             let actual = quantiles
                 .iter()
                 .find_map(|(label, value)| (label == quantile).then_some(*value))
@@ -762,6 +954,13 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
         let manifest = DemoManifest {
             parent_pid: std::process::id(),
             points_per_source: n,
+            traffic_mode: if options.semantic_traffic {
+                "semantic"
+            } else {
+                "sequential"
+            },
+            generator_threads: options.generator_threads,
+            traffic_seed: TRAFFIC_SEED,
             processors,
         };
         fs::write(
@@ -780,7 +979,28 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
 
 fn main() {
     let args = env::args_os().skip(1).collect::<Vec<_>>();
-    if args.first().is_some_and(|a| a == WORKER_ARG) {
+    if args.first().is_some_and(|a| a == "--generate") {
+        if args.len() != 5 {
+            eprintln!("usage: --generate START END OUTPUT THREADS");
+            std::process::exit(2);
+        }
+        let start: u64 = args[1].to_string_lossy().parse().expect("start");
+        let end: u64 = args[2].to_string_lossy().parse().expect("end");
+        let output = PathBuf::from(&args[3]);
+        let threads: usize = args[4].to_string_lossy().parse().expect("threads");
+        let started = Instant::now();
+        let cpu_start = cpu_jiffies();
+        let pdata = generated_input(start, end, threads, true);
+        let serialization_start = Instant::now();
+        write_otlp(&output, pdata).expect("write generated traffic");
+        write_stage_metrics(
+            &output,
+            started,
+            cpu_start,
+            serialization_start.elapsed().as_nanos(),
+        )
+        .expect("write generator metrics");
+    } else if args.first().is_some_and(|a| a == WORKER_ARG) {
         if args.len() < 5 {
             eprintln!("usage: {WORKER_ARG} ROLE INPUT... OUTPUT TRACE");
             std::process::exit(2);
