@@ -65,6 +65,7 @@ fn run_scenario(scenario: &str, points: u64) -> (PathBuf, Value) {
 #[test]
 fn raw_baseline_uses_four_processes_and_preserves_every_signal() {
     let (dir, manifest) = run_scenario("raw", 100);
+    assert!(manifest["pipeline_elapsed_nanoseconds"].as_u64().unwrap() > 0);
     assert_eq!(read_observations(&dir.join("out.otlp")).len(), 200);
     let processors = manifest["processors"].as_array().unwrap();
     assert_eq!(processors.len(), 4);
@@ -106,6 +107,7 @@ fn exact_baseline_uses_four_processes_and_returns_exact_quantiles() {
 fn semantic_traffic_uses_generator_processes_and_records_stage_resources() {
     let dir = unique_dir();
     fs::create_dir_all(&dir).unwrap();
+    let manifest_path = dir.join("result.json");
     let output = Command::new(env!("CARGO_BIN_EXE_asap-otap-demo"))
         .args([
             "--scenario",
@@ -118,6 +120,8 @@ fn semantic_traffic_uses_generator_processes_and_records_stage_resources() {
             "1000",
             "--output-dir",
             dir.to_str().unwrap(),
+            "--result-manifest",
+            manifest_path.to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -126,11 +130,15 @@ fn semantic_traffic_uses_generator_processes_and_records_stage_resources() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let manifest: Value = serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+    assert!(manifest["pipeline_elapsed_nanoseconds"].as_u64().unwrap() > 0);
+    assert!(manifest["validation_elapsed_nanoseconds"].as_u64().unwrap() > 0);
     for stage in ["a", "b", "sa", "sb", "merged", "out"] {
         let metric: Value =
             serde_json::from_slice(&fs::read(dir.join(format!("{stage}.metrics.json"))).unwrap())
                 .unwrap();
         assert!(metric["elapsed_nanoseconds"].as_u64().unwrap() > 0);
+        assert!(metric["cpu_nanoseconds"].as_u64().unwrap() > 0);
         assert!(metric["output_bytes"].as_u64().unwrap() > 0);
     }
 }

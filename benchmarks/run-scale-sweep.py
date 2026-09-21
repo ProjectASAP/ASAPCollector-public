@@ -42,12 +42,16 @@ def measure(binary, output, points, scenario, repeat, generator_cores, processor
     start = time.monotonic_ns()
     completed = subprocess.run(command, env=environment, capture_output=True, text=True,
                                timeout=300, check=False)
-    elapsed = (time.monotonic_ns() - start) / 1e9
+    process_wall_seconds = (time.monotonic_ns() - start) / 1e9
     (run_dir / "stdout.txt").write_text(completed.stdout)
     (run_dir / "stderr.txt").write_text(completed.stderr)
     if completed.returncode:
         raise RuntimeError(f"{scenario}, {points} per source, repetition {repeat}: "
                            f"exit {completed.returncode}; {completed.stderr[-2000:]}")
+    manifest = json.loads((run_dir / "result.json").read_text())
+    elapsed = manifest["pipeline_elapsed_nanoseconds"] / 1e9
+    if elapsed <= 0 or elapsed > process_wall_seconds:
+        raise RuntimeError(f"invalid pipeline duration: {elapsed} seconds")
     stages = {}
     for name, role in (("a", "traffic_a"), ("b", "traffic_b"), ("sa", "branch_a"),
                        ("sb", "branch_b"), ("merged", "merge"), ("out", "estimate")):
@@ -61,6 +65,8 @@ def measure(binary, output, points, scenario, repeat, generator_cores, processor
         "scenario": scenario,
         "repeat": repeat,
         "elapsed_seconds": elapsed,
+        "process_wall_seconds": process_wall_seconds,
+        "validation_seconds": manifest["validation_elapsed_nanoseconds"] / 1e9,
         "signals_per_second": points * 2 / elapsed,
         "stages": stages,
     }
@@ -103,7 +109,6 @@ def aggregate_resources(runs):
     for run in runs:
         for role, metrics in run["stages"].items():
             groups.setdefault((run["points_per_source"], run["scenario"], role), []).append(metrics)
-    ticks = os.sysconf("SC_CLK_TCK")
     rows = []
     for (points, scenario, role), samples in sorted(groups.items()):
         rows.append({
@@ -112,7 +117,7 @@ def aggregate_resources(runs):
             "scenario": scenario,
             "component": role,
             "repetitions": len(samples),
-            "median_cpu_seconds": statistics.median(sample["cpu_jiffies"] / ticks for sample in samples),
+            "median_cpu_seconds": statistics.median(sample["cpu_nanoseconds"] / 1e9 for sample in samples),
             "median_peak_rss_mib": statistics.median(sample["peak_rss_kib"] / 1024 for sample in samples),
             "median_elapsed_seconds": statistics.median(sample["elapsed_nanoseconds"] / 1e9 for sample in samples),
             "median_serialization_seconds": statistics.median(sample["serialization_nanoseconds"] / 1e9 for sample in samples),

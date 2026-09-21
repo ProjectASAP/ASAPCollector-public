@@ -333,6 +333,7 @@ dependencies = [
  "async-trait",
  "criterion",
  "humantime-serde",
+ "libc",
  "linkme",
  "otel-arrow-dfe-config",
  "otel-arrow-dfe-core-nodes",

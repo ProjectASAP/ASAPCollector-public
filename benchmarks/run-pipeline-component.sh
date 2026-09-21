@@ -27,18 +27,20 @@ completed_iterations=0
 signals=0
 transport_bytes=0
 started_ns=$(date +%s%N)
+last_completed_ns=$started_ns
 stop_requested=0
 current_child=
 
 write_summary() {
   local finished_ns elapsed_ns
   finished_ns=$(date +%s%N)
-  elapsed_ns=$((finished_ns - started_ns))
+  elapsed_ns=$((last_completed_ns - started_ns))
   {
     echo "iterations=$completed_iterations"
     echo "input_signals=$signals"
     echo "serialized_transport_bytes=$transport_bytes"
     echo "elapsed_nanoseconds=$elapsed_ns"
+    echo "run_wall_nanoseconds=$((finished_ns - started_ns))"
     if (( elapsed_ns > 0 )); then
       echo "signals_per_second=$((signals * 1000000000 / elapsed_ns))"
       echo "serialized_bytes_per_second=$((transport_bytes * 1000000000 / elapsed_ns))"
@@ -93,5 +95,6 @@ while (( stop_requested == 0 )); do
     artifact_bytes=$(wc -c < "$run_dir/$artifact")
     transport_bytes=$((transport_bytes + artifact_bytes))
   done
+  last_completed_ns=$(date +%s%N)
   write_summary
 done

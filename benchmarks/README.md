@@ -88,8 +88,10 @@ resource labels, exact p50/p99 results, and the KLL 5% accuracy bound.
 The nightly workflow compiles first, outside measurement. During its observation
 window, OTAP's orchestrator samples CPU and RSS from the Docker cgroup. Each
 component writes completed input count, elapsed time, and signals/s below
-`benchmark-results/{raw,exact,kll}/throughput.env`; the orchestrator writes its
-three process reports under `benchmark-results/`. They are uploaded by CI.
+`benchmark-results/{raw,exact,kll}/throughput.env`. The rate uses only completed
+batches; `run_wall_nanoseconds` records the full run duration. An interrupted
+partial batch does not dilute the rate. The orchestrator writes three process
+reports under `benchmark-results/`. They are uploaded by CI.
 The per-role `stages.json` and `stages.jsonl` files report generator, create,
 merge, and estimate resources separately. `kll-isolated-stages.txt` contains
 Criterion throughput for KLL creation, merge, p50/p99 estimation, and ASAPv1
@@ -134,7 +136,9 @@ Choose sizes and repetitions with `--points 65536 262144 524288` and
   retains every individual run, and `config.json` records CPU sets and sizes.
 
 Each scale point measures one complete batch, including traffic generation,
-OTAP startup, file boundaries, and backend validation. The charts describe
+OTAP startup, file boundaries, and backend decoding. Reference sorting and
+quantile validation run after the timed pipeline; raw skips reference sorting.
+`runs.json` also records process wall time and validation time. The charts describe
 this file-backed demo's scaling. Peak RSS is per process and should not be
 summed as a simultaneous container peak because merge and estimate run after
 the creators finish.

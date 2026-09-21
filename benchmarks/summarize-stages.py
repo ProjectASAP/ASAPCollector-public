@@ -2,7 +2,6 @@
 """Summarize per-process metrics from completed benchmark iterations."""
 
 import json
-import os
 import sys
 from collections import defaultdict
 
@@ -11,8 +10,7 @@ def summarize(records):
     groups = defaultdict(list)
     for record in records:
         groups[record["stage"]].append(record)
-    result = {"schema_version": 1, "stages": {}}
-    ticks = os.sysconf("SC_CLK_TCK")
+    result = {"schema_version": 2, "stages": {}}
     for stage, items in sorted(groups.items()):
         elapsed = sum(item["elapsed_nanoseconds"] for item in items) / 1e9
         if stage in ("a", "b", "sa", "sb"):
@@ -32,7 +30,7 @@ def summarize(records):
             "input_per_second": round(inputs / elapsed, 2) if elapsed else 0,
             "equivalent_signals_per_second": round(equivalent_signals / elapsed, 2) if elapsed else 0,
             "process_seconds": round(elapsed, 6),
-            "cpu_seconds": round(sum(item["cpu_jiffies"] for item in items) / ticks, 6),
+            "cpu_seconds": round(sum(item["cpu_nanoseconds"] for item in items) / 1e9, 6),
             "peak_rss_kib": max(item["peak_rss_kib"] for item in items),
             "serialization_seconds": round(sum(item["serialization_nanoseconds"] for item in items) / 1e9, 6),
             "output_bytes": sum(item["output_bytes"] for item in items),

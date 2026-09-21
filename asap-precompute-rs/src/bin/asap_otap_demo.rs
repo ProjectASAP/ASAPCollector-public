@@ -148,32 +148,28 @@ fn generated_input(start: u64, end: u64, threads: usize, semantic: bool) -> Otap
 #[derive(Serialize)]
 struct StageMetrics {
     elapsed_nanoseconds: u128,
-    cpu_jiffies: u64,
+    cpu_nanoseconds: u128,
     peak_rss_kib: u64,
     serialization_nanoseconds: u128,
     output_bytes: u64,
 }
 
-fn cpu_jiffies() -> u64 {
-    let stat = fs::read_to_string("/proc/self/stat").unwrap_or_default();
-    let fields = stat
-        .rsplit_once(") ")
-        .map(|(_, tail)| tail.split_whitespace().collect::<Vec<_>>())
-        .unwrap_or_default();
-    fields
-        .get(11)
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0)
-        + fields
-            .get(12)
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0)
+fn process_cpu_nanoseconds() -> Result<u128, String> {
+    let mut stamp = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    if unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, stamp.as_mut_ptr()) } != 0 {
+        return Err(format!(
+            "read process CPU clock: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let stamp = unsafe { stamp.assume_init() };
+    Ok(stamp.tv_sec as u128 * 1_000_000_000 + stamp.tv_nsec as u128)
 }
 
 fn write_stage_metrics(
     output: &Path,
     start: Instant,
-    cpu_start: u64,
+    cpu_start: u128,
     serialization_nanoseconds: u128,
 ) -> Result<(), String> {
     let status = fs::read_to_string("/proc/self/status").map_err(|e| e.to_string())?;
@@ -185,7 +181,7 @@ fn write_stage_metrics(
         .unwrap_or(0);
     let metrics = StageMetrics {
         elapsed_nanoseconds: start.elapsed().as_nanos(),
-        cpu_jiffies: cpu_jiffies().saturating_sub(cpu_start),
+        cpu_nanoseconds: process_cpu_nanoseconds()?.saturating_sub(cpu_start),
         peak_rss_kib,
         serialization_nanoseconds,
         output_bytes: fs::metadata(output).map_err(|e| e.to_string())?.len(),
@@ -579,7 +575,7 @@ fn run_worker(
     trace: PathBuf,
 ) -> Result<(), String> {
     let stage_start = Instant::now();
-    let cpu_start = cpu_jiffies();
+    let cpu_start = process_cpu_nanoseconds()?;
     INPUTS
         .set(inputs)
         .map_err(|_| "inputs already initialized".to_owned())?;
@@ -751,6 +747,8 @@ struct ProcessorRun {
 struct DemoManifest {
     parent_pid: u32,
     points_per_source: u64,
+    pipeline_elapsed_nanoseconds: u128,
+    validation_elapsed_nanoseconds: u128,
     traffic_mode: &'static str,
     generator_threads: usize,
     traffic_seed: u64,
@@ -836,6 +834,7 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
     let out = p("out.otlp");
     let n = options.points_per_source;
     let exe = env::current_exe().map_err(|e| e.to_string())?;
+    let pipeline_start = Instant::now();
     if options.semantic_traffic {
         let ga = spawn_generator(&exe, 1, n, &ia, options.generator_threads);
         let gb = spawn_generator(&exe, n + 1, n * 2, &ib, options.generator_threads);
@@ -896,6 +895,8 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
     let decoded = decode_pdata_to_observations(read_otlp(&out)?)
         .map_err(|e| e.to_string())?
         .observations;
+    let pipeline_elapsed_nanoseconds = pipeline_start.elapsed().as_nanos();
+    let validation_start = Instant::now();
     if options.scenario == "raw" && decoded.len() != (n * 2) as usize {
         return Err(format!(
             "raw backend received {} of {} signals",
@@ -903,7 +904,7 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
             n * 2
         ));
     }
-    let mut quantiles = Vec::with_capacity(decoded.len());
+    let mut quantiles = Vec::with_capacity(2);
     for o in &decoded {
         if options.scenario == "raw" {
             continue;
@@ -927,33 +928,38 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
         }
         quantiles.push((q.to_owned(), o.value.float));
     }
-    let expected = if options.semantic_traffic {
-        let mut values = (1..=n * 2).map(traffic_value).collect::<Vec<_>>();
-        values.sort_by(f64::total_cmp);
-        let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
-        [at(0.5), at(0.99)]
-    } else {
-        [n as f64 + 1.0, ((n * 2 - 1) as f64 * 0.99).round() + 1.0]
-    };
-    if options.scenario == "kll" {
-        validate_quantiles(&quantiles, [(0.5, expected[0]), (0.99, expected[1])])?;
-    } else if options.scenario == "exact" {
-        for (quantile, expected) in [("0.5", expected[0]), ("0.99", expected[1])] {
-            let actual = quantiles
-                .iter()
-                .find_map(|(label, value)| (label == quantile).then_some(*value))
-                .ok_or_else(|| format!("missing exact quantile {quantile}"))?;
-            if actual != expected {
-                return Err(format!(
-                    "exact quantile {quantile}: got {actual}, expected {expected}"
-                ));
+    if options.scenario != "raw" {
+        let expected = if options.semantic_traffic {
+            let mut values = (1..=n * 2).map(traffic_value).collect::<Vec<_>>();
+            values.sort_by(f64::total_cmp);
+            let at = |q: f64| values[((values.len() - 1) as f64 * q).round() as usize];
+            [at(0.5), at(0.99)]
+        } else {
+            [n as f64 + 1.0, ((n * 2 - 1) as f64 * 0.99).round() + 1.0]
+        };
+        if options.scenario == "kll" {
+            validate_quantiles(&quantiles, [(0.5, expected[0]), (0.99, expected[1])])?;
+        } else {
+            for (quantile, expected) in [("0.5", expected[0]), ("0.99", expected[1])] {
+                let actual = quantiles
+                    .iter()
+                    .find_map(|(label, value)| (label == quantile).then_some(*value))
+                    .ok_or_else(|| format!("missing exact quantile {quantile}"))?;
+                if actual != expected {
+                    return Err(format!(
+                        "exact quantile {quantile}: got {actual}, expected {expected}"
+                    ));
+                }
             }
         }
     }
+    let validation_elapsed_nanoseconds = validation_start.elapsed().as_nanos();
     if let Some(path) = options.result_manifest {
         let manifest = DemoManifest {
             parent_pid: std::process::id(),
             points_per_source: n,
+            pipeline_elapsed_nanoseconds,
+            validation_elapsed_nanoseconds,
             traffic_mode: if options.semantic_traffic {
                 "semantic"
             } else {
@@ -989,7 +995,7 @@ fn main() {
         let output = PathBuf::from(&args[3]);
         let threads: usize = args[4].to_string_lossy().parse().expect("threads");
         let started = Instant::now();
-        let cpu_start = cpu_jiffies();
+        let cpu_start = process_cpu_nanoseconds().expect("read generator CPU clock");
         let pdata = generated_input(start, end, threads, true);
         let serialization_start = Instant::now();
         write_otlp(&output, pdata).expect("write generated traffic");
