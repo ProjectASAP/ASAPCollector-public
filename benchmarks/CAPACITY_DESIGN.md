@@ -86,6 +86,20 @@ values for those controls. The optimized branch feeds deterministic indices
 directly into a batch update path without allocating an intermediate value
 vector.
 
+## Generator provisioning
+
+Generator capacity is provisioned before comparing processors. Starting at four
+cores, repeat the high-load boundary with 8 and 16 generator cores. Stop when
+adding generator cores no longer increases backend-validated throughput and
+generator CPU/network are no longer the first saturated resources. The final
+Raw, Exact, and fixed-`k=400` KLL comparison uses the same largest required
+generator pool; downstream components remain fixed at one exclusive core each.
+
+Offered traffic is increased until each scenario has at least one unsustainable
+point beyond its throughput plateau. Exact may reach that point with fewer
+generator cores, but its reported comparison is rerun with the common generator
+pool so source provisioning cannot favor one scenario.
+
 ## Presentation
 
 The report must show:
