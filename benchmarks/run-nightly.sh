@@ -1,55 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-otap_rev=${OTAP_BENCH_REV:-3e85c3460361446ebfce99e9f35fffd2dd5ab740}
-framework_dir=${OTAP_PIPELINE_PERF_DIR:-"$repo_root/.cache/otel-arrow-$otap_rev"}
-python_deps=${OTAP_PIPELINE_PERF_PYTHON_DEPS:-"$repo_root/.cache/pipeline-perf-python"}
+cd "$repo_root"
 python_bin=${PYTHON:-python3}
-result_root="$repo_root/benchmark-results"
-
-if ! "$python_bin" -c 'import sys; raise SystemExit(sys.version_info < (3, 13))'; then
-  echo "OTAP's pinned benchmark dependencies require Python 3.13 or newer." >&2
-  echo "Set PYTHON to a compatible interpreter." >&2
-  exit 2
-fi
-
-# Docker creates a missing bind-mount source as root. Create it as the caller so
-# the host-side orchestrator can write process reports alongside container data.
-mkdir -p "$result_root"
-
-cargo build --manifest-path "$repo_root/asap-precompute-rs/Cargo.toml" \
-  --release --features otap-engine --bin asap-otap-demo
-cargo bench --manifest-path "$repo_root/asap-precompute-rs/Cargo.toml" \
+cargo_target_dir=${CARGO_TARGET_DIR:-"$repo_root/asap-precompute-rs/target"}
+read -r -a docker_command <<< "${DOCKER_COMMAND:-docker}"
+mkdir -p benchmark-results
+cargo build --manifest-path asap-precompute-rs/Cargo.toml \
+  --release --features stream-benchmark --bin asap-stream-bench
+cargo bench --manifest-path asap-precompute-rs/Cargo.toml \
   --features otap-engine --bench asap_sketch_pipeline -- \
   kll_isolated_stages --sample-size 10 --warm-up-time 1 --measurement-time 1 \
-  | tee "$result_root/kll-isolated-stages.txt"
-docker_context="$repo_root/.cache/asap-benchmark-image"
-mkdir -p "$docker_context"
-cp "$repo_root/asap-precompute-rs/target/release/asap-otap-demo" "$docker_context/asap-otap-demo"
-strip --strip-debug "$docker_context/asap-otap-demo"
-cp "$repo_root/benchmarks/run-pipeline-component.sh" "$repo_root/benchmarks/summarize-stages.py" "$docker_context/"
-docker build -f "$repo_root/benchmarks/Dockerfile" \
-  -t asap-quantile-benchmark:local "$docker_context"
-
-if [[ ! -f "$framework_dir/tools/pipeline_perf_test/orchestrator/run_orchestrator.py" ]]; then
-  mkdir -p "$(dirname "$framework_dir")"
-  git clone --filter=blob:none --no-checkout \
-    https://github.com/open-telemetry/otel-arrow.git "$framework_dir"
-  git -C "$framework_dir" checkout "$otap_rev"
-fi
-
-if ! PYTHONPATH="$python_deps${PYTHONPATH:+:$PYTHONPATH}" "$python_bin" -c \
-  'import docker, duckdb, pandas, pyarrow, pydantic, yaml' 2>/dev/null; then
-  "$python_bin" -m pip install --quiet --target "$python_deps" \
-    -r "$framework_dir/tools/pipeline_perf_test/orchestrator/requirements.txt"
-fi
-
-cd "$repo_root"
-PYTHONPATH="$python_deps${PYTHONPATH:+:$PYTHONPATH}" \
-"$python_bin" "$framework_dir/tools/pipeline_perf_test/orchestrator/run_orchestrator.py" \
-  --config "$repo_root/benchmarks/nightly/asap-sketch.yaml"
-
-"$python_bin" "$repo_root/benchmarks/run-scale-sweep.py" \
-  --binary "$docker_context/asap-otap-demo" \
-  --output "$result_root/scale-sweep"
+  | tee benchmark-results/kll-isolated-stages.txt
+context=$(mktemp -d)
+trap 'rm -rf "$context"' EXIT
+cp "$cargo_target_dir/release/asap-stream-bench" "$context/"
+strip --strip-debug "$context/asap-stream-bench"
+"${docker_command[@]}" build -f benchmarks/stream.Dockerfile -t asap-stream-benchmark:local "$context"
+"$python_bin" benchmarks/run-streaming.py --docker-command "${DOCKER_COMMAND:-docker}" --output benchmark-results/streaming "$@"

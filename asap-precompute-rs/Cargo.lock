@@ -345,6 +345,7 @@ dependencies = [
  "otel-arrow-dfe-telemetry",
  "proptest",
  "prost 0.13.5",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -4244,6 +4245,7 @@ checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",

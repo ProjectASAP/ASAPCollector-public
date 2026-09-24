@@ -1,5 +1,14 @@
 # ASAP sketch performance benchmarks
 
+**The default nightly evaluation now uses persistent OTLP/HTTP streaming across
+seven containers, real data-interface RX/TX counters, bounded backpressure, and
+backend-validated throughput. See [STREAMING.md](STREAMING.md) for the current
+setup, bandwidth profiles, commands, and artifacts.**
+
+The remainder of this document describes the historical file-backed batch
+baseline. Run it with `./benchmarks/run-file-nightly.sh`; its throughput figures
+are not directly comparable to the streaming evaluation.
+
 The nightly benchmark runs with OTAP's official Python `pipeline_perf_test`
 orchestrator. It deploys raw, exact-quantile, and ASAP KLL scenarios as
 identically configured Docker containers, observes each cgroup with the
@@ -19,7 +28,7 @@ Run the official-style nightly suite locally with Docker and Python 3.13 (the
 runner fetches the pinned OTAP orchestrator revision on first use):
 
 ```sh
-./benchmarks/run-nightly.sh
+./benchmarks/run-file-nightly.sh
 ```
 
 ## Compared topologies

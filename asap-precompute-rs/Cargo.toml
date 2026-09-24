@@ -49,7 +49,8 @@ async-trait = { version = "0.1", optional = true }
 humantime-serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
-tokio = { version = "1", features = ["sync"], optional = true }
+tokio = { version = "1", features = ["sync", "rt", "time", "net"], optional = true }
+reqwest = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -89,10 +90,18 @@ otap-engine = [
     "dep:tokio",
 ]
 
+# Network benchmark only: do not impose a TLS provider on library consumers.
+stream-benchmark = ["otap-engine", "dep:reqwest", "otel-arrow-dfe-otap/crypto-ring"]
+
 [[bin]]
 name = "asap-otap-demo"
 path = "src/bin/asap_otap_demo.rs"
 required-features = ["otap-engine"]
+
+[[bin]]
+name = "asap-stream-bench"
+path = "src/bin/asap_stream_bench.rs"
+required-features = ["stream-benchmark"]
 
 [[bench]]
 name = "asap_sketch_pipeline"
