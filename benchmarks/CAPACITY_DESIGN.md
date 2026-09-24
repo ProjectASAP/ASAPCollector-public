@@ -51,10 +51,15 @@ A configuration is sustainable when the median across repetitions satisfies all 
 
 1. delivery ratio is at least 0.95;
 2. backlog grows by no more than one paired window during observation;
-3. completed-window p99 latency is at most 5,000 ms;
+3. completed-window p99 latency is at most the larger of 5,000 ms and twice the
+   theoretical `window size / offered rate` fill time;
 4. every repetition passes end-to-end correctness validation.
 
-The thresholds are explicit CLI options. The default run uses three repetitions and reports medians. A rate grid should include at least one sustainable and one unsustainable point for exact and KLL; extend the grid when a capacity boundary is not bracketed.
+The base thresholds are explicit CLI options. Observation time is automatically
+extended beyond 30 seconds when needed to cover at least three windows at the
+offered rate. The default run uses three repetitions and reports medians. A rate
+grid should include at least one sustainable and one unsustainable point for
+exact and KLL; extend the grid when a capacity boundary is not bracketed.
 
 ## Capacity and speedup
 

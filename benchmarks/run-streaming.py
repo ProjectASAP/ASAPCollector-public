@@ -53,6 +53,10 @@ class Run:
     def __init__(self, args, scenario, rate, repeat, traffic_rate, window_points):
         self.args, self.scenario, self.rate = args, scenario, rate
         self.generator_core_count, self.traffic_rate, self.window_points = args.generator_cores, traffic_rate, window_points
+        self.observation_seconds = max(
+            args.duration,
+            args.minimum_observed_windows * window_points / traffic_rate,
+        )
         self.root = args.output / f"traffic-{traffic_rate}-sps" / f"window-{window_points}" / f"{rate:g}mbit" / scenario / str(repeat)
         self.root.mkdir(parents=True, exist_ok=True)
         self.prefix = "asap-stream-" + uuid.uuid4().hex[:10]
@@ -178,7 +182,7 @@ class Run:
                   "scenario": self.scenario, "branch_egress_mbit_per_second": self.rate,
                   "target_signals_per_second_per_source": self.traffic_rate,
                   "window_points_per_source": self.window_points, "batch_size": self.args.batch_size,
-                  "warmup_seconds": self.args.warmup, "observation_seconds": self.args.duration,
+                  "warmup_seconds": self.args.warmup, "observation_seconds": self.observation_seconds,
                   "generator_cores": generators, "component_cores": component_cores,
                   "measurement_clock": "CLOCK_MONOTONIC, shared host kernel", "max_inflight_windows": 4, "pdata_channel_capacity": 8, "exporter_max_in_flight": 1,
                   "transport": "standard OTLP/HTTP protobuf, uncompressed, persistent connections",
@@ -216,14 +220,14 @@ class Run:
         (self.root / "perf-version.txt").write_text(version)
         command = shlex.split(self.args.perf_command) + ["record", "-e", "cpu-clock", "-F", "199",
                   "--call-graph", "dwarf,16384", "-p", ",".join(map(str, pids.values())),
-                  "-o", str(self.root / "perf.data"), "--", "sleep", str(self.args.duration)]
+                  "-o", str(self.root / "perf.data"), "--", "sleep", str(self.observation_seconds)]
         (self.root / "perf-command.json").write_text(json.dumps(command) + "\n")
         self.profiler = subprocess.Popen(command, stdout=self.profile_log, stderr=self.profile_log)
 
     def finish_profile(self):
         if self.profiler is None:
             return
-        code = self.profiler.wait(timeout=self.args.duration + 15)
+        code = self.profiler.wait(timeout=self.observation_seconds + 15)
         self.profiler = None
         self.profile_log.close()
         if code:
@@ -276,7 +280,7 @@ class Run:
         # Ordinary throughput runs continue without a warmup drain.
         self.start_profile()
         before = self.statuses()
-        deadline = time.monotonic() + self.args.duration
+        deadline = time.monotonic() + self.observation_seconds
         while time.monotonic() < deadline:
             time.sleep(min(self.args.sample_interval, max(0, deadline - time.monotonic())))
             self.healthy()
@@ -438,6 +442,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--warmup", type=float, default=5)
     parser.add_argument("--duration", type=float, default=30)
+    parser.add_argument("--minimum-observed-windows", type=float, default=3,
+                        help="extend observation time to cover at least this many windows at the offered rate")
     parser.add_argument("--sample-interval", type=float, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--memory", default="1g")
@@ -451,11 +457,16 @@ def main():
     parser.add_argument("--sustainable-min-delivery", type=float, default=0.95)
     parser.add_argument("--sustainable-max-backlog-growth-windows", type=float, default=1.0)
     parser.add_argument("--sustainable-max-p99-ms", type=float, default=5000)
+    parser.add_argument("--resume", action="store_true", help="reuse completed runs from output/runs.json")
     args = parser.parse_args()
-    if any(points < 1 for points in args.window_points) or args.batch_size < 1 or any(args.batch_size > points for points in args.window_points) or args.generator_cores < 1 or any(rate < 1 for rate in args.traffic_rates) or not all(math.isfinite(t) for t in (args.warmup, args.duration, args.sample_interval)) or args.warmup < 0 or args.duration <= 0 or args.sample_interval <= 0 or args.repetitions < 1 or any(not math.isfinite(r) or r < 0 for r in args.rates_mbit) or not 0 < args.sustainable_min_delivery <= 1 or args.sustainable_max_backlog_growth_windows < 0 or args.sustainable_max_p99_ms <= 0:
+    if any(points < 1 for points in args.window_points) or args.batch_size < 1 or any(args.batch_size > points for points in args.window_points) or args.generator_cores < 1 or any(rate < 1 for rate in args.traffic_rates) or not all(math.isfinite(t) for t in (args.warmup, args.duration, args.sample_interval)) or args.warmup < 0 or args.duration <= 0 or args.minimum_observed_windows < 2 or args.sample_interval <= 0 or args.repetitions < 1 or any(not math.isfinite(r) or r < 0 for r in args.rates_mbit) or not 0 < args.sustainable_min_delivery <= 1 or args.sustainable_max_backlog_growth_windows < 0 or args.sustainable_max_p99_ms <= 0:
         parser.error("invalid benchmark sizes, times, repetitions, or rates")
     args.output.mkdir(parents=True, exist_ok=True)
-    results = []
+    runs_path = args.output / "runs.json"
+    results = json.loads(runs_path.read_text()) if args.resume and runs_path.exists() else []
+    completed_keys = {(r["target_signals_per_second_per_source"], r["window_points_per_source"],
+                       r["branch_egress_mbit_per_second"], r["scenario"], r["repeat"])
+                      for r in results}
     for traffic_rate in args.traffic_rates:
         for window_points in args.window_points:
             for rate in args.rates_mbit:
@@ -463,13 +474,17 @@ def main():
                     # Rotate scenario order to reduce systematic first/last-run bias.
                     scenarios = args.scenarios[repeat % len(args.scenarios):] + args.scenarios[:repeat % len(args.scenarios)]
                     for scenario in scenarios:
+                        key = (traffic_rate, window_points, rate, scenario, repeat)
+                        if key in completed_keys:
+                            print(f"resume: skipping completed traffic={traffic_rate} w={window_points} {scenario} repeat={repeat}", flush=True)
+                            continue
                         run = Run(args, scenario, rate, repeat, traffic_rate, window_points)
                         try:
                             run.setup()
                             report = run.observe()
                             report["repeat"] = repeat
                             results.append(report)
-                            (args.output / "runs.json").write_text(json.dumps(results, indent=2) + "\n")
+                            runs_path.write_text(json.dumps(results, indent=2) + "\n")
                             print(f"traffic={traffic_rate}/s/source w={window_points} {scenario} cap={rate:g} Mbit/s repeat={repeat}: {report['signals_per_second']:,.0f} signals/s, p99={report['window_latency_p99_ms']} ms, loss=0", flush=True)
                         finally:
                             run.close()
@@ -486,10 +501,15 @@ def main():
                                  "min_signals_per_second": min(s["signals_per_second"] for s in samples),
                                  "max_signals_per_second": max(s["signals_per_second"] for s in samples),
                                  "median_window_latency_p99_ms": statistics.median(s["window_latency_p99_ms"] for s in samples)})
+                    latency_limit_ms = max(
+                        args.sustainable_max_p99_ms,
+                        2000 * window_points / traffic_rate,
+                    )
+                    rows[-1]["sustainable_p99_limit_ms"] = latency_limit_ms
                     rows[-1]["sustainable"] = (
                         rows[-1]["median_delivery_ratio"] >= args.sustainable_min_delivery
                         and rows[-1]["median_backlog_growth_windows"] <= args.sustainable_max_backlog_growth_windows
-                        and rows[-1]["median_window_latency_p99_ms"] <= args.sustainable_max_p99_ms
+                        and rows[-1]["median_window_latency_p99_ms"] <= latency_limit_ms
                         and all(s["correctness"] == "passed" for s in samples))
     by_key = {(row["target_signals_per_second_per_source"], row["window_points_per_source"], row["branch_egress_mbit_per_second"], row["scenario"]): row for row in rows}
     for row in rows:
