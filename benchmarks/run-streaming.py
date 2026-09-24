@@ -184,7 +184,7 @@ class Run:
                   "window_points_per_source": self.window_points, "batch_size": self.args.batch_size,
                   "warmup_seconds": self.args.warmup, "observation_seconds": self.observation_seconds,
                   "generator_cores": generators, "component_cores": component_cores,
-                  "measurement_clock": "CLOCK_MONOTONIC, shared host kernel", "max_inflight_windows": 4, "pdata_channel_capacity": 8, "exporter_max_in_flight": 1,
+                  "measurement_clock": "CLOCK_MONOTONIC, shared host kernel", "max_source_skew_windows": 64, "pdata_channel_capacity": 8, "exporter_max_in_flight": 1,
                   "transport": "standard OTLP/HTTP protobuf, uncompressed, persistent connections",
                   "data_interfaces": self.data_ifaces, "container_memory_limit": self.args.memory,
                   "image": self.args.image, "image_id": json.loads(self.command("image", "inspect", self.args.image))[0]["Id"],

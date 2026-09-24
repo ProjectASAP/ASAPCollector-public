@@ -62,7 +62,7 @@ and latency accounting; their overhead is included for all scenarios.
 | Sources | 2 OTAP traffic generator processes, 2 pipeline workers each |
 | Batch | 1,024 observations per OTLP request |
 | Window sweep | 16,384, 65,536, and 262,144 observations per source |
-| In-flight bound | 4 windows end-to-end, 8 pdata channel slots |
+| Source-skew bound | 64 windows; 8 pdata channel slots per edge |
 | Exporter concurrency | 1 request per worker, preserving per-source ordering |
 | Warm-up / measured interval | 5 seconds / at least 30 seconds and 3 theoretical windows, uninterrupted traffic |
 | Offered traffic sweep | 10k, 25k, 50k, 100k, 200k, 300k, and 400k signals/s per source |

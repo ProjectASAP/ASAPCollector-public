@@ -10,9 +10,9 @@ use asap_precompute_rs::{
 use otel_arrow_dfe_otap::pdata::OtapPdata;
 use std::collections::BTreeMap;
 
-// Generator containers start sequentially in the harness. Bound the temporary
-// source skew while allowing the first source to run until its peer is ready.
-pub const MAX_PENDING: u64 = 8;
+// Independent official generators can drift under high load. Keep the skew
+// explicitly bounded while allowing short scheduler/exporter bursts.
+pub const MAX_PENDING: u64 = 64;
 pub const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 pub fn value(index: u64) -> f64 {
     let mut x = index.wrapping_add(SEED);
