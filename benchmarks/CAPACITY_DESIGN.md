@@ -79,6 +79,13 @@ KLL/Exact capacity speedup(W) = capacity(KLL, W) / capacity(Exact, W)
 
 Raw capacity is reported as the transport ceiling. `KLL/Raw` may describe how closely KLL approaches that ceiling, but it is not called an algorithm speedup because raw does not compute quantiles.
 
+KLL accuracy is fixed at `k=400`; capacity tuning must not change `k`. The
+allowed performance parameters are generator workers/cores, official generator
+strategy, and OTLP batch size. Raw, Exact, and KLL comparisons use identical
+values for those controls. The optimized branch feeds deterministic indices
+directly into a batch update path without allocating an intermediate value
+vector.
+
 ## Presentation
 
 The report must show:

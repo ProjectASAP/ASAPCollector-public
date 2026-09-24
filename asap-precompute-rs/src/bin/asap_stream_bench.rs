@@ -346,7 +346,7 @@ fn pipeline_yaml(o: &Options) -> String {
     if o.role == "generator" {
         let rate = o.signals_per_second.div_ceil(o.generator_workers);
         return format!(
-            "nodes:\n  source:\n    type: urn:otel:receiver:traffic_generator\n    config:\n      data_source: synthetic\n      generation_strategy: fresh\n      resource_attributes:\n        - attrs: {{bench.source: '{}'}}\n      traffic_config:\n        production_mode: smooth\n        signals_per_second: {}\n        max_batch_size: {}\n        metric_weight: 1\n        trace_weight: 0\n        log_weight: 0\n        num_data_points_per_metric: 1\n  sink:\n    type: urn:otel:exporter:otlp_http\n    config:\n      endpoint: {}\n      client_pool_size: 1\n      max_in_flight: 1\n      http: {{timeout: 30s, compression: none}}\nconnections:\n  - {{from: source, to: sink}}\n",
+            "nodes:\n  source:\n    type: urn:otel:receiver:traffic_generator\n    config:\n      data_source: synthetic\n      generation_strategy: pre_generated\n      resource_attributes:\n        - attrs: {{bench.source: '{}'}}\n      traffic_config:\n        production_mode: smooth\n        signals_per_second: {}\n        max_batch_size: {}\n        metric_weight: 1\n        trace_weight: 0\n        log_weight: 0\n        num_data_points_per_metric: 1\n  sink:\n    type: urn:otel:exporter:otlp_http\n    config:\n      endpoint: {}\n      client_pool_size: 1\n      max_in_flight: 1\n      http: {{timeout: 30s, compression: none}}\nconnections:\n  - {{from: source, to: sink}}\n",
             o.source, rate, o.batch, o.endpoint
         );
     }

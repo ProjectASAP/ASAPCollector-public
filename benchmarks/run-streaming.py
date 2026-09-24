@@ -191,6 +191,7 @@ class Run:
                   "profile_cpu": self.args.profile_cpu, "account_cpu": self.args.account_cpu or self.args.profile_cpu,
                   "perf_command": self.args.perf_command,
                   "traffic_seed": "0x9e3779b97f4a7c15", "kll_k": 400,
+                  "generator_strategy": "pre_generated",
                   "input": "same deterministic two-source corpus replayed per count-aligned window"}
         (self.root / "config.json").write_text(json.dumps(config, indent=2) + "\n")
 
@@ -449,7 +450,7 @@ def main():
     parser.add_argument("--memory", default="1g")
     parser.add_argument("--traffic-rates", type=int, nargs="+", default=[10000, 25000, 50000, 100000, 200000, 300000, 400000],
                         help="target signals/s per source to sweep using OTAP's traffic_generator receiver")
-    parser.add_argument("--generator-cores", type=int, default=2,
+    parser.add_argument("--generator-cores", type=int, default=4,
                         help="OTAP traffic_generator pipeline workers per source; every downstream component always gets one dedicated CPU")
     parser.add_argument("--profile-cpu", action="store_true", help="exclusive synchronous processor thread CPU scopes")
     parser.add_argument("--account-cpu", action="store_true", help="match CPU/input boundaries with warmup and final drains; implied by --profile-cpu")

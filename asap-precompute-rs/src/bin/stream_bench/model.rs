@@ -144,7 +144,8 @@ pub struct InputNormalizer {
 }
 pub struct NormalizedBatch {
     pub meta: Meta,
-    pub values: Vec<f64>,
+    pub first_index: u64,
+    pub count: usize,
 }
 impl InputNormalizer {
     pub fn new(source: usize, points: usize, batch: usize) -> Self {
@@ -164,11 +165,9 @@ impl InputNormalizer {
                 self.started_ns = now_ns;
             }
             let take = count.min(self.batch).min(self.points - self.offset);
-            let values = (self.offset..self.offset + take)
-                .map(|index| value((self.source * self.points + index + 1) as u64))
-                .collect::<Vec<_>>();
             batches.push(NormalizedBatch {
-                values,
+                first_index: (self.source * self.points + self.offset + 1) as u64,
+                count: take,
                 meta: Meta {
                     window: self.window,
                     source: self.source,
@@ -378,7 +377,10 @@ impl Processor {
             return Err("normalized input is only valid for branch processors".into());
         }
         if self.scenario == "raw" {
-            return Ok(vec![values_pdata(&batch.values, batch.meta)?]);
+            let values = (0..batch.count)
+                .map(|offset| value(batch.first_index + offset as u64))
+                .collect::<Vec<_>>();
+            return Ok(vec![values_pdata(&values, batch.meta)?]);
         }
         let meta = batch.meta;
         if meta.window != self.next[meta.source] {
@@ -392,21 +394,19 @@ impl Processor {
         if meta.offset != w.received[meta.source] {
             return Err("duplicate or missing batch".into());
         }
-        if w.received[meta.source] + batch.values.len() > self.points {
+        if w.received[meta.source] + batch.count > self.points {
             return Err("window overflow".into());
         }
-        let batch_len = batch.values.len();
+        let values = (0..batch.count).map(|offset| value(batch.first_index + offset as u64));
         {
             let _cpu = profile::scope(Category::Computation);
             if self.scenario == "kll" {
-                for value in batch.values {
-                    w.sketch.update(value);
-                }
+                w.sketch.update_batch(values);
             } else {
-                w.runs[meta.source].extend(batch.values);
+                w.runs[meta.source].extend(values);
             }
         }
-        w.received[meta.source] += batch_len;
+        w.received[meta.source] += batch.count;
         if w.received[meta.source] < self.points {
             if self.windows.len() > MAX_PENDING as usize {
                 return Err("pending window bound exceeded".into());
@@ -563,11 +563,10 @@ mod tests {
         for window in 0..3 {
             for offset in (0..n).step_by(batch) {
                 for (source, branch) in branches.iter_mut().enumerate() {
-                    let values = (offset..(offset + batch).min(n))
-                        .map(|i| value((source * n + i + 1) as u64))
-                        .collect::<Vec<_>>();
+                    let count = (offset + batch).min(n) - offset;
                     let input = NormalizedBatch {
-                        values,
+                        first_index: (source * n + offset + 1) as u64,
+                        count,
                         meta: Meta {
                             window,
                             source,

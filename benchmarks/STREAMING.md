@@ -21,7 +21,7 @@ generator B -> branch B --/
 ```
 
 The two sources use OTAP's upstream `urn:otel:receiver:traffic_generator` in
-`synthetic` / `fresh` / `smooth` mode. Each configured generator worker is a
+`synthetic` / `pre_generated` / `smooth` mode. Each configured generator worker is a
 real OTAP `RuntimePipeline` on its own thread. Every arrow is standard,
 uncompressed OTLP/HTTP protobuf over real TCP connections
 between Docker network namespaces. Workers use upstream `urn:otel:receiver:otlp`
@@ -59,7 +59,7 @@ and latency accounting; their overhead is included for all scenarios.
 
 | Setting | Value |
 | --- | --- |
-| Sources | 2 OTAP traffic generator processes, 2 pipeline workers each |
+| Sources | 2 OTAP traffic generator processes, 4 pipeline workers each |
 | Batch | 1,024 observations per OTLP request |
 | Window sweep | 16,384, 65,536, and 262,144 observations per source |
 | Source-skew bound | 64 windows; 8 pdata channel slots per edge |
@@ -73,7 +73,7 @@ and latency accounting; their overhead is included for all scenarios.
 
 Linux and a working Docker daemon are required. `--generator-cores N` controls
 the OTAP pipeline workers and CPU pool used by each traffic generator (default
-2; the two source containers share that pool). Five additional
+4; the two source containers share that pool). Five additional
 CPUs are required: branch A, branch B, merge, estimate, and backend each receive
 one exclusive `--cpuset-cpus` assignment. The exact mapping is recorded as
 `generator_cores` and `component_cores` in every run's `config.json`. Change
