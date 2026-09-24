@@ -88,17 +88,24 @@ vector.
 
 ## Generator provisioning
 
-Generator capacity is provisioned before comparing processors. Starting at four
-cores, repeat the high-load boundary with 8 and 16 generator cores. Stop when
-adding generator cores no longer increases backend-validated throughput and
-generator CPU/network are no longer the first saturated resources. The final
-Raw, Exact, and fixed-`k=400` KLL comparison uses the same largest required
-generator pool; downstream components remain fixed at one exclusive core each.
+The generator is a workload driver and is outside the compared downstream
+resource budget. Raw, Exact, and fixed-`k=400` KLL may therefore use different
+generator core counts. Starting at four cores, repeat each scenario's high-load
+boundary with 8 and 16 generator cores until the generator can saturate that
+scenario's downstream pipeline.
 
-Offered traffic is increased until each scenario has at least one unsustainable
-point beyond its throughput plateau. Exact may reach that point with fewer
-generator cores, but its reported comparison is rerun with the common generator
-pool so source provisioning cannot favor one scenario.
+The downstream budget is identical for every scenario: branch A, branch B,
+merge, estimate, and backend each have one exclusive core. A capacity boundary
+is accepted when increasing offered traffic and generator cores no longer raises
+backend-validated throughput, and either a downstream component sustains at
+least 0.90 core or the throughput plateau repeats at two generator-core settings.
+The report records the generator cores needed to drive each result, but does not
+include them in the KLL/Exact capacity ratio.
+
+Offered traffic is increased until every scenario has an unsustainable point
+beyond its plateau. This measures the maximum work completed by the same
+five-core downstream topology rather than the capacity of a shared traffic
+source.
 
 ## Presentation
 
