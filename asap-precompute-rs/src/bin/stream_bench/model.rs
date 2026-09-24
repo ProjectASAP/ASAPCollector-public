@@ -142,6 +142,10 @@ pub struct InputNormalizer {
     offset: usize,
     started_ns: u64,
 }
+pub struct NormalizedBatch {
+    pub meta: Meta,
+    pub values: Vec<f64>,
+}
 impl InputNormalizer {
     pub fn new(source: usize, points: usize, batch: usize) -> Self {
         Self {
@@ -153,7 +157,7 @@ impl InputNormalizer {
             started_ns: 0,
         }
     }
-    pub fn normalize(&mut self, mut count: usize, now_ns: u64) -> Result<Vec<OtapPdata>, String> {
+    pub fn normalize(&mut self, mut count: usize, now_ns: u64) -> Vec<NormalizedBatch> {
         let mut batches = Vec::new();
         while count > 0 {
             if self.offset == 0 {
@@ -163,15 +167,15 @@ impl InputNormalizer {
             let values = (self.offset..self.offset + take)
                 .map(|index| value((self.source * self.points + index + 1) as u64))
                 .collect::<Vec<_>>();
-            batches.push(values_pdata(
-                &values,
-                Meta {
+            batches.push(NormalizedBatch {
+                values,
+                meta: Meta {
                     window: self.window,
                     source: self.source,
                     offset: self.offset,
                     started_ns: self.started_ns,
                 },
-            )?);
+            });
             self.offset += take;
             count -= take;
             if self.offset == self.points {
@@ -179,7 +183,7 @@ impl InputNormalizer {
                 self.offset = 0;
             }
         }
-        Ok(batches)
+        batches
     }
 }
 
@@ -367,6 +371,78 @@ impl Processor {
             })
             .collect()
     }
+
+    pub fn process_normalized(&mut self, batch: NormalizedBatch) -> Result<Vec<OtapPdata>, String> {
+        let _cpu = profile::scope(Category::ProcessorBookkeeping);
+        if self.role != "branch" || batch.meta.source > 1 {
+            return Err("normalized input is only valid for branch processors".into());
+        }
+        if self.scenario == "raw" {
+            return Ok(vec![values_pdata(&batch.values, batch.meta)?]);
+        }
+        let meta = batch.meta;
+        if meta.window != self.next[meta.source] {
+            return Err("duplicate or out-of-order window".into());
+        }
+        let w = self
+            .windows
+            .entry(meta.window)
+            .or_insert_with(|| Window::new(meta.started_ns));
+        w.started_ns = w.started_ns.min(meta.started_ns);
+        if meta.offset != w.received[meta.source] {
+            return Err("duplicate or missing batch".into());
+        }
+        if w.received[meta.source] + batch.values.len() > self.points {
+            return Err("window overflow".into());
+        }
+        let batch_len = batch.values.len();
+        {
+            let _cpu = profile::scope(Category::Computation);
+            if self.scenario == "kll" {
+                for value in batch.values {
+                    w.sketch.update(value);
+                }
+            } else {
+                w.runs[meta.source].extend(batch.values);
+            }
+        }
+        w.received[meta.source] += batch_len;
+        if w.received[meta.source] < self.points {
+            if self.windows.len() > MAX_PENDING as usize {
+                return Err("pending window bound exceeded".into());
+            }
+            return Ok(vec![]);
+        }
+        self.next[meta.source] += 1;
+        let mut w = self.windows.remove(&meta.window).unwrap();
+        let out_meta = Meta {
+            offset: 0,
+            started_ns: w.started_ns,
+            ..meta
+        };
+        if self.scenario == "kll" {
+            return Ok(vec![sketch_pdata(&w.sketch, self.points, out_meta)?]);
+        }
+        let values = {
+            let _cpu = profile::scope(Category::Computation);
+            let values = &mut w.runs[meta.source];
+            values.sort_by(f64::total_cmp);
+            std::mem::take(values)
+        };
+        values
+            .chunks(self.batch)
+            .enumerate()
+            .map(|(index, chunk)| {
+                values_pdata(
+                    chunk,
+                    Meta {
+                        offset: index * self.batch,
+                        ..out_meta
+                    },
+                )
+            })
+            .collect()
+    }
 }
 
 pub struct Backend {
@@ -490,17 +566,16 @@ mod tests {
                     let values = (offset..(offset + batch).min(n))
                         .map(|i| value((source * n + i + 1) as u64))
                         .collect::<Vec<_>>();
-                    let input = values_pdata(
-                        &values,
-                        Meta {
+                    let input = NormalizedBatch {
+                        values,
+                        meta: Meta {
                             window,
                             source,
                             offset,
                             started_ns: 1,
                         },
-                    )
-                    .unwrap();
-                    for a in branch.process(input).unwrap() {
+                    };
+                    for a in branch.process_normalized(input).unwrap() {
                         for m in merge.process(a).unwrap() {
                             for e in estimate.process(m).unwrap() {
                                 let (count, done) = backend.receive(e).unwrap();

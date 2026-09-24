@@ -441,7 +441,7 @@ def main():
     parser.add_argument("--sample-interval", type=float, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--memory", default="1g")
-    parser.add_argument("--traffic-rates", type=int, nargs="+", default=[10000, 25000, 50000, 100000, 200000, 300000],
+    parser.add_argument("--traffic-rates", type=int, nargs="+", default=[10000, 25000, 50000, 100000, 200000, 300000, 400000],
                         help="target signals/s per source to sweep using OTAP's traffic_generator receiver")
     parser.add_argument("--generator-cores", type=int, default=2,
                         help="OTAP traffic_generator pipeline workers per source; every downstream component always gets one dedicated CPU")

@@ -228,7 +228,7 @@ impl processor::Processor<OtapPdata> for StreamProcessor {
         effects: &mut processor::EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
         if let Message::PData(mut pdata) = message {
-            let inputs = if let Some(normalizer) = &mut self.normalizer {
+            let outputs = if let Some(normalizer) = &mut self.normalizer {
                 let count = pdata.num_items();
                 {
                     let mut stats = shared().stats.lock().unwrap();
@@ -236,9 +236,15 @@ impl processor::Processor<OtapPdata> for StreamProcessor {
                     stats.sent_windows =
                         stats.received_signals / OPTIONS.get().unwrap().points as u64;
                 }
-                normalizer.normalize(count, now_ns())
+                normalizer.normalize(count, now_ns()).into_iter().try_fold(
+                    Vec::new(),
+                    |mut outputs, batch| {
+                        outputs.extend(self.processor.process_normalized(batch)?);
+                        Ok(outputs)
+                    },
+                )
             } else {
-                Ok(vec![pdata])
+                self.processor.process(pdata)
             }
             .map_err(|error| Error::ProcessorError {
                 processor: effects.processor_id(),
@@ -246,19 +252,8 @@ impl processor::Processor<OtapPdata> for StreamProcessor {
                 error,
                 source_detail: String::new(),
             })?;
-            for input in inputs {
-                let outputs =
-                    self.processor
-                        .process(input)
-                        .map_err(|error| Error::ProcessorError {
-                            processor: effects.processor_id(),
-                            kind: ProcessorErrorKind::Other,
-                            error,
-                            source_detail: String::new(),
-                        })?;
-                for output in outputs {
-                    effects.send_message_with_source_node(output).await?;
-                }
+            for output in outputs {
+                effects.send_message_with_source_node(output).await?;
             }
         }
         Ok(())

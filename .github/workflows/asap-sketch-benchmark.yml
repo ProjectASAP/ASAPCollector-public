@@ -43,9 +43,9 @@ jobs:
           runs = json.loads((root / "runs.json").read_text())
           summary = json.loads((root / "summary.json").read_text())
           capacity = json.loads((root / "capacity.json").read_text())
-          assert len(runs) == 162
-          assert len(summary) == 54
-          assert len(json.loads((root / "resources.json").read_text())) == 378
+          assert len(runs) == 189
+          assert len(summary) == 63
+          assert len(json.loads((root / "resources.json").read_text())) == 441
           assert len(capacity) == 3
           assert all(row["repetitions"] == 3 for row in summary)
           assert all("sustainable" in row for row in summary)

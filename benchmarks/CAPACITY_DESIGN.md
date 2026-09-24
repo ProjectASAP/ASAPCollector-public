@@ -26,7 +26,7 @@ The five downstream components use distinct cores outside the generator pool. Ev
 
 ## Independent variables
 
-- Offered traffic per source: 10k, 25k, 50k, 100k, 200k, and 300k signals/s by default.
+- Offered traffic per source: 10k, 25k, 50k, 100k, 200k, 300k, and 400k signals/s by default. The 400k point brackets the optimized KLL capacity observed near 300k/source.
 - Aggregation window per source: 16,384, 65,536, and 262,144 observations.
 - Scenario: raw, exact, or KLL.
 
