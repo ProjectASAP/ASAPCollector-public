@@ -55,11 +55,16 @@ and latency accounting; their overhead is included for all scenarios.
 | Warm-up / measured interval | 5 seconds / 30 seconds, uninterrupted traffic |
 | Repetitions | 3 per scenario and network condition; rotating scenario order |
 | Link conditions | Unlimited, and 100 Mbit/s egress per branch |
-| Placement | First 2 available CPUs for generators; next 2 for workers/backend |
+| Placement | Configurable generator CPU pool; one dedicated CPU each for branch A, branch B, merge, estimate, and backend |
 | Container memory | 1 GiB each, swap disabled |
 
-Linux and a working Docker daemon are required. CPU placement adapts to hosts
-with only two or three available CPUs and is recorded in `config.json`.
+Linux and a working Docker daemon are required. `--generator-cores N` controls
+the CPU pool shared by the two traffic generators (default 2). Five additional
+CPUs are required: branch A, branch B, merge, estimate, and backend each receive
+one exclusive `--cpuset-cpus` assignment. The exact mapping is recorded as
+`generator_cores` and `component_cores` in every run's `config.json`. Change
+`--window-points` to tune the data volume per source and `--batch-size` to tune
+the OTLP request size.
 Bandwidth shaping uses Linux `tc tbf` on each branch's **data** interface only
 (`NET_ADMIN` only on those containers), with a 32 KiB burst and 100 ms queue.
 Ingress, generator-to-branch traffic, and control traffic are not artificially

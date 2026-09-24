@@ -58,7 +58,9 @@ jobs:
                   assert resource["cpu_seconds"] > 0
           for path in root.glob("*mbit/*/*/config.json"):
               config = json.loads(path.read_text())
-              assert set(config["generator_cores"]).isdisjoint(config["processor_and_backend_cores"])
+              assigned = list(config["component_cores"].values())
+              assert len(assigned) == 5 and len(set(assigned)) == 5
+              assert set(config["generator_cores"]).isdisjoint(assigned)
           assert (root / "throughput.svg").is_file()
           PYCODE
       - name: Upload review artifacts

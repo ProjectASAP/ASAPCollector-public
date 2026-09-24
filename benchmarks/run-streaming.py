@@ -17,6 +17,7 @@ import urllib.request
 import uuid
 
 ROLES = ("generator_a", "generator_b", "branch_a", "branch_b", "merge", "estimate", "backend")
+WORKER_ROLES = ("branch_a", "branch_b", "merge", "estimate", "backend")
 SCENARIOS = ("raw", "exact", "kll")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -82,11 +83,16 @@ class Run:
         raise TimeoutError("streaming benchmark readiness/drain timeout")
 
     def setup(self):
-        cores = sorted(os.sched_getaffinity(0))[:4]
-        if len(cores) < 2:
-            raise RuntimeError("at least two available CPUs are required")
-        split = max(1, len(cores) // 2)
-        generators, processors = cores[:split], cores[split:]
+        cores = sorted(os.sched_getaffinity(0))
+        required = self.args.generator_cores + len(WORKER_ROLES)
+        if len(cores) < required:
+            raise RuntimeError(
+                f"dedicated placement needs {required} CPUs: {self.args.generator_cores} "
+                f"traffic-generator CPUs plus one CPU for each of {len(WORKER_ROLES)} components; "
+                f"only {len(cores)} are available"
+            )
+        generators = cores[:self.args.generator_cores]
+        component_cores = dict(zip(WORKER_ROLES, cores[self.args.generator_cores:required]))
         for suffix in ("data", "control"):
             network = self.prefix + "-" + suffix
             self.command("network", "create", "--internal", network)
@@ -95,7 +101,7 @@ class Run:
         # All processes are created once and remain alive through warmup, observation, drain.
         for role in reversed(ROLES):
             name = self.prefix + "-" + role
-            cpu_set = generators if role.startswith("generator") else processors
+            cpu_set = generators if role.startswith("generator") else [component_cores[role]]
             env = {
                 "ASAP_ROLE": role.split("_")[0], "ASAP_SCENARIO": self.scenario,
                 "ASAP_WINDOW_POINTS": str(self.args.window_points), "ASAP_BATCH_SIZE": str(self.args.batch_size),
@@ -142,7 +148,7 @@ class Run:
                   "scenario": self.scenario, "branch_egress_mbit_per_second": self.rate,
                   "window_points_per_source": self.args.window_points, "batch_size": self.args.batch_size,
                   "warmup_seconds": self.args.warmup, "observation_seconds": self.args.duration,
-                  "generator_cores": generators, "processor_and_backend_cores": processors,
+                  "generator_cores": generators, "component_cores": component_cores,
                   "measurement_clock": "CLOCK_MONOTONIC, shared host kernel", "max_inflight_windows": 4, "pdata_channel_capacity": 8, "exporter_max_in_flight": 1,
                   "transport": "standard OTLP/HTTP protobuf, uncompressed, persistent connections",
                   "data_interfaces": self.data_ifaces, "container_memory_limit": self.args.memory,
@@ -272,8 +278,10 @@ def main():
     parser.add_argument("--sample-interval", type=float, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--memory", default="1g")
+    parser.add_argument("--generator-cores", type=int, default=2,
+                        help="shared CPU pool size for the two traffic generators; every downstream component always gets one dedicated CPU")
     args = parser.parse_args()
-    if args.window_points < 1 or not 1 <= args.batch_size <= args.window_points or not all(math.isfinite(t) for t in (args.warmup, args.duration, args.sample_interval)) or args.warmup < 0 or args.duration <= 0 or args.sample_interval <= 0 or args.repetitions < 1 or any(not math.isfinite(r) or r < 0 for r in args.rates_mbit):
+    if args.window_points < 1 or not 1 <= args.batch_size <= args.window_points or args.generator_cores < 1 or not all(math.isfinite(t) for t in (args.warmup, args.duration, args.sample_interval)) or args.warmup < 0 or args.duration <= 0 or args.sample_interval <= 0 or args.repetitions < 1 or any(not math.isfinite(r) or r < 0 for r in args.rates_mbit):
         parser.error("invalid benchmark sizes, times, repetitions, or rates")
     args.output.mkdir(parents=True, exist_ok=True)
     results = []

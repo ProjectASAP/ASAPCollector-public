@@ -81,7 +81,9 @@ must remain within 5% of the exact result.
 In nightly, every topology has two generator processes, two branch workers, one merge worker, and one
 final/estimate worker. Every worker is a separate OS process containing a real
 OTAP `RuntimePipeline`; the generators run outside OTAP. Two available CPUs
-are assigned to generation and two others to OTAP workers with `taskset`.
+form a configurable traffic-generator pool. Branch A, branch B, merge,
+estimate, and backend each receive one dedicated CPU with `taskset`/Docker
+`--cpuset-cpus`.
 Each process writes elapsed time, CPU use, peak RSS, output bytes, and OTLP
 file serialization time. The upstream Docker monitor includes the entire process
 tree in container CPU and RSS measurements. All scenarios use the same input count and
@@ -114,7 +116,7 @@ serialization.
 | Sources | 2 processes, 262,144 observations each |
 | Generator | 2 threads per source; SplitMix64 long-tail durations, seed `0x9e3779b97f4a7c15` |
 | KLL | `k=400`, Msgpack ASAPv1, p50/p99 |
-| CPU placement | first 2 available CPUs: generators; next 2: processors |
+| CPU placement | configurable generator pool; one dedicated CPU for each downstream component |
 | Observation | 5 s warm-up, 30 s monitored window |
 | Debug output | disabled in nightly measurements; enabled in the interactive demo |
 | Output | config.json, throughput.env, stages.json, stages.jsonl, process reports, Criterion text |
