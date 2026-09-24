@@ -2,6 +2,8 @@
 //! The control listener carries counters/commands only, never telemetry payloads.
 #[path = "stream_bench/model.rs"]
 mod model;
+#[path = "stream_bench/profile.rs"]
+mod profile;
 use async_trait::async_trait;
 use linkme::distributed_slice;
 use otel_arrow_dfe_config::{
@@ -33,7 +35,6 @@ use otel_arrow_dfe_engine::{
 use otel_arrow_dfe_otap::{
     pdata::OtapPdata, OTAP_EXPORTER_FACTORIES, OTAP_PIPELINE_FACTORY, OTAP_PROCESSOR_FACTORIES,
 };
-use otel_arrow_dfe_pdata::{OtlpProtoBytes, TryIntoWithOptions};
 use otel_arrow_dfe_state::store::ObservedStateStore;
 use otel_arrow_dfe_telemetry::InternalTelemetrySystem;
 use serde::Serialize;
@@ -63,7 +64,8 @@ struct Options {
     listen: String,
     control: String,
     endpoint: String,
-    backend: String,
+    generator_workers: usize,
+    signals_per_second: usize,
 }
 impl Options {
     fn read() -> Result<Self, String> {
@@ -82,7 +84,8 @@ impl Options {
             listen: get("ASAP_LISTEN", "0.0.0.0:4318"),
             control: get("ASAP_CONTROL", "0.0.0.0:4319"),
             endpoint: get("ASAP_ENDPOINT", "http://merge:4318"),
-            backend: get("ASAP_BACKEND", "http://backend:4319"),
+            generator_workers: number("ASAP_GENERATOR_WORKERS", "1")?,
+            signals_per_second: number("ASAP_SIGNALS_PER_SECOND", "100000")?,
         };
         if !["raw", "exact", "kll"].contains(&o.scenario.as_str())
             || !["generator", "branch", "merge", "estimate", "backend"].contains(&o.role.as_str())
@@ -90,6 +93,8 @@ impl Options {
             || o.batch == 0
             || o.batch > o.points
             || o.source > 1
+            || o.generator_workers == 0
+            || o.signals_per_second == 0
         {
             return Err("invalid role/scenario/window/batch/source configuration".into());
         }
@@ -148,7 +153,7 @@ fn snapshot() -> serde_json::Value {
         }
     }
     serde_json::json!({"timestamp_ns": now_ns(), "pid": std::process::id(), "cpu_nanoseconds": cpu_ns(),
-        "rss_kib": kib("VmRSS:"), "process_peak_rss_kib": kib("VmHWM:"), "interfaces": interfaces, "stats": stats})
+        "profile_cpu_ns": profile::snapshot(), "rss_kib": kib("VmRSS:"), "process_peak_rss_kib": kib("VmHWM:"), "interfaces": interfaces, "stats": stats})
 }
 fn start_control() -> Result<(), String> {
     let listener = TcpListener::bind(&OPTIONS.get().unwrap().control).map_err(|e| e.to_string())?;
@@ -211,98 +216,10 @@ fn start_control() -> Result<(), String> {
     });
     Ok(())
 }
-fn to_bytes(pdata: OtapPdata) -> Result<Vec<u8>, String> {
-    let (_, payload) = pdata.into_parts();
-    match <_ as TryIntoWithOptions<OtlpProtoBytes>>::try_into_with_default(payload)
-        .map_err(|e| e.to_string())?
-    {
-        OtlpProtoBytes::ExportMetricsRequest(bytes) => Ok(bytes.to_vec()),
-        _ => Err("non-metrics payload".into()),
-    }
+struct StreamProcessor {
+    processor: model::Processor,
+    normalizer: Option<model::InputNormalizer>,
 }
-async fn generate(o: &Options) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let mut window = 0;
-    loop {
-        if shared().shutdown.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-        let paused = !shared().running.load(Ordering::SeqCst)
-            || window >= shared().target.load(Ordering::SeqCst);
-        shared().stats.lock().unwrap().generator_paused = paused;
-        if paused {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            continue;
-        }
-        // End-to-end credits bound all in-flight windows, including receiver queues.
-        let status: serde_json::Value = serde_json::from_slice(
-            &client
-                .get(format!("{}/stats", o.backend))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?
-                .error_for_status()
-                .map_err(|e| e.to_string())?
-                .bytes()
-                .await
-                .map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        let completed = status["stats"]["completed_windows"]
-            .as_u64()
-            .ok_or("invalid backend stats")?;
-        if window >= completed + model::MAX_PENDING {
-            tokio::time::sleep(Duration::from_millis(2)).await;
-            continue;
-        }
-        let started_ns = now_ns();
-        for offset in (0..o.points).step_by(o.batch) {
-            let values = (offset..(offset + o.batch).min(o.points))
-                .map(|i| model::value((o.source * o.points + i + 1) as u64))
-                .collect::<Vec<_>>();
-            let bytes = to_bytes(model::values_pdata(
-                &values,
-                model::Meta {
-                    window,
-                    source: o.source,
-                    offset,
-                    started_ns,
-                },
-            )?)?;
-            let size = bytes.len();
-            let response = client
-                .post(format!("{}/v1/metrics", o.endpoint))
-                .header("Content-Type", "application/x-protobuf")
-                .body(bytes)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?
-                .error_for_status()
-                .map_err(|e| e.to_string())?;
-            // Consume responses so the HTTP connection can be reused. OTLP partial-success
-            // bodies are not treated as success; the upstream receiver returns an empty protobuf.
-            if !response
-                .bytes()
-                .await
-                .map_err(|e| e.to_string())?
-                .is_empty()
-            {
-                return Err("nonempty OTLP response (possible partial rejection)".into());
-            }
-            let mut stats = shared().stats.lock().unwrap();
-            stats.sent_signals += values.len() as u64;
-            stats.otlp_payload_bytes_sent += size as u64;
-        }
-        window += 1;
-        shared().stats.lock().unwrap().sent_windows = window;
-    }
-}
-
-struct StreamProcessor(model::Processor);
 #[async_trait(?Send)]
 impl processor::Processor<OtapPdata> for StreamProcessor {
     async fn process(
@@ -310,18 +227,38 @@ impl processor::Processor<OtapPdata> for StreamProcessor {
         message: Message<OtapPdata>,
         effects: &mut processor::EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
-        if let Message::PData(pdata) = message {
-            let outputs = self
-                .0
-                .process(pdata)
-                .map_err(|error| Error::ProcessorError {
-                    processor: effects.processor_id(),
-                    kind: ProcessorErrorKind::Other,
-                    error,
-                    source_detail: String::new(),
-                })?;
-            for output in outputs {
-                effects.send_message_with_source_node(output).await?;
+        if let Message::PData(mut pdata) = message {
+            let inputs = if let Some(normalizer) = &mut self.normalizer {
+                let count = pdata.num_items();
+                {
+                    let mut stats = shared().stats.lock().unwrap();
+                    stats.received_signals += count as u64;
+                    stats.sent_windows =
+                        stats.received_signals / OPTIONS.get().unwrap().points as u64;
+                }
+                normalizer.normalize(count, now_ns())
+            } else {
+                Ok(vec![pdata])
+            }
+            .map_err(|error| Error::ProcessorError {
+                processor: effects.processor_id(),
+                kind: ProcessorErrorKind::Other,
+                error,
+                source_detail: String::new(),
+            })?;
+            for input in inputs {
+                let outputs =
+                    self.processor
+                        .process(input)
+                        .map_err(|error| Error::ProcessorError {
+                            processor: effects.processor_id(),
+                            kind: ProcessorErrorKind::Other,
+                            error,
+                            source_detail: String::new(),
+                        })?;
+                for output in outputs {
+                    effects.send_message_with_source_node(output).await?;
+                }
             }
         }
         Ok(())
@@ -336,12 +273,11 @@ fn create_processor(
 ) -> Result<ProcessorWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
     let o = OPTIONS.get().unwrap();
     Ok(ProcessorWrapper::local(
-        StreamProcessor(model::Processor::new(
-            &o.scenario,
-            &o.role,
-            o.points,
-            o.batch,
-        )),
+        StreamProcessor {
+            processor: model::Processor::new(&o.scenario, &o.role, o.points, o.batch),
+            normalizer: (o.role == "branch")
+                .then(|| model::InputNormalizer::new(o.source, o.points, o.batch)),
+        },
         node,
         config,
         runtime,
@@ -412,13 +348,20 @@ static BACKEND_FACTORY: ExporterFactory<OtapPdata> = ExporterFactory {
     validate_config: otel_arrow_dfe_config::validation::no_config,
 };
 fn pipeline_yaml(o: &Options) -> String {
+    if o.role == "generator" {
+        let rate = o.signals_per_second.div_ceil(o.generator_workers);
+        return format!(
+            "nodes:\n  source:\n    type: urn:otel:receiver:traffic_generator\n    config:\n      data_source: synthetic\n      generation_strategy: fresh\n      resource_attributes:\n        - attrs: {{bench.source: '{}'}}\n      traffic_config:\n        production_mode: smooth\n        signals_per_second: {}\n        max_batch_size: {}\n        metric_weight: 1\n        trace_weight: 0\n        log_weight: 0\n        num_data_points_per_metric: 1\n  sink:\n    type: urn:otel:exporter:otlp_http\n    config:\n      endpoint: {}\n      client_pool_size: 1\n      max_in_flight: 1\n      http: {{timeout: 30s, compression: none}}\nconnections:\n  - {{from: source, to: sink}}\n",
+            o.source, rate, o.batch, o.endpoint
+        );
+    }
     let source = format!("source:\n    type: urn:otel:receiver:otlp\n    config:\n      protocols:\n        http:\n          listening_addr: {}\n          wait_for_result: false\n", o.listen);
     if o.role == "backend" {
         return format!("nodes:\n  {source}  sink: {{type: '{BACKEND}'}}\nconnections:\n  - {{from: source, to: sink}}\n");
     }
     format!("nodes:\n  {source}  processor: {{type: '{PROCESSOR}'}}\n  sink:\n    type: urn:otel:exporter:otlp_http\n    config:\n      endpoint: {}\n      client_pool_size: 1\n      max_in_flight: 1\n      http: {{timeout: 30s, compression: none}}\nconnections:\n  - {{from: source, to: processor}}\n  - {{from: processor, to: sink}}\n", o.endpoint)
 }
-fn run_pipeline(o: &Options) -> Result<(), String> {
+fn run_pipeline(o: &Options, core_id: usize, num_cores: usize) -> Result<(), String> {
     let config = PipelineConfig::from_yaml(
         "stream-bench".into(),
         o.role.clone().into(),
@@ -429,8 +372,8 @@ fn run_pipeline(o: &Options) -> Result<(), String> {
     let ctx = ControllerContext::new(telemetry.registry()).pipeline_context_with(
         PipelineGroupId::from("stream-bench"),
         PipelineId::from(o.role.clone()),
-        0,
-        1,
+        core_id,
+        num_cores,
         0,
     );
     let entity = ctx.register_pipeline_entity();
@@ -466,7 +409,7 @@ fn run_pipeline(o: &Options) -> Result<(), String> {
     let key = DeployedPipelineKey {
         pipeline_group_id: ctx.pipeline_group_id(),
         pipeline_id: ctx.pipeline_id(),
-        core_id: 0,
+        core_id,
         deployment_generation: 0,
     };
     let (_, pressure_rx) = tokio::sync::watch::channel(
@@ -492,6 +435,21 @@ fn run_pipeline(o: &Options) -> Result<(), String> {
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
+fn run_generator(o: &Options) -> Result<(), String> {
+    let mut workers = Vec::with_capacity(o.generator_workers);
+    for core_id in 0..o.generator_workers {
+        let options = o.clone();
+        workers.push(std::thread::spawn(move || {
+            run_pipeline(&options, core_id, options.generator_workers)
+        }));
+    }
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| "traffic generator worker panicked".to_owned())??;
+    }
+    Ok(())
+}
 fn run() -> Result<(), String> {
     otel_arrow_dfe_otap::crypto::install_crypto_provider()?;
     let options = Options::read()?;
@@ -511,13 +469,9 @@ fn run() -> Result<(), String> {
         .map_err(|_| "shared initialized")?;
     start_control()?;
     if options.role == "generator" {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| e.to_string())?
-            .block_on(generate(&options))
+        run_generator(&options)
     } else {
-        run_pipeline(&options)
+        run_pipeline(&options, 0, 1)
     }
 }
 fn main() {

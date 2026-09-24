@@ -1,4 +1,5 @@
 //! Count-aligned windows for a fair streaming comparison. No wall-clock flush races.
+use super::profile::{self, Category};
 use asap_precompute_rs::{
     envelope::{Encoding, SketchEnvelope, SketchType},
     observation::{KeyValue, Observation},
@@ -9,7 +10,9 @@ use asap_precompute_rs::{
 use otel_arrow_dfe_otap::pdata::OtapPdata;
 use std::collections::BTreeMap;
 
-pub const MAX_PENDING: u64 = 4;
+// Generator containers start sequentially in the harness. Bound the temporary
+// source skew while allowing the first source to run until its peer is ready.
+pub const MAX_PENDING: u64 = 8;
 pub const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 pub fn value(index: u64) -> f64 {
     let mut x = index.wrapping_add(SEED);
@@ -77,6 +80,7 @@ impl Meta {
     }
 }
 pub fn values_pdata(values: &[f64], meta: Meta) -> Result<OtapPdata, String> {
+    let _cpu = profile::scope(Category::PdataCodec);
     encode_envelopes_to_pdata(&values.iter().map(|v| meta.envelope(*v)).collect::<Vec<_>>())
         .map_err(|e| e.to_string())
 }
@@ -84,14 +88,19 @@ fn new_sketch(seed: u64) -> KLLWrapper {
     KLLWrapper::new(400, Some(seed)).with_wire_encoding(Encoding::Msgpack)
 }
 fn sketch_pdata(sketch: &KLLWrapper, count: usize, meta: Meta) -> Result<OtapPdata, String> {
+    let _cpu = profile::scope(Category::PdataCodec);
     let mut env = meta.envelope(0.0);
     env.sketch_type = SketchType::KLLSketch;
     env.encoding = Encoding::Msgpack;
-    env.payload = sketch.snapshot().map_err(|e| e.to_string())?;
+    env.payload = {
+        let _cpu = profile::scope(Category::SketchCodec);
+        sketch.snapshot().map_err(|e| e.to_string())?
+    };
     env.count = count as u64;
     encode_envelopes_to_pdata(&[env]).map_err(|e| e.to_string())
 }
 fn decode_sketch(o: &Observation, count: usize) -> Result<KLLWrapper, String> {
+    let _cpu = profile::scope(Category::SketchCodec);
     let env = o.value.envelope.as_ref().ok_or("missing sketch envelope")?;
     if env.count != count as u64 {
         return Err("sketch count mismatch".into());
@@ -103,6 +112,7 @@ fn decode_sketch(o: &Observation, count: usize) -> Result<KLLWrapper, String> {
     Ok(sketch)
 }
 fn quantiles_pdata(values: [f64; 2], meta: Meta) -> Result<OtapPdata, String> {
+    let _cpu = profile::scope(Category::PdataCodec);
     let envelopes = ["0.5", "0.99"]
         .into_iter()
         .zip(values)
@@ -122,6 +132,55 @@ pub fn reference(points: usize) -> [f64; 2] {
     let mut values = (1..=points as u64 * 2).map(value).collect::<Vec<_>>();
     values.sort_by(f64::total_cmp);
     exact(&values)
+}
+
+pub struct InputNormalizer {
+    source: usize,
+    points: usize,
+    batch: usize,
+    window: u64,
+    offset: usize,
+    started_ns: u64,
+}
+impl InputNormalizer {
+    pub fn new(source: usize, points: usize, batch: usize) -> Self {
+        Self {
+            source,
+            points,
+            batch,
+            window: 0,
+            offset: 0,
+            started_ns: 0,
+        }
+    }
+    pub fn normalize(&mut self, mut count: usize, now_ns: u64) -> Result<Vec<OtapPdata>, String> {
+        let mut batches = Vec::new();
+        while count > 0 {
+            if self.offset == 0 {
+                self.started_ns = now_ns;
+            }
+            let take = count.min(self.batch).min(self.points - self.offset);
+            let values = (self.offset..self.offset + take)
+                .map(|index| value((self.source * self.points + index + 1) as u64))
+                .collect::<Vec<_>>();
+            batches.push(values_pdata(
+                &values,
+                Meta {
+                    window: self.window,
+                    source: self.source,
+                    offset: self.offset,
+                    started_ns: self.started_ns,
+                },
+            )?);
+            self.offset += take;
+            count -= take;
+            if self.offset == self.points {
+                self.window += 1;
+                self.offset = 0;
+            }
+        }
+        Ok(batches)
+    }
 }
 
 struct Window {
@@ -160,13 +219,17 @@ impl Processor {
         }
     }
     pub fn process(&mut self, pdata: OtapPdata) -> Result<Vec<OtapPdata>, String> {
+        let _cpu = profile::scope(Category::ProcessorBookkeeping);
         // Raw is a real pass-through: no artificial decoding/sorting at intermediate hops.
         if self.scenario == "raw" {
             return Ok(vec![pdata]);
         }
-        let obs = decode_pdata_to_observations(pdata)
-            .map_err(|e| e.to_string())?
-            .observations;
+        let obs = {
+            let _cpu = profile::scope(Category::PdataCodec);
+            decode_pdata_to_observations(pdata)
+                .map_err(|e| e.to_string())?
+                .observations
+        };
         let meta = Meta::read(obs.first().ok_or("empty batch")?)?;
         if meta.source > 2 || meta.window != self.next[meta.source] {
             return Err("duplicate or out-of-order window".into());
@@ -201,14 +264,15 @@ impl Processor {
             if obs.len() != 1 {
                 return Err("expected one sketch".into());
             }
-            w.sketch
-                .merge(&decode_sketch(&obs[0], count)?)
-                .map_err(|e| e.to_string())?;
+            let decoded = decode_sketch(&obs[0], count)?;
+            let _cpu = profile::scope(Category::Computation);
+            w.sketch.merge(&decoded).map_err(|e| e.to_string())?;
             w.received[meta.source] += count;
         } else {
             if w.received[meta.source] + obs.len() > count {
                 return Err("window overflow".into());
             }
+            let _cpu = profile::scope(Category::Computation);
             for o in &obs {
                 if self.scenario == "kll" {
                     w.sketch.update(o.value.float);
@@ -241,7 +305,13 @@ impl Processor {
         };
         if self.scenario == "kll" {
             return Ok(vec![if estimate {
-                quantiles_pdata([w.sketch.quantile(0.5), w.sketch.quantile(0.99)], out_meta)?
+                quantiles_pdata(
+                    {
+                        let _cpu = profile::scope(Category::Computation);
+                        [w.sketch.quantile(0.5), w.sketch.quantile(0.99)]
+                    },
+                    out_meta,
+                )?
             } else {
                 sketch_pdata(
                     &w.sketch,
@@ -250,31 +320,38 @@ impl Processor {
                 )?
             }]);
         }
-        let values = if branch {
-            let values = &mut w.runs[meta.source];
-            values.sort_by(f64::total_cmp);
-            std::mem::take(values)
-        } else if estimate {
-            std::mem::take(&mut w.runs[2])
-        } else {
-            let (a, b) = (&w.runs[0], &w.runs[1]);
-            let (mut i, mut j) = (0, 0);
-            let mut values = Vec::with_capacity(self.points * 2);
-            while i < a.len() && j < b.len() {
-                if a[i].total_cmp(&b[j]).is_le() {
-                    values.push(a[i]);
-                    i += 1;
-                } else {
-                    values.push(b[j]);
-                    j += 1;
+        let values = {
+            let _cpu = profile::scope(Category::Computation);
+            if branch {
+                let values = &mut w.runs[meta.source];
+                values.sort_by(f64::total_cmp);
+                std::mem::take(values)
+            } else if estimate {
+                std::mem::take(&mut w.runs[2])
+            } else {
+                let (a, b) = (&w.runs[0], &w.runs[1]);
+                let (mut i, mut j) = (0, 0);
+                let mut values = Vec::with_capacity(self.points * 2);
+                while i < a.len() && j < b.len() {
+                    if a[i].total_cmp(&b[j]).is_le() {
+                        values.push(a[i]);
+                        i += 1;
+                    } else {
+                        values.push(b[j]);
+                        j += 1;
+                    }
                 }
+                values.extend_from_slice(&a[i..]);
+                values.extend_from_slice(&b[j..]);
+                values
             }
-            values.extend_from_slice(&a[i..]);
-            values.extend_from_slice(&b[j..]);
-            values
         };
         if estimate {
-            return Ok(vec![quantiles_pdata(exact(&values), out_meta)?]);
+            let quantiles = {
+                let _cpu = profile::scope(Category::Computation);
+                exact(&values)
+            };
+            return Ok(vec![quantiles_pdata(quantiles, out_meta)?]);
         }
         values
             .chunks(self.batch)

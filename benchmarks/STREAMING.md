@@ -4,6 +4,10 @@
 The historical batch experiment is still available as `./benchmarks/run-file-nightly.sh`;
 its numbers must not be mixed with this benchmark's results.
 
+For exclusive CPU cost attribution and worker call-stack sampling, see
+[PROFILING.md](PROFILING.md). CPU profiling uses drained accounting boundaries
+in addition to the ordinary steady observation interval.
+
 ## Topology and transport
 
 Seven long-lived containers run concurrently for each scenario:
@@ -14,7 +18,10 @@ generator A -> branch A --\
 generator B -> branch B --/
 ```
 
-Every arrow is standard, uncompressed OTLP/HTTP protobuf over real TCP connections
+The two sources use OTAP's upstream `urn:otel:receiver:traffic_generator` in
+`synthetic` / `fresh` / `smooth` mode. Each configured generator worker is a
+real OTAP `RuntimePipeline` on its own thread. Every arrow is standard,
+uncompressed OTLP/HTTP protobuf over real TCP connections
 between Docker network namespaces. Workers use upstream `urn:otel:receiver:otlp`
 and `urn:otel:exporter:otlp_http` in actual OTAP `RuntimePipeline` instances.
 HTTP clients reuse connections. There are no telemetry files, process restarts,
@@ -36,10 +43,11 @@ wall-clock rotation, late-event handling, or window-watermark policies.
 - Backend validates every quantile result. Exact must match; KLL tolerance is
   `max(abs(reference) * 0.05, 0.001)`. This is value error, not rank error.
 
-The deterministic long-tail HTTP-duration corpus and fixed labels are the same
-as the file benchmark. Each window replays that corpus; the sources use disjoint
-index ranges. Reference quantiles are computed once at startup, outside timing.
-Generation itself is live and allocates only one small batch at a time. Benchmark
+The official generator emits generic synthetic metrics. Each branch maps the
+received item count to the deterministic long-tail HTTP-duration corpus used by
+the file benchmark, with disjoint source index ranges. This normalization is
+part of the measured branch CPU. Reference quantiles are computed once at
+startup, outside timing. Generation is live. Benchmark
 window/source/offset/start-time attributes travel with OTLP data for correctness
 and latency accounting; their overhead is included for all scenarios.
 
@@ -47,24 +55,28 @@ and latency accounting; their overhead is included for all scenarios.
 
 | Setting | Value |
 | --- | --- |
-| Sources | 2 generator processes, one streaming sender each |
+| Sources | 2 OTAP traffic generator processes, 2 pipeline workers each |
 | Batch | 1,024 observations per OTLP request |
-| Window | 65,536 observations per source; 131,072 combined |
+| Window sweep | 16,384, 65,536, and 262,144 observations per source |
 | In-flight bound | 4 windows end-to-end, 8 pdata channel slots |
 | Exporter concurrency | 1 request per worker, preserving per-source ordering |
 | Warm-up / measured interval | 5 seconds / 30 seconds, uninterrupted traffic |
-| Repetitions | 3 per scenario and network condition; rotating scenario order |
-| Link conditions | Unlimited, and 100 Mbit/s egress per branch |
+| Offered traffic sweep | 50k, 150k, and 300k signals/s per source |
+| Repetitions | 2 per scenario/configuration; rotating scenario order |
+| Link conditions | Unlimited by default; optional per-branch caps with `--rates-mbit` |
 | Placement | Configurable generator CPU pool; one dedicated CPU each for branch A, branch B, merge, estimate, and backend |
 | Container memory | 1 GiB each, swap disabled |
 
 Linux and a working Docker daemon are required. `--generator-cores N` controls
-the CPU pool shared by the two traffic generators (default 2). Five additional
+the OTAP pipeline workers and CPU pool used by each traffic generator (default
+2; the two source containers share that pool). Five additional
 CPUs are required: branch A, branch B, merge, estimate, and backend each receive
 one exclusive `--cpuset-cpus` assignment. The exact mapping is recorded as
 `generator_cores` and `component_cores` in every run's `config.json`. Change
-`--window-points` to tune the data volume per source and `--batch-size` to tune
-the OTLP request size.
+`--traffic-rates 50000 150000 300000` controls offered traffic per source and
+`--window-points 16384 65536 262144` controls aggregation volume per source.
+Together they form the default two-dimensional ingestion-rate/window-size sweep.
+`--batch-size` independently controls the OTLP request size.
 Bandwidth shaping uses Linux `tc tbf` on each branch's **data** interface only
 (`NET_ADMIN` only on those containers), with a 32 KiB burst and 100 ms queue.
 Ingress, generator-to-branch traffic, and control traffic are not artificially
@@ -84,9 +96,10 @@ source's start of that window through backend validation; p50/p99 use 1 ms bins.
 It is window completion latency, not individual observation latency. Elapsed
 time and latency use the host kernel's shared monotonic clock, not wall time.
 
-At the end, generators pause at window boundaries, the lagging source completes
-any missing partner windows, and the entire pipeline drains. Generated signal
-count must equal backend-validated count and the expected count of complete
+At the end, both official generators stop concurrently and the pipeline drains.
+Only windows completed by both independent sources are compared; the report
+records source data left in the unmatched tail as `unpaired_tail_signals_after_stop`.
+Backend-validated signal count must equal the expected count of paired complete
 windows. Duplicates, corrupt values, missing batches, bad quantiles, failed
 containers, HTTP failures, and drain timeouts fail the run. Fewer than two
 observed completed windows also fail; increase duration for slow links/large windows.
@@ -112,8 +125,8 @@ Full suite (builds release binary and Docker image; also runs isolated KLL Crite
 A short smoke run, using that image:
 
 ```sh
-python3 benchmarks/run-streaming.py --window-points 2048 --batch-size 256 \
-  --warmup 1 --duration 5 --repetitions 1 --rates-mbit 0 10
+python3 benchmarks/run-streaming.py --traffic-rates 20000 --window-points 2048 \
+  --batch-size 256 --warmup 1 --duration 5 --repetitions 1
 ```
 
 If your local Docker socket needs sudo, set `DOCKER_COMMAND="sudo -n docker"`
@@ -125,12 +138,12 @@ networks it creates, including on failure; it saves logs before removal.
 
 - `summary.csv`, `summary.json`, `throughput.svg`: repeated throughput and latency summaries.
 - `runs.json`: individual results with per-component CPU/RSS/RX/TX.
-- `resources.csv`, `resources.json`: per-component medians across repetitions.
-- `<rate>mbit/<scenario>/<repeat>/config.json`: workload, CPU sets, image ID and interfaces.
+- `resources.csv`, `resources.json`, `resources.svg`: per-component CPU and memory medians.
+- `traffic-<signals>-sps/window-<points>/<rate>mbit/<scenario>/<repeat>/config.json`: workload, CPU sets, image ID and interfaces.
 - `snapshots.json`: raw before/interval/drained counters and latency histograms.
 - `result.json` and seven component logs per run.
 
-CI runs the full 18-run matrix, checks actual network traffic, completed windows,
+CI runs the full 54-run matrix, checks actual network traffic, completed windows,
 zero loss after drain, and resource artifacts. It uploads results even on failure.
 The old PR's 2.43× was measured with the file-backed batch harness and is not a
 result of this streaming implementation. New speedups must be measured, not assumed.

@@ -50,7 +50,6 @@ humantime-serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 tokio = { version = "1", features = ["sync", "rt", "time", "net"], optional = true }
-reqwest = { version = "0.13", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -91,7 +90,11 @@ otap-engine = [
 ]
 
 # Network benchmark only: do not impose a TLS provider on library consumers.
-stream-benchmark = ["otap-engine", "dep:reqwest", "otel-arrow-dfe-otap/crypto-ring"]
+stream-benchmark = [
+    "otap-engine",
+    "otel-arrow-dfe-otap/crypto-ring",
+    "otel-arrow-dfe-core-nodes/dev-tools",
+]
 
 [[bin]]
 name = "asap-otap-demo"

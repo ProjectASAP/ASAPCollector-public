@@ -42,10 +42,10 @@ jobs:
           root = Path("benchmark-results/streaming")
           runs = json.loads((root / "runs.json").read_text())
           summary = json.loads((root / "summary.json").read_text())
-          assert len(runs) == 18
-          assert len(summary) == 6
-          assert len(json.loads((root / "resources.json").read_text())) == 42
-          assert all(row["repetitions"] == 3 for row in summary)
+          assert len(runs) == 54
+          assert len(summary) == 27
+          assert len(json.loads((root / "resources.json").read_text())) == 189
+          assert all(row["repetitions"] == 2 for row in summary)
           for run in runs:
               assert run["correctness"] == "passed"
               assert run["completed_windows"] >= 2
@@ -56,12 +56,13 @@ jobs:
                   resource = run["resources"][role]
                   assert resource["data_rx_bytes"] > 0 and resource["data_tx_bytes"] > 0
                   assert resource["cpu_seconds"] > 0
-          for path in root.glob("*mbit/*/*/config.json"):
+          for path in root.glob("traffic-*-sps/window-*/*mbit/*/*/config.json"):
               config = json.loads(path.read_text())
               assigned = list(config["component_cores"].values())
               assert len(assigned) == 5 and len(set(assigned)) == 5
               assert set(config["generator_cores"]).isdisjoint(assigned)
           assert (root / "throughput.svg").is_file()
+          assert (root / "resources.svg").is_file()
           PYCODE
       - name: Upload review artifacts
         if: always()
