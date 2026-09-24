@@ -7,6 +7,8 @@ its numbers must not be mixed with this benchmark's results.
 For exclusive CPU cost attribution and worker call-stack sampling, see
 [PROFILING.md](PROFILING.md). CPU profiling uses drained accounting boundaries
 in addition to the ordinary steady observation interval.
+The capacity definition, sustainable-point criteria, and speedup formula are in
+[CAPACITY_DESIGN.md](CAPACITY_DESIGN.md).
 
 ## Topology and transport
 
@@ -61,8 +63,8 @@ and latency accounting; their overhead is included for all scenarios.
 | In-flight bound | 4 windows end-to-end, 8 pdata channel slots |
 | Exporter concurrency | 1 request per worker, preserving per-source ordering |
 | Warm-up / measured interval | 5 seconds / 30 seconds, uninterrupted traffic |
-| Offered traffic sweep | 50k, 150k, and 300k signals/s per source |
-| Repetitions | 2 per scenario/configuration; rotating scenario order |
+| Offered traffic sweep | 10k, 25k, 50k, 100k, 200k, and 300k signals/s per source |
+| Repetitions | 3 per scenario/configuration; rotating scenario order |
 | Link conditions | Unlimited by default; optional per-branch caps with `--rates-mbit` |
 | Placement | Configurable generator CPU pool; one dedicated CPU each for branch A, branch B, merge, estimate, and backend |
 | Container memory | 1 GiB each, swap disabled |
@@ -73,7 +75,7 @@ the OTAP pipeline workers and CPU pool used by each traffic generator (default
 CPUs are required: branch A, branch B, merge, estimate, and backend each receive
 one exclusive `--cpuset-cpus` assignment. The exact mapping is recorded as
 `generator_cores` and `component_cores` in every run's `config.json`. Change
-`--traffic-rates 50000 150000 300000` controls offered traffic per source and
+`--traffic-rates 10000 25000 50000 100000 200000 300000` controls offered traffic per source and
 `--window-points 16384 65536 262144` controls aggregation volume per source.
 Together they form the default two-dimensional ingestion-rate/window-size sweep.
 `--batch-size` independently controls the OTLP request size.
@@ -136,14 +138,15 @@ networks it creates, including on failure; it saves logs before removal.
 
 `benchmark-results/streaming/` contains:
 
-- `summary.csv`, `summary.json`, `throughput.svg`: repeated throughput and latency summaries.
+- `summary.csv`, `summary.json`, `throughput.svg`: offered-load throughput, delivery, backlog, sustainability, and latency summaries.
+- `capacity.csv`, `capacity.json`: maximum sustainable capacity and KLL/Exact capacity speedup per window.
 - `runs.json`: individual results with per-component CPU/RSS/RX/TX.
 - `resources.csv`, `resources.json`, `resources.svg`: per-component CPU and memory medians.
 - `traffic-<signals>-sps/window-<points>/<rate>mbit/<scenario>/<repeat>/config.json`: workload, CPU sets, image ID and interfaces.
 - `snapshots.json`: raw before/interval/drained counters and latency histograms.
 - `result.json` and seven component logs per run.
 
-CI runs the full 54-run matrix, checks actual network traffic, completed windows,
+CI runs the full 162-run matrix, checks actual network traffic, completed windows,
 zero loss after drain, and resource artifacts. It uploads results even on failure.
 The old PR's 2.43× was measured with the file-backed batch harness and is not a
 result of this streaming implementation. New speedups must be measured, not assumed.

@@ -311,8 +311,11 @@ class Run:
                 # This includes OTAP/runtime/transport and unscoped harness work, not pure framework CPU.
                 resources[role]["outside_scopes_cpu_seconds"] = cpu - sum(scopes.values())
         def backlog(s):
-            sent = sum(s[g]["stats"]["sent_signals"] for g in ("generator_a", "generator_b"))
-            return max(0, sent - s["backend"]["stats"]["received_signals"])
+            ingested = sum(s[g]["stats"]["received_signals"] for g in ("branch_a", "branch_b"))
+            completed = s["backend"]["stats"]["completed_windows"] * self.window_points * 2
+            return max(0, ingested - completed)
+        backlog_start, backlog_end = backlog(before), backlog(after)
+        offered = self.traffic_rate * 2
         report = {"scenario": self.scenario, "branch_egress_mbit_per_second": self.rate,
                   "target_signals_per_second_per_source": self.traffic_rate,
                   "observation_seconds": seconds, "completed_windows": windows,
@@ -320,8 +323,12 @@ class Run:
                   "window_points_per_source": self.window_points,
                   "completed_input_signals": windows * self.window_points * 2,
                   "signals_per_second": windows * self.window_points * 2 / seconds,
+                  "offered_signals_per_second": offered,
+                  "delivery_ratio": windows * self.window_points * 2 / seconds / offered,
                   "window_latency_p50_ms": percentile(histogram, 0.5), "window_latency_p99_ms": percentile(histogram, 0.99),
-                  "inflight_signals_at_start": backlog(before), "inflight_signals_at_end": backlog(after),
+                  "inflight_signals_at_start": backlog_start, "inflight_signals_at_end": backlog_end,
+                  "backlog_growth_signals": backlog_end - backlog_start,
+                  "backlog_growth_windows": (backlog_end - backlog_start) / (self.window_points * 2),
                   "ingested_signals_after_stop": sum(drained[g]["stats"]["received_signals"] for g in ("branch_a", "branch_b")),
                   "unpaired_tail_signals_after_stop": sum(
                       drained[g]["stats"]["received_signals"] for g in ("branch_a", "branch_b"))
@@ -432,17 +439,20 @@ def main():
     parser.add_argument("--warmup", type=float, default=5)
     parser.add_argument("--duration", type=float, default=30)
     parser.add_argument("--sample-interval", type=float, default=1)
-    parser.add_argument("--repetitions", type=int, default=2)
+    parser.add_argument("--repetitions", type=int, default=3)
     parser.add_argument("--memory", default="1g")
-    parser.add_argument("--traffic-rates", type=int, nargs="+", default=[50000, 150000, 300000],
+    parser.add_argument("--traffic-rates", type=int, nargs="+", default=[10000, 25000, 50000, 100000, 200000, 300000],
                         help="target signals/s per source to sweep using OTAP's traffic_generator receiver")
     parser.add_argument("--generator-cores", type=int, default=2,
                         help="OTAP traffic_generator pipeline workers per source; every downstream component always gets one dedicated CPU")
     parser.add_argument("--profile-cpu", action="store_true", help="exclusive synchronous processor thread CPU scopes")
     parser.add_argument("--account-cpu", action="store_true", help="match CPU/input boundaries with warmup and final drains; implied by --profile-cpu")
     parser.add_argument("--perf-command", default="", help="optional host sampler, e.g. 'sudo -n perf'; records four worker processes")
+    parser.add_argument("--sustainable-min-delivery", type=float, default=0.95)
+    parser.add_argument("--sustainable-max-backlog-growth-windows", type=float, default=1.0)
+    parser.add_argument("--sustainable-max-p99-ms", type=float, default=5000)
     args = parser.parse_args()
-    if any(points < 1 for points in args.window_points) or args.batch_size < 1 or any(args.batch_size > points for points in args.window_points) or args.generator_cores < 1 or any(rate < 1 for rate in args.traffic_rates) or not all(math.isfinite(t) for t in (args.warmup, args.duration, args.sample_interval)) or args.warmup < 0 or args.duration <= 0 or args.sample_interval <= 0 or args.repetitions < 1 or any(not math.isfinite(r) or r < 0 for r in args.rates_mbit):
+    if any(points < 1 for points in args.window_points) or args.batch_size < 1 or any(args.batch_size > points for points in args.window_points) or args.generator_cores < 1 or any(rate < 1 for rate in args.traffic_rates) or not all(math.isfinite(t) for t in (args.warmup, args.duration, args.sample_interval)) or args.warmup < 0 or args.duration <= 0 or args.sample_interval <= 0 or args.repetitions < 1 or any(not math.isfinite(r) or r < 0 for r in args.rates_mbit) or not 0 < args.sustainable_min_delivery <= 1 or args.sustainable_max_backlog_growth_windows < 0 or args.sustainable_max_p99_ms <= 0:
         parser.error("invalid benchmark sizes, times, repetitions, or rates")
     args.output.mkdir(parents=True, exist_ok=True)
     results = []
@@ -471,9 +481,16 @@ def main():
                     samples = [r for r in results if r["scenario"] == scenario and r["branch_egress_mbit_per_second"] == rate and r["target_signals_per_second_per_source"] == traffic_rate and r["window_points_per_source"] == window_points]
                     rows.append({"scenario": scenario, "target_signals_per_second_per_source": traffic_rate, "generator_core_count": args.generator_cores, "window_points_per_source": window_points, "branch_egress_mbit_per_second": rate, "repetitions": len(samples),
                                  "median_signals_per_second": statistics.median(s["signals_per_second"] for s in samples),
+                                 "median_delivery_ratio": statistics.median(s["delivery_ratio"] for s in samples),
+                                 "median_backlog_growth_windows": statistics.median(s["backlog_growth_windows"] for s in samples),
                                  "min_signals_per_second": min(s["signals_per_second"] for s in samples),
                                  "max_signals_per_second": max(s["signals_per_second"] for s in samples),
                                  "median_window_latency_p99_ms": statistics.median(s["window_latency_p99_ms"] for s in samples)})
+                    rows[-1]["sustainable"] = (
+                        rows[-1]["median_delivery_ratio"] >= args.sustainable_min_delivery
+                        and rows[-1]["median_backlog_growth_windows"] <= args.sustainable_max_backlog_growth_windows
+                        and rows[-1]["median_window_latency_p99_ms"] <= args.sustainable_max_p99_ms
+                        and all(s["correctness"] == "passed" for s in samples))
     by_key = {(row["target_signals_per_second_per_source"], row["window_points_per_source"], row["branch_egress_mbit_per_second"], row["scenario"]): row for row in rows}
     for row in rows:
         for baseline in ("raw", "exact"):
@@ -499,6 +516,30 @@ def main():
                     if all(resource[key] == row[key] for key in ("scenario", "target_signals_per_second_per_source", "window_points_per_source", "branch_egress_mbit_per_second"))]
         resource_panels.append({**row, "components": matching})
     draw_resources(resource_panels, args.output / "resources.svg")
+    capacities = []
+    for window_points in args.window_points:
+        for rate in args.rates_mbit:
+            capacity = {"window_points_per_source": window_points,
+                        "branch_egress_mbit_per_second": rate}
+            for scenario in args.scenarios:
+                candidates = [row for row in rows if row["scenario"] == scenario
+                              and row["window_points_per_source"] == window_points
+                              and row["branch_egress_mbit_per_second"] == rate
+                              and row["sustainable"]]
+                best = max(candidates, key=lambda row: row["median_signals_per_second"], default=None)
+                capacity[f"{scenario}_maximum_sustainable_signals_per_second"] = (
+                    best["median_signals_per_second"] if best else None)
+                capacity[f"{scenario}_maximum_sustainable_offered_per_source"] = (
+                    best["target_signals_per_second_per_source"] if best else None)
+            exact = capacity.get("exact_maximum_sustainable_signals_per_second")
+            kll = capacity.get("kll_maximum_sustainable_signals_per_second")
+            capacity["kll_over_exact_capacity_speedup"] = kll / exact if exact and kll else None
+            capacities.append(capacity)
+    (args.output / "capacity.json").write_text(json.dumps(capacities, indent=2) + "\n")
+    with (args.output / "capacity.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(capacities[0]))
+        writer.writeheader()
+        writer.writerows(capacities)
     (args.output / "summary.json").write_text(json.dumps(rows, indent=2) + "\n")
     with (args.output / "summary.csv").open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]))

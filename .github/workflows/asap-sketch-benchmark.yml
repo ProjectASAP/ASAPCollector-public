@@ -20,7 +20,7 @@ concurrency:
 jobs:
   benchmark:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,10 +42,13 @@ jobs:
           root = Path("benchmark-results/streaming")
           runs = json.loads((root / "runs.json").read_text())
           summary = json.loads((root / "summary.json").read_text())
-          assert len(runs) == 54
-          assert len(summary) == 27
-          assert len(json.loads((root / "resources.json").read_text())) == 189
-          assert all(row["repetitions"] == 2 for row in summary)
+          capacity = json.loads((root / "capacity.json").read_text())
+          assert len(runs) == 162
+          assert len(summary) == 54
+          assert len(json.loads((root / "resources.json").read_text())) == 378
+          assert len(capacity) == 3
+          assert all(row["repetitions"] == 3 for row in summary)
+          assert all("sustainable" in row for row in summary)
           for run in runs:
               assert run["correctness"] == "passed"
               assert run["completed_windows"] >= 2
