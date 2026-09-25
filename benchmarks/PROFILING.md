@@ -34,6 +34,14 @@ used by other threads cannot inflate a computation scope. Categories are:
 | `processor_bookkeeping` | Remaining synchronous processor work: benchmark labels/validation, window maps, object destruction, pass-through output allocation |
 | `outside_scopes` | Process CPU minus the above: native OTLP receiver/exporter, runtime, channels, native transport conversion, allocator work outside the processor, control listener and probe overhead |
 
+Every run also records `processor_wall_ns`, `output_send_wall_ns`, and
+`output_messages` per role. These counters distinguish synchronous processor
+work from time awaiting capacity in the processor-to-exporter path. They are
+wall-clock diagnostics and must not be added to the exclusive CPU categories.
+If processor wall time plus output-send wall time approaches the observation
+interval while CPU remains below one core, output backpressure explains the
+gap rather than unused compute capacity.
+
 **The residual is not a measurement of pure OTAP scheduling overhead.** Likewise,
 `pdata_codec` is not all OTAP engine time: it also includes the ASAP adapter's
 per-point allocation and labels. Use the call-stack profiles to inspect owners.

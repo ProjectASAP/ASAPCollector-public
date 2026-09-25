@@ -333,6 +333,8 @@ class Run:
                                "lifetime_peak_rss_mib": end["process_peak_rss_kib"] / 1024,
                                "data_rx_bytes": rx, "data_tx_bytes": tx, "data_rx_mbit_s": rx * 8 / elapsed / 1e6,
                                "data_tx_mbit_s": tx * 8 / elapsed / 1e6}
+            for key in ("processor_wall_ns", "output_send_wall_ns", "output_messages"):
+                resources[role][key] = end["stats"].get(key, 0) - start["stats"].get(key, 0)
             if self.args.profile_cpu:
                 scopes = {key: (value - start["profile_cpu_ns"][key]) / 1e9 for key, value in end["profile_cpu_ns"].items()}
                 resources[role]["scoped_cpu_seconds"] = scopes

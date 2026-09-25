@@ -85,7 +85,7 @@ def family(frames):
 
 def analyze_stacks(root):
     rows = []
-    for path in sorted(root.glob('*mbit/*/*/perf-stacks.txt')):
+    for path in sorted(root.rglob('perf-stacks.txt')):
         parsed = list(samples(path))
         mapping = demangle_names({s for _, frames in parsed for s, _ in frames})
         roles = {int(v): k for k, v in json.loads((path.parent / 'profile-pids.json').read_text()).items()}
@@ -119,7 +119,7 @@ def main():
     parser.add_argument('--control-root', type=Path)
     args = parser.parse_args()
     reports = []
-    for path in sorted(args.root.glob('*mbit/*/*/result.json')):
+    for path in sorted(args.root.rglob('result.json')):
         report = json.loads(path.read_text())
         if 'cpu_profile' not in report:
             raise ValueError(f'{path}: requires --profile-cpu or --account-cpu')
@@ -170,7 +170,8 @@ def main():
     if args.control_root:
         comparison = []
         for row in summary:
-            runs = [json.loads(p.read_text()) for p in args.control_root.glob(f'*mbit/{row["scenario"]}/*/result.json')]
+            runs = [json.loads(p.read_text()) for p in args.control_root.rglob('result.json')
+                    if json.loads(p.read_text()).get('scenario') == row['scenario']]
             if not runs:
                 continue
             inputs = sum(r['cpu_profile']['completed_input_signals'] for r in runs)

@@ -109,6 +109,9 @@ struct Stats {
     completed_windows: u64,
     generator_paused: bool,
     otlp_payload_bytes_sent: u64,
+    processor_wall_ns: u64,
+    output_send_wall_ns: u64,
+    output_messages: u64,
     window_latency_ms: BTreeMap<u64, u64>,
 }
 struct Shared {
@@ -228,6 +231,7 @@ impl processor::Processor<OtapPdata> for StreamProcessor {
         effects: &mut processor::EffectHandler<OtapPdata>,
     ) -> Result<(), Error> {
         if let Message::PData(mut pdata) = message {
+            let process_started = Instant::now();
             let outputs = if let Some(normalizer) = &mut self.normalizer {
                 let count = pdata.num_items();
                 {
@@ -252,9 +256,16 @@ impl processor::Processor<OtapPdata> for StreamProcessor {
                 error,
                 source_detail: String::new(),
             })?;
+            let process_wall_ns = process_started.elapsed().as_nanos() as u64;
+            let output_messages = outputs.len() as u64;
+            let send_started = Instant::now();
             for output in outputs {
                 effects.send_message_with_source_node(output).await?;
             }
+            let mut stats = shared().stats.lock().unwrap();
+            stats.processor_wall_ns += process_wall_ns;
+            stats.output_send_wall_ns += send_started.elapsed().as_nanos() as u64;
+            stats.output_messages += output_messages;
         }
         Ok(())
     }
