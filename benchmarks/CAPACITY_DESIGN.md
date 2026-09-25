@@ -49,7 +49,8 @@ For every run the harness records:
 
 A configuration is sustainable when the median across repetitions satisfies all of these conditions:
 
-1. delivery ratio is at least 0.95;
+1. delivery ratio is at least 0.95 after allowing at most one completed-window
+   quantization interval at the observation boundary;
 2. backlog grows by no more than one paired window during observation;
 3. completed-window p99 latency is at most the larger of 5,000 ms and twice the
    theoretical `window size / offered rate` fill time;

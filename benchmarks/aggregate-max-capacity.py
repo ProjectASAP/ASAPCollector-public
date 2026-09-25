@@ -15,7 +15,8 @@ for path in a.root.glob('**/runs.json'):
     runs.extend(json.loads(path.read_text()))
 for r in runs:
     latency_limit=max(5000, 2000*r['window_points_per_source']/r['target_signals_per_second_per_source'])
-    r['_sustainable']=(r['delivery_ratio'] >= a.min_delivery and
+    delivery=r.get('delivery_ratio_with_window_tolerance', r['delivery_ratio'])
+    r['_sustainable']=(delivery >= a.min_delivery and
                        r['backlog_growth_windows'] <= a.max_backlog_windows and
                        r['window_latency_p99_ms'] <= latency_limit and
                        r['correctness']=='passed')

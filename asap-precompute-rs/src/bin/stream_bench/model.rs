@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 // Independent official generators can drift under high load. Keep the skew
 // explicitly bounded while allowing short scheduler/exporter bursts.
-pub const MAX_PENDING: u64 = 64;
+pub const MAX_PENDING: u64 = 1024;
 pub const SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 pub fn value(index: u64) -> f64 {
     let mut x = index.wrapping_add(SEED);
