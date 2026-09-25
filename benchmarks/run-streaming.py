@@ -98,16 +98,30 @@ class Run:
         # least one CPU available for it. Memory is intentionally uncapped for
         # every role; the harness reports actual RSS instead.
         required = self.generator_core_count + len(PROCESSOR_ROLES) + 1
-        if len(cores) < required:
+        shared_infrastructure = len(cores) < required and self.args.allow_shared_infrastructure
+        if len(cores) < required and not shared_infrastructure:
             raise RuntimeError(
                 f"dedicated placement needs {required} CPUs: {self.generator_core_count} "
                 f"traffic-generator CPUs plus one CPU for each of {len(PROCESSOR_ROLES)} processors "
                 "and at least one backend CPU; "
                 f"only {len(cores)} are available"
             )
-        generators = cores[:self.generator_core_count]
-        component_cores = dict(zip(PROCESSOR_ROLES, cores[self.generator_core_count:self.generator_core_count + len(PROCESSOR_ROLES)]))
-        backend_cores = cores[self.generator_core_count + len(PROCESSOR_ROLES):]
+        if shared_infrastructure:
+            if len(cores) < len(PROCESSOR_ROLES):
+                raise RuntimeError(
+                    f"shared-infrastructure smoke placement still needs {len(PROCESSOR_ROLES)} CPUs "
+                    f"for distinct processor assignments; only {len(cores)} are available"
+                )
+            # Correctness smoke mode for small CI runners. The four evaluated
+            # processors remain distinct, while generator/backend infrastructure
+            # may overlap them. Results from this placement are not capacity data.
+            generators = cores[:min(self.generator_core_count, len(cores))]
+            component_cores = dict(zip(PROCESSOR_ROLES, cores[:len(PROCESSOR_ROLES)]))
+            backend_cores = cores
+        else:
+            generators = cores[:self.generator_core_count]
+            component_cores = dict(zip(PROCESSOR_ROLES, cores[self.generator_core_count:self.generator_core_count + len(PROCESSOR_ROLES)]))
+            backend_cores = cores[self.generator_core_count + len(PROCESSOR_ROLES):]
         for suffix in ("data", "control"):
             network = self.prefix + "-" + suffix
             self.command("network", "create", "--internal", network)
@@ -191,6 +205,7 @@ class Run:
                   "warmup_seconds": self.args.warmup, "observation_seconds": self.observation_seconds,
                   "generator_cores": generators, "component_cores": component_cores,
                   "backend_cores": backend_cores,
+                  "placement": "shared-infrastructure-smoke" if shared_infrastructure else "exclusive-capacity",
                   "measurement_clock": "CLOCK_MONOTONIC, shared host kernel", "max_source_skew_windows": 1024, "pdata_channel_capacity": 8, "exporter_max_in_flight": 1,
                   "transport": "standard OTLP/HTTP protobuf, uncompressed, persistent connections",
                   "data_interfaces": self.data_ifaces,
@@ -461,6 +476,8 @@ def main():
                         help="target signals/s per source to sweep using OTAP's traffic_generator receiver")
     parser.add_argument("--generator-cores", type=int, default=4,
                         help="OTAP traffic_generator pipeline workers per source; each measured processor gets one dedicated CPU and the backend gets all remaining CPUs")
+    parser.add_argument("--allow-shared-infrastructure", action="store_true",
+                        help="CI correctness smoke mode: keep processors on distinct CPUs but allow generator/backend overlap; results are not capacity measurements")
     parser.add_argument("--profile-cpu", action="store_true", help="exclusive synchronous processor thread CPU scopes")
     parser.add_argument("--account-cpu", action="store_true", help="match CPU/input boundaries with warmup and final drains; implied by --profile-cpu")
     parser.add_argument("--perf-command", default="", help="optional host sampler, e.g. 'sudo -n perf'; records four worker processes")

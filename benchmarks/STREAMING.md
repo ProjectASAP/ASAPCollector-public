@@ -82,6 +82,12 @@ No component has a Docker memory limit. The exact mapping is recorded as
 `--traffic-rates 10000 25000 50000 100000 200000 300000 400000` controls offered traffic per source and
 `--window-points 16384 65536 262144` controls aggregation volume per source.
 Together they form the default two-dimensional ingestion-rate/window-size sweep.
+
+`--allow-shared-infrastructure` exists only for correctness smoke tests on CI
+runners with fewer than nine CPUs. It keeps the four evaluated processors on
+distinct CPUs but allows generator and backend infrastructure to overlap them.
+The resulting `placement` is recorded as `shared-infrastructure-smoke`; those
+runs must not be used for throughput capacity or resource-efficiency claims.
 `--batch-size` independently controls the OTLP request size.
 Bandwidth shaping uses Linux `tc tbf` on each branch's **data** interface only
 (`NET_ADMIN` only on those containers), with a 32 KiB burst and 100 ms queue.

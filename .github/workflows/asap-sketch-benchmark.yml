@@ -33,7 +33,7 @@ jobs:
       - name: Test streaming window correctness
         run: cargo test --manifest-path asap-precompute-rs/Cargo.toml --release --features stream-benchmark --bin asap-stream-bench
       - name: Run persistent OTLP network benchmark
-        run: ./benchmarks/run-nightly.sh
+        run: ./benchmarks/run-nightly.sh --allow-shared-infrastructure
       - name: Verify streaming measurements
         run: |
           python3 - <<'PYCODE'
@@ -62,8 +62,10 @@ jobs:
           for path in root.glob("traffic-*-sps/window-*/*mbit/*/*/config.json"):
               config = json.loads(path.read_text())
               assigned = list(config["component_cores"].values())
-              assert len(assigned) == 5 and len(set(assigned)) == 5
-              assert set(config["generator_cores"]).isdisjoint(assigned)
+              assert len(assigned) == 4 and len(set(assigned)) == 4
+              assert config["placement"] in {"exclusive-capacity", "shared-infrastructure-smoke"}
+              if config["placement"] == "exclusive-capacity":
+                  assert set(config["generator_cores"]).isdisjoint(assigned)
           assert (root / "throughput.svg").is_file()
           assert (root / "resources.svg").is_file()
           PYCODE
