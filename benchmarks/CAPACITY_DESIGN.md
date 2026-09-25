@@ -78,6 +78,14 @@ KLL/Exact capacity speedup(W) = capacity(KLL, W) / capacity(Exact, W)
 
 `capacity.json` and `capacity.csv` contain this result. `summary.json` retains achieved throughput ratios at every offered load so reviewers can inspect the full curve.
 
+For the downstream-saturation experiment, the report also records the maximum
+observed backend-validated throughput after offered load has crossed the
+downstream plateau. This peak is accepted only when a higher offered point
+fails to increase throughput and the limiting downstream component approaches
+one core, or the plateau repeats with another generator-core setting. The
+downstream maximum-throughput speedup uses these plateau peaks; sustainable
+capacity remains a separate admission-control result.
+
 Raw capacity is reported as the transport ceiling. `KLL/Raw` may describe how closely KLL approaches that ceiling, but it is not called an algorithm speedup because raw does not compute quantiles.
 
 KLL accuracy is fixed at `k=400`; capacity tuning must not change `k`. The

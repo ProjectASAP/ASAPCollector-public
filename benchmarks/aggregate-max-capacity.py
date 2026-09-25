@@ -27,6 +27,13 @@ windows=sorted({r['window_points_per_source'] for r in runs})
 for window in windows:
     row={'window_points_per_source':window}
     for scenario in ('raw','exact','kll'):
+        observed=[r for r in runs if r['scenario']==scenario and r['window_points_per_source']==window]
+        peak=max(observed,key=lambda r:r['signals_per_second'],default=None)
+        peak_prefix=scenario+'_maximum_observed_'
+        row[peak_prefix+'signals_per_second']=peak['signals_per_second'] if peak else None
+        row[peak_prefix+'offered_per_source']=peak['target_signals_per_second_per_source'] if peak else None
+        row[peak_prefix+'generator_cores']=peak['generator_core_count'] if peak else None
+        row[peak_prefix+'max_downstream_cpu']=peak['_max_downstream_cpu'] if peak else None
         candidates=[r for r in runs if r['scenario']==scenario and r['window_points_per_source']==window and r['_sustainable']]
         best=max(candidates,key=lambda r:r['signals_per_second'],default=None)
         prefix=scenario+'_'
@@ -40,6 +47,11 @@ for window in windows:
     if row['kll_maximum_sustainable_signals_per_second'] and row['raw_maximum_sustainable_signals_per_second']:
         row['kll_over_raw_ceiling']=row['kll_maximum_sustainable_signals_per_second']/row['raw_maximum_sustainable_signals_per_second']
     else: row['kll_over_raw_ceiling']=None
+    exact_peak=row['exact_maximum_observed_signals_per_second']
+    raw_peak=row['raw_maximum_observed_signals_per_second']
+    kll_peak=row['kll_maximum_observed_signals_per_second']
+    row['kll_over_exact_maximum_throughput']=kll_peak/exact_peak if kll_peak and exact_peak else None
+    row['kll_over_raw_maximum_throughput']=kll_peak/raw_peak if kll_peak and raw_peak else None
     rows.append(row)
 (a.root/'max-capacity.json').write_text(json.dumps(rows,indent=2)+'\n')
 with (a.root/'max-capacity.csv').open('w',newline='') as f:
