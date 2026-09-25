@@ -18,7 +18,7 @@ import urllib.request
 import uuid
 
 ROLES = ("generator_a", "generator_b", "branch_a", "branch_b", "merge", "estimate", "backend")
-WORKER_ROLES = ("branch_a", "branch_b", "merge", "estimate", "backend")
+PROCESSOR_ROLES = ("branch_a", "branch_b", "merge", "estimate")
 SCENARIOS = ("raw", "exact", "kll")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -93,15 +93,20 @@ class Run:
 
     def setup(self):
         cores = sorted(os.sched_getaffinity(0))
-        required = self.generator_core_count + len(WORKER_ROLES)
+        # The backend is benchmark infrastructure, so it receives every host CPU
+        # left after the isolated generator and processor assignments. Keep at
+        # least one CPU available for it, but do not impose a CPU or memory limit.
+        required = self.generator_core_count + len(PROCESSOR_ROLES) + 1
         if len(cores) < required:
             raise RuntimeError(
                 f"dedicated placement needs {required} CPUs: {self.generator_core_count} "
-                f"traffic-generator CPUs plus one CPU for each of {len(WORKER_ROLES)} components; "
+                f"traffic-generator CPUs plus one CPU for each of {len(PROCESSOR_ROLES)} processors "
+                "and at least one backend CPU; "
                 f"only {len(cores)} are available"
             )
         generators = cores[:self.generator_core_count]
-        component_cores = dict(zip(WORKER_ROLES, cores[self.generator_core_count:required]))
+        component_cores = dict(zip(PROCESSOR_ROLES, cores[self.generator_core_count:self.generator_core_count + len(PROCESSOR_ROLES)]))
+        backend_cores = cores[self.generator_core_count + len(PROCESSOR_ROLES):]
         for suffix in ("data", "control"):
             network = self.prefix + "-" + suffix
             self.command("network", "create", "--internal", network)
@@ -110,7 +115,8 @@ class Run:
         # All processes are created once and remain alive through warmup, observation, drain.
         for role in reversed(ROLES):
             name = self.prefix + "-" + role
-            cpu_set = generators if role.startswith("generator") else [component_cores[role]]
+            cpu_set = (generators if role.startswith("generator") else
+                       backend_cores if role == "backend" else [component_cores[role]])
             env = {
                 "ASAP_ROLE": role.split("_")[0], "ASAP_SCENARIO": self.scenario,
                 "ASAP_WINDOW_POINTS": str(self.window_points), "ASAP_BATCH_SIZE": str(self.args.batch_size),
@@ -122,8 +128,9 @@ class Run:
                 "ASAP_PROFILE_CPU": "1" if self.args.profile_cpu else "0",
             }
             cmd = ["create", "--name", name, "--network", self.networks[0], "--network-alias", role,
-                   "--cpuset-cpus", ",".join(map(str, cpu_set)), "--memory", self.args.memory,
-                   "--memory-swap", self.args.memory]
+                   "--cpuset-cpus", ",".join(map(str, cpu_set))]
+            if role != "backend":
+                cmd += ["--memory", self.args.memory, "--memory-swap", self.args.memory]
             if self.rate and role.startswith("branch"):
                 cmd += ["--cap-add", "NET_ADMIN"]
             for key, value in env.items():
@@ -184,9 +191,11 @@ class Run:
                   "window_points_per_source": self.window_points, "batch_size": self.args.batch_size,
                   "warmup_seconds": self.args.warmup, "observation_seconds": self.observation_seconds,
                   "generator_cores": generators, "component_cores": component_cores,
+                  "backend_cores": backend_cores,
                   "measurement_clock": "CLOCK_MONOTONIC, shared host kernel", "max_source_skew_windows": 1024, "pdata_channel_capacity": 8, "exporter_max_in_flight": 1,
                   "transport": "standard OTLP/HTTP protobuf, uncompressed, persistent connections",
-                  "data_interfaces": self.data_ifaces, "container_memory_limit": self.args.memory,
+                  "data_interfaces": self.data_ifaces,
+                  "container_memory_limit": self.args.memory, "backend_memory_limit": "unlimited",
                   "image": self.args.image, "image_id": json.loads(self.command("image", "inspect", self.args.image))[0]["Id"],
                   "profile_cpu": self.args.profile_cpu, "account_cpu": self.args.account_cpu or self.args.profile_cpu,
                   "perf_command": self.args.perf_command,
@@ -453,7 +462,7 @@ def main():
     parser.add_argument("--traffic-rates", type=int, nargs="+", default=[10000, 25000, 50000, 100000, 200000, 300000, 400000],
                         help="target signals/s per source to sweep using OTAP's traffic_generator receiver")
     parser.add_argument("--generator-cores", type=int, default=4,
-                        help="OTAP traffic_generator pipeline workers per source; every downstream component always gets one dedicated CPU")
+                        help="OTAP traffic_generator pipeline workers per source; each measured processor gets one dedicated CPU and the backend gets all remaining CPUs")
     parser.add_argument("--profile-cpu", action="store_true", help="exclusive synchronous processor thread CPU scopes")
     parser.add_argument("--account-cpu", action="store_true", help="match CPU/input boundaries with warmup and final drains; implied by --profile-cpu")
     parser.add_argument("--perf-command", default="", help="optional host sampler, e.g. 'sudo -n perf'; records four worker processes")

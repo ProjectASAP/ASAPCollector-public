@@ -20,7 +20,7 @@ for r in runs:
                        r['backlog_growth_windows'] <= a.max_backlog_windows and
                        r['window_latency_p99_ms'] <= latency_limit and
                        r['correctness']=='passed')
-    downstream=('branch_a','branch_b','merge','estimate','backend')
+    downstream=('branch_a','branch_b','merge','estimate')
     r['_max_downstream_cpu']=max(r['resources'][role]['cpu_cores_used'] for role in downstream)
 rows=[]
 windows=sorted({r['window_points_per_source'] for r in runs})

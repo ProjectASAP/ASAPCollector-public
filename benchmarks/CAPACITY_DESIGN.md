@@ -19,10 +19,10 @@ flowchart LR
   BA --> M["Merge<br/>1 exclusive core"]
   BB --> M
   M --> E["Estimate<br/>1 exclusive core"]
-  E --> V["Validating backend<br/>1 exclusive core"]
+  E --> V["Validating backend<br/>all remaining host cores<br/>unlimited container memory"]
 ```
 
-The five downstream components use distinct cores outside the generator pool. Every container has the same memory limit. Data uses uncompressed OTLP/HTTP protobuf over persistent TCP connections. Control traffic uses a separate Docker network and is excluded from data-interface counters.
+The four measured processors use distinct cores outside the generator pool. The validating backend is benchmark infrastructure: it receives all remaining host cores and has no Docker memory limit, so its resource budget does not cap measured pipeline throughput. Its CPU, RSS, and network usage are still reported. Generators and measured processors retain the configured memory limit. Data uses uncompressed OTLP/HTTP protobuf over persistent TCP connections. Control traffic uses a separate Docker network and is excluded from data-interface counters.
 
 ## Independent variables
 
@@ -104,8 +104,9 @@ can saturate that scenario's downstream pipeline. The automated sweep tests Raw
 through 16 cores and KLL through 32 cores; Raw is extended too if 16 remains the
 limiting resource.
 
-The downstream budget is identical for every scenario: branch A, branch B,
-merge, estimate, and backend each have one exclusive core. A capacity boundary
+The downstream processor budget is identical for every scenario: branch A,
+branch B, merge, and estimate each have one exclusive core. The backend uses all
+remaining host cores with unlimited container memory. A capacity boundary
 is accepted when increasing offered traffic and generator cores no longer raises
 backend-validated throughput, and either a downstream component sustains at
 least 0.90 core or the throughput plateau repeats at two generator-core settings.
@@ -114,7 +115,7 @@ include them in the KLL/Exact capacity ratio.
 
 Offered traffic is increased until every scenario has an unsustainable point
 beyond its plateau. This measures the maximum work completed by the same
-five-core downstream topology rather than the capacity of a shared traffic
+four-core processor topology rather than the capacity of a shared traffic
 source.
 
 ## Presentation
