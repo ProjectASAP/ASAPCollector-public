@@ -90,9 +90,10 @@ vector.
 
 The generator is a workload driver and is outside the compared downstream
 resource budget. Raw, Exact, and fixed-`k=400` KLL may therefore use different
-generator core counts. Starting at four cores, repeat each scenario's high-load
-boundary with 8 and 16 generator cores until the generator can saturate that
-scenario's downstream pipeline.
+generator core counts. Starting at four cores, increase the source pool until it
+can saturate that scenario's downstream pipeline. The automated sweep tests Raw
+through 16 cores and KLL through 32 cores; Raw is extended too if 16 remains the
+limiting resource.
 
 The downstream budget is identical for every scenario: branch A, branch B,
 merge, estimate, and backend each have one exclusive core. A capacity boundary
