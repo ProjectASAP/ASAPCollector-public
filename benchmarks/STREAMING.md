@@ -69,15 +69,15 @@ and latency accounting; their overhead is included for all scenarios.
 | Repetitions | 3 per scenario/configuration; rotating scenario order |
 | Link conditions | Unlimited by default; optional per-branch caps with `--rates-mbit` |
 | Placement | Configurable generator CPU pool; one dedicated CPU each for branch A, branch B, merge, and estimate; backend uses all remaining CPUs |
-| Container memory | Configured limit for generators/processors; backend unlimited |
+| Container memory | Unlimited for every component; sampled and lifetime peak RSS reported |
 
 Linux and a working Docker daemon are required. `--generator-cores N` controls
 the OTAP pipeline workers and CPU pool used by each traffic generator (default
 4; the two source containers share that pool). At least five additional
 CPUs are required: branch A, branch B, merge, and estimate each receive one
 exclusive `--cpuset-cpus` assignment. The backend receives all remaining host
-CPUs and no Docker memory limit because it is validation infrastructure rather
-than a measured processor. The exact mapping is recorded as
+CPUs because it is validation infrastructure rather than a measured processor.
+No component has a Docker memory limit. The exact mapping is recorded as
 `generator_cores`, `component_cores`, and `backend_cores` in every run's `config.json`. Change
 `--traffic-rates 10000 25000 50000 100000 200000 300000 400000` controls offered traffic per source and
 `--window-points 16384 65536 262144` controls aggregation volume per source.

@@ -95,7 +95,8 @@ class Run:
         cores = sorted(os.sched_getaffinity(0))
         # The backend is benchmark infrastructure, so it receives every host CPU
         # left after the isolated generator and processor assignments. Keep at
-        # least one CPU available for it, but do not impose a CPU or memory limit.
+        # least one CPU available for it. Memory is intentionally uncapped for
+        # every role; the harness reports actual RSS instead.
         required = self.generator_core_count + len(PROCESSOR_ROLES) + 1
         if len(cores) < required:
             raise RuntimeError(
@@ -129,8 +130,6 @@ class Run:
             }
             cmd = ["create", "--name", name, "--network", self.networks[0], "--network-alias", role,
                    "--cpuset-cpus", ",".join(map(str, cpu_set))]
-            if role != "backend":
-                cmd += ["--memory", self.args.memory, "--memory-swap", self.args.memory]
             if self.rate and role.startswith("branch"):
                 cmd += ["--cap-add", "NET_ADMIN"]
             for key, value in env.items():
@@ -195,7 +194,7 @@ class Run:
                   "measurement_clock": "CLOCK_MONOTONIC, shared host kernel", "max_source_skew_windows": 1024, "pdata_channel_capacity": 8, "exporter_max_in_flight": 1,
                   "transport": "standard OTLP/HTTP protobuf, uncompressed, persistent connections",
                   "data_interfaces": self.data_ifaces,
-                  "container_memory_limit": self.args.memory, "backend_memory_limit": "unlimited",
+                  "container_memory_limit": "unlimited",
                   "image": self.args.image, "image_id": json.loads(self.command("image", "inspect", self.args.image))[0]["Id"],
                   "profile_cpu": self.args.profile_cpu, "account_cpu": self.args.account_cpu or self.args.profile_cpu,
                   "perf_command": self.args.perf_command,
@@ -458,7 +457,6 @@ def main():
                         help="extend observation time to cover at least this many windows at the offered rate")
     parser.add_argument("--sample-interval", type=float, default=1)
     parser.add_argument("--repetitions", type=int, default=3)
-    parser.add_argument("--memory", default="1g")
     parser.add_argument("--traffic-rates", type=int, nargs="+", default=[10000, 25000, 50000, 100000, 200000, 300000, 400000],
                         help="target signals/s per source to sweep using OTAP's traffic_generator receiver")
     parser.add_argument("--generator-cores", type=int, default=4,

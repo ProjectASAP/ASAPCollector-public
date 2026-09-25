@@ -23,7 +23,7 @@ flowchart LR
   BA --> M["Merge<br/>1 exclusive core"]
   BB --> M
   M --> E["Estimate<br/>1 exclusive core"]
-  E --> V["Validating backend<br/>1 exclusive core"]
+  E --> V["Validating backend<br/>all remaining host cores"]
 ```
 
 The **evaluated pipeline** consists of:
@@ -32,9 +32,9 @@ The **evaluated pipeline** consists of:
 Branch A + Branch B + Merge + Estimate
 ```
 
-Each evaluated component receives one exclusive CPU core. Generator and backend resources are benchmark infrastructure: they are monitored to ensure they do not limit the experiment, but are excluded from pipeline CPU and memory comparisons.
+Each evaluated component receives one exclusive CPU core. Generator and backend resources are benchmark infrastructure: they are monitored to ensure they do not limit the experiment, but are excluded from pipeline CPU and memory comparisons. The backend receives all remaining host cores.
 
-All containers use the same memory limit. Data-plane communication uses uncompressed OTLP/HTTP protobuf over persistent TCP connections. Control traffic uses a separate Docker network and is excluded from data-plane counters.
+No container has a Docker memory limit. Sampled and lifetime peak RSS are reported per component. Data-plane communication uses uncompressed OTLP/HTTP protobuf over persistent TCP connections. Control traffic uses a separate Docker network and is excluded from data-plane counters.
 
 KLL uses production `KLLWrapper` with fixed `k=400`.
 
@@ -44,7 +44,7 @@ KLL uses production `KLLWrapper` with fixed `k=400`.
 - **Aggregation window per source:** `16,384`, `65,536`, and `262,144` observations.
 - **Scenario:** raw, exact, or KLL.
 
-Batch size, transport configuration, memory limits, warm-up, observation duration, and input values are controlled. Exact and KLL use identical values for these controls within a comparison.
+Batch size, transport configuration, warm-up, observation duration, and input values are controlled. Exact and KLL use identical values for these controls within a comparison.
 
 ## Measurements
 
@@ -96,7 +96,7 @@ For each Exact/KLL comparison, hold constant:
 - batch size;
 - transport configuration;
 - CPU placement;
-- memory limits;
+- uncapped container memory;
 - warm-up and observation duration;
 - generator configuration.
 
@@ -173,7 +173,7 @@ Merge      = 1 exclusive core
 Estimate   = 1 exclusive core
 ```
 
-All evaluated containers use the same memory limit.
+All containers have uncapped memory; actual RSS is measured per component.
 
 Offered traffic is increased independently for each scenario until its sustainable-capacity boundary is bracketed.
 
@@ -223,7 +223,7 @@ Generator CPU and memory are not included in the Exact/KLL resource or capacity 
 
 ### Backend
 
-The backend validates correctness and counts completed paired windows. Its CPU and memory are also outside the evaluated pipeline budget.
+The backend receives all remaining host CPU cores and has uncapped memory. It validates correctness and counts completed paired windows. Its CPU and memory are also outside the evaluated pipeline budget.
 
 Backend utilization is monitored to verify that validation does not become the throughput bottleneck.
 

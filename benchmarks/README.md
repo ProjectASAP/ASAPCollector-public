@@ -83,8 +83,8 @@ final/estimate worker. Every worker is a separate OS process containing a real
 OTAP `RuntimePipeline`; the generators run outside OTAP. Two available CPUs
 form a configurable traffic-generator pool. Branch A, branch B, merge, and
 estimate each receive one dedicated CPU with `taskset`/Docker `--cpuset-cpus`.
-The validating backend receives all remaining host CPUs and has no Docker
-memory limit because it is benchmark infrastructure.
+The validating backend receives all remaining host CPUs because it is benchmark
+infrastructure. No component has a Docker memory limit; actual RSS is reported.
 Each process writes elapsed time, CPU use, peak RSS, output bytes, and OTLP
 file serialization time. The upstream Docker monitor includes the entire process
 tree in container CPU and RSS measurements. All scenarios use the same input count and
