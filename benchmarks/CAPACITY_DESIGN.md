@@ -1,134 +1,326 @@
-# Sustainable throughput and speedup experiment design
+# Throughput and resource-efficiency experiment design
 
 ## Purpose
 
-The experiment measures how much validated input each pipeline can sustain with the same CPU, memory, transport, batch, window, and input data constraints. Its primary comparison is KLL against exact aggregation. Raw is the transport ceiling and is not an equivalent quantile algorithm.
+This experiment evaluates KLL-based approximate quantile aggregation against exact aggregation along two dimensions:
 
-A throughput ratio at one offered load is descriptive only. The reported speedup is the ratio between maximum sustainable capacities.
+1. **Resource efficiency at the same workload:** how much CPU and memory each pipeline requires to process the same input rate.
+2. **Capacity under the same resource budget:** how much validated input each pipeline can sustain with the same downstream CPU and memory allocation.
+
+Raw forwarding is reported separately as a transport ceiling. It is not an equivalent quantile algorithm and is therefore not used for the primary Exact/KLL comparison.
 
 ## Fixed architecture
 
 ```mermaid
 flowchart LR
-  subgraph G["Shared tunable generator CPU pool"]
+  subgraph G["Generator CPU pool"]
     GA["Official OTAP traffic_generator A<br/>N workers"]
     GB["Official OTAP traffic_generator B<br/>N workers"]
   end
+
   GA -->|OTLP/HTTP protobuf| BA["Branch A<br/>1 exclusive core"]
   GB -->|OTLP/HTTP protobuf| BB["Branch B<br/>1 exclusive core"]
   BA --> M["Merge<br/>1 exclusive core"]
   BB --> M
   M --> E["Estimate<br/>1 exclusive core"]
-  E --> V["Validating backend<br/>all remaining host cores<br/>unlimited container memory"]
+  E --> V["Validating backend<br/>1 exclusive core"]
 ```
 
-The four measured processors use distinct cores outside the generator pool. The validating backend is benchmark infrastructure: it receives all remaining host cores and has no Docker memory limit, so its resource budget does not cap measured pipeline throughput. Its CPU, RSS, and network usage are still reported. Generators and measured processors retain the configured memory limit. Data uses uncompressed OTLP/HTTP protobuf over persistent TCP connections. Control traffic uses a separate Docker network and is excluded from data-interface counters.
+The **evaluated pipeline** consists of:
+
+```text
+Branch A + Branch B + Merge + Estimate
+```
+
+Each evaluated component receives one exclusive CPU core. Generator and backend resources are benchmark infrastructure: they are monitored to ensure they do not limit the experiment, but are excluded from pipeline CPU and memory comparisons.
+
+All containers use the same memory limit. Data-plane communication uses uncompressed OTLP/HTTP protobuf over persistent TCP connections. Control traffic uses a separate Docker network and is excluded from data-plane counters.
+
+KLL uses production `KLLWrapper` with fixed `k=400`.
 
 ## Independent variables
 
-- Offered traffic per source: 10k, 25k, 50k, 100k, 200k, 300k, and 400k signals/s by default. The 400k point brackets the optimized KLL capacity observed near 300k/source.
-- Aggregation window per source: 16,384, 65,536, and 262,144 observations.
-- Scenario: raw, exact, or KLL.
+- **Offered traffic per source:** increased as needed to cover both matched-load points and each scenario's capacity boundary.
+- **Aggregation window per source:** `16,384`, `65,536`, and `262,144` observations.
+- **Scenario:** raw, exact, or KLL.
 
-Generator cores, batch size, link cap, memory limit, warm-up, and observation duration are recorded controls. A comparison is valid only within the same control configuration.
+Batch size, transport configuration, memory limits, warm-up, observation duration, and input values are controlled. Exact and KLL use identical values for these controls within a comparison.
 
 ## Measurements
 
-Throughput is completed paired windows times two sources times window size, divided by the backend observation interval. HTTP acceptance and unmatched source tails do not count.
-
-For every run the harness records:
+For every run, the harness records:
 
 - offered and backend-validated signals/s;
-- delivery ratio: validated throughput divided by offered traffic;
-- backlog at both observation boundaries and backlog growth in paired-window units;
+- delivery ratio;
+- backlog at both observation boundaries;
 - completed-window p50 and p99 latency;
-- validation failures and unmatched drain tail;
-- CPU, RSS, and data-plane RX/TX for all seven components.
+- correctness failures and unmatched drain tail;
+- per-component CPU and RSS;
+- per-component data-plane RX/TX.
 
-## Sustainable point
+Throughput is computed from completed paired windows:
 
-A configuration is sustainable when the median across repetitions satisfies all of these conditions:
+```text
+validated throughput =
+    completed paired windows
+    × 2 sources
+    × observations/source/window
+    / observation interval
+```
 
-1. delivery ratio is at least 0.95 after allowing at most one completed-window
-   quantization interval at the observation boundary;
+HTTP acceptance and unmatched source tails do not count as completed work.
+
+Pipeline resource usage includes only:
+
+```text
+branch_a + branch_b + merge + estimate
+```
+
+Generator and backend measurements are retained for bottleneck validation but excluded from resource-efficiency results.
+
+---
+
+## Experiment A: Same workload → resource efficiency
+
+### Goal
+
+Measure how much pipeline CPU and memory Exact and KLL require to process the **same workload**.
+
+### Fairness constraints
+
+For each Exact/KLL comparison, hold constant:
+
+- offered traffic;
+- aggregation window size;
+- input values;
+- batch size;
+- transport configuration;
+- CPU placement;
+- memory limits;
+- warm-up and observation duration;
+- generator configuration.
+
+The selected offered load must be sustainable for **both** Exact and KLL. This prevents resource comparisons from mixing a stable pipeline with an overloaded one.
+
+### CPU efficiency
+
+Pipeline CPU is:
+
+```text
+pipeline_cpu =
+    cpu(branch_a)
+    + cpu(branch_b)
+    + cpu(merge)
+    + cpu(estimate)
+```
+
+Report both absolute CPU consumption and normalized CPU cost:
+
+```text
+core-seconds per million validated signals =
+    pipeline_cpu / (validated_throughput / 1,000,000)
+```
+
+The normalized metric captures the CPU required to perform the same amount of validated work.
+
+### Memory efficiency
+
+Report RSS separately for branch, merge, and estimate stages, together with aggregate pipeline RSS:
+
+```text
+pipeline_rss =
+    rss(branch_a)
+    + rss(branch_b)
+    + rss(merge)
+    + rss(estimate)
+```
+
+The primary memory comparison is performed at matched offered load.
+
+Memory is also reported across window sizes to show how aggregation state scales with increasing window size.
+
+Generator and backend RSS are excluded because they do not represent aggregation state.
+
+### Primary resource-efficiency results
+
+For each window size, report:
+
+| Window | Scenario | Offered load | Validated throughput | Pipeline CPU | Core-s / M signals | Pipeline RSS |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 16,384 | Exact | same | ... | ... | ... | ... |
+| 16,384 | KLL | same | ... | ... | ... | ... |
+| 65,536 | Exact | same | ... | ... | ... | ... |
+| 65,536 | KLL | same | ... | ... | ... | ... |
+| 262,144 | Exact | same | ... | ... | ... | ... |
+| 262,144 | KLL | same | ... | ... | ... | ... |
+
+The matched offered load should be chosen below the lower of the Exact and KLL sustainable-capacity boundaries for that window.
+
+---
+
+## Experiment B: Same resource budget → capacity
+
+### Goal
+
+Measure how much traffic Exact and KLL can sustain with the **same evaluated pipeline resources**.
+
+The fixed downstream budget is:
+
+```text
+Branch A   = 1 exclusive core
+Branch B   = 1 exclusive core
+Merge      = 1 exclusive core
+Estimate   = 1 exclusive core
+```
+
+All evaluated containers use the same memory limit.
+
+Offered traffic is increased independently for each scenario until its sustainable-capacity boundary is bracketed.
+
+### Sustainable point
+
+A configuration is sustainable when the median across repetitions satisfies all of the following:
+
+1. delivery ratio is at least `0.95`, allowing at most one completed-window quantization interval at the observation boundary;
 2. backlog grows by no more than one paired window during observation;
-3. completed-window p99 latency is at most the larger of 5,000 ms and twice the
-   theoretical `window size / offered rate` fill time;
+3. completed-window p99 latency is at most the larger of `5,000 ms` and twice the theoretical `window size / offered rate` fill time;
 4. every repetition passes end-to-end correctness validation.
 
-The base thresholds are explicit CLI options. Observation time is automatically
-extended beyond 30 seconds when needed to cover at least three windows at the
-offered rate. The default run uses three repetitions and reports medians. A rate
-grid should include at least one sustainable and one unsustainable point for
-exact and KLL; extend the grid when a capacity boundary is not bracketed.
+Observation time is extended beyond 30 seconds when necessary to cover at least three windows.
 
-## Capacity and speedup
+The default experiment uses three repetitions and reports medians.
+
+The offered-load sweep must contain at least one sustainable and one unsustainable point around the capacity boundary. The grid is extended when necessary.
+
+### Capacity
 
 For scenario `S` and window `W`:
 
 ```text
-capacity(S, W) = highest median backend-validated throughput among sustainable offered-load points
+capacity(S, W) =
+    highest median backend-validated throughput
+    among sustainable offered-load points
 ```
 
-The primary result is:
+The primary capacity result is:
 
 ```text
-KLL/Exact capacity speedup(W) = capacity(KLL, W) / capacity(Exact, W)
+KLL/Exact capacity speedup(W) =
+    capacity(KLL, W) / capacity(Exact, W)
 ```
 
-`capacity.json` and `capacity.csv` contain this result. `summary.json` retains achieved throughput ratios at every offered load so reviewers can inspect the full curve.
+`capacity.json` and `capacity.csv` contain the resulting capacity boundaries. `summary.json` retains all offered-load points so the complete throughput curve remains inspectable.
 
-For the downstream-saturation experiment, the report also records the maximum
-observed backend-validated throughput after offered load has crossed the
-downstream plateau. This peak is accepted only when a higher offered point
-fails to increase throughput and the limiting downstream component approaches
-one core, or the plateau repeats with another generator-core setting. The
-downstream maximum-throughput speedup uses these plateau peaks; sustainable
-capacity remains a separate admission-control result.
+### Generator provisioning
 
-Raw capacity is reported as the transport ceiling. `KLL/Raw` may describe how closely KLL approaches that ceiling, but it is not called an algorithm speedup because raw does not compute quantiles.
+The generator is outside the evaluated resource budget.
 
-KLL accuracy is fixed at `k=400`; capacity tuning must not change `k`. The
-allowed performance parameters are generator workers/cores, official generator
-strategy, and OTLP batch size. Raw, Exact, and KLL comparisons use identical
-values for those controls. The optimized branch feeds deterministic indices
-directly into a batch update path without allocating an intermediate value
-vector.
+Generator cores may therefore be increased when necessary to drive the evaluated pipeline to saturation. The report records the generator configuration used for every point.
 
-## Generator provisioning
+A capacity result is valid only when the generator is demonstrably not the limiting resource. Increasing generator resources should not materially increase validated throughput once the downstream plateau has been reached.
 
-The generator is a workload driver and is outside the compared downstream
-resource budget. Raw, Exact, and fixed-`k=400` KLL may therefore use different
-generator core counts. Starting at four cores, increase the source pool until it
-can saturate that scenario's downstream pipeline. The automated sweep tests Raw
-through 16 cores and KLL through 32 cores; Raw is extended too if 16 remains the
-limiting resource.
+Generator CPU and memory are not included in the Exact/KLL resource or capacity ratios.
 
-The downstream processor budget is identical for every scenario: branch A,
-branch B, merge, and estimate each have one exclusive core. The backend uses all
-remaining host cores with unlimited container memory. A capacity boundary
-is accepted when increasing offered traffic and generator cores no longer raises
-backend-validated throughput, and either a downstream component sustains at
-least 0.90 core or the throughput plateau repeats at two generator-core settings.
-The report records the generator cores needed to drive each result, but does not
-include them in the KLL/Exact capacity ratio.
+### Backend
 
-Offered traffic is increased until every scenario has an unsustainable point
-beyond its plateau. This measures the maximum work completed by the same
-four-core processor topology rather than the capacity of a shared traffic
-source.
+The backend validates correctness and counts completed paired windows. Its CPU and memory are also outside the evaluated pipeline budget.
+
+Backend utilization is monitored to verify that validation does not become the throughput bottleneck.
+
+---
+
+## Raw transport baseline
+
+Raw forwarding is evaluated separately to characterize the transport and serialization ceiling.
+
+Raw results answer:
+
+```text
+How much traffic can this benchmark topology transport without quantile computation?
+```
+
+They do not answer:
+
+```text
+How much faster is KLL than another quantile algorithm?
+```
+
+Therefore `KLL/Raw` may be reported as proximity to the transport ceiling, but it is not reported as an algorithmic speedup.
+
+---
 
 ## Presentation
 
-The report must show:
+The primary report should contain four results.
 
-1. offered load versus backend-validated throughput, with the ideal `y=x` line;
-2. the sustainable/unsustainable classification for every point;
-3. maximum sustainable capacity and KLL/Exact capacity speedup per window;
-4. per-component CPU, RSS, RX/TX, backlog growth, and p99 latency at the capacity boundary.
+### 1. Throughput curve
 
-A capacity claim uses the nightly three-repetition, 30-second measurements. Short local smoke runs verify implementation and artifact generation but do not establish the final speedup.
+Plot:
+
+```text
+x = offered traffic
+y = backend-validated throughput
+series = Exact, KLL
+```
+
+Include the ideal `y=x` line and mark sustainable and unsustainable points.
+
+### 2. Sustainable capacity
+
+Report:
+
+| Window | Exact capacity | KLL capacity | KLL / Exact |
+| ---: | ---: | ---: | ---: |
+| 16,384 | ... | ... | ... |
+| 65,536 | ... | ... | ... |
+| 262,144 | ... | ... | ... |
+
+This is the primary performance result.
+
+### 3. CPU efficiency at matched load
+
+Plot or report:
+
+```text
+x = window size
+y = pipeline core-seconds / million validated signals
+series = Exact, KLL
+```
+
+This is the primary CPU-efficiency result.
+
+### 4. Memory at matched load
+
+Plot:
+
+```text
+x = window size
+y = pipeline peak RSS
+series = Exact, KLL
+```
+
+Also retain the per-component breakdown to distinguish branch state from merge and estimate state.
+
+This is the primary memory-efficiency result.
+
+Detailed per-component CPU, RSS, RX/TX, backlog, and latency remain available in the generated benchmark artifacts rather than being required in the main summary.
 
 ## Interpretation
 
-At saturation, the component CPU plot identifies the limiting stage. A component need not consume a full core for the pipeline to be unsustainable: synchronization, bounded queues, transport waits, or multiple stages can constrain capacity. CPU limits, achieved load, backlog, latency, and correctness must therefore be interpreted together.
+The two experiments answer different questions and should not be mixed.
+
+**Matched workload** answers:
+
+```text
+For the same amount of input work, how many resources does each approach consume?
+```
+
+**Matched resource budget** answers:
+
+```text
+With the same aggregation resources, how much work can each approach sustain?
+```
+
+CPU or RSS measured at each scenario's independently selected throughput peak must not be used as evidence of lower resource consumption, because those points represent different workloads.
+
+At saturation, per-component CPU, backlog, and latency are used to identify the limiting stage. A pipeline may become unsustainable without every component reaching one full core because synchronization, queues, transport, or interactions across stages may constrain capacity.
