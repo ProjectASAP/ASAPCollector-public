@@ -1,6 +1,6 @@
 name: Nightly - aligned OTAP quantile pipelines
 
-# Every scenario uses the same image, two 65,536-signal sources, four
+# Every scenario uses the same image, two 262,144-signal sources, four
 # RuntimePipeline worker processes, 30-second observation window, cgroup limits,
 # file-backed OTLP boundary, and correctness-checking backend.
 components:
@@ -12,10 +12,13 @@ components:
         volumes: ['./benchmark-results:/results']
         environment:
           - ASAP_BENCH_SCENARIO=raw
-          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_POINTS_PER_SOURCE=262144
+          - ASAP_BENCH_TRAFFIC=semantic
+          - ASAP_BENCH_GENERATOR_THREADS=2
+          - ASAP_BENCH_DISABLE_DEBUG=1
           - ASAP_BENCH_RESULT_DIR=/results/raw
     monitoring:
-      docker_component: { allocated_cores: 2 }
+      docker_component: { allocated_cores: 4 }
   otap-exact-quantile:
     deployment:
       docker:
@@ -24,10 +27,13 @@ components:
         volumes: ['./benchmark-results:/results']
         environment:
           - ASAP_BENCH_SCENARIO=exact
-          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_POINTS_PER_SOURCE=262144
+          - ASAP_BENCH_TRAFFIC=semantic
+          - ASAP_BENCH_GENERATOR_THREADS=2
+          - ASAP_BENCH_DISABLE_DEBUG=1
           - ASAP_BENCH_RESULT_DIR=/results/exact
     monitoring:
-      docker_component: { allocated_cores: 2 }
+      docker_component: { allocated_cores: 4 }
   asap-kll:
     deployment:
       docker:
@@ -36,10 +42,13 @@ components:
         volumes: ['./benchmark-results:/results']
         environment:
           - ASAP_BENCH_SCENARIO=kll
-          - ASAP_BENCH_POINTS_PER_SOURCE=65536
+          - ASAP_BENCH_POINTS_PER_SOURCE=262144
+          - ASAP_BENCH_TRAFFIC=semantic
+          - ASAP_BENCH_GENERATOR_THREADS=2
+          - ASAP_BENCH_DISABLE_DEBUG=1
           - ASAP_BENCH_RESULT_DIR=/results/kll
     monitoring:
-      docker_component: { allocated_cores: 2 }
+      docker_component: { allocated_cores: 4 }
 
 tests:
   - name: OTAP-RAW

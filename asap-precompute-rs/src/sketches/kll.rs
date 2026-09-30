@@ -92,6 +92,23 @@ impl KLLWrapper {
         }
     }
 
+    /// Insert a batch without forcing callers to materialize a value vector.
+    /// The upstream compactor currently exposes scalar updates, so this keeps
+    /// the loop local and reserves the replay history once per batch.
+    pub fn update_batch<I>(&mut self, values: I)
+    where
+        I: IntoIterator<Item = f64>,
+    {
+        let values = values.into_iter();
+        self.history.reserve(values.size_hint().0);
+        for value in values {
+            if value.is_finite() {
+                self.history.push(value);
+                self.sk.update(&value);
+            }
+        }
+    }
+
     /// Borrow the underlying `KLL`.
     pub fn inner(&self) -> &KLL<f64> {
         &self.sk
