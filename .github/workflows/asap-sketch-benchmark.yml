@@ -20,7 +20,7 @@ concurrency:
 jobs:
   benchmark:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -30,16 +30,47 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: asap-precompute-rs
-      - name: Run official OTAP pipeline_perf_test suite
-        run: ./benchmarks/run-nightly.sh
-      - name: Verify completed traffic
+      - name: Test streaming window correctness
+        run: cargo test --manifest-path asap-precompute-rs/Cargo.toml --release --features stream-benchmark --bin asap-stream-bench
+      - name: Run persistent OTLP network benchmark
+        run: ./benchmarks/run-nightly.sh --allow-shared-infrastructure
+      - name: Verify streaming measurements
         run: |
-          for scenario in raw exact kll; do
-            source "benchmark-results/$scenario/throughput.env"
-            test "$input_signals" -gt 0
-            test "$signals_per_second" -gt 0
-          done
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          root = Path("benchmark-results/streaming")
+          runs = json.loads((root / "runs.json").read_text())
+          summary = json.loads((root / "summary.json").read_text())
+          capacity = json.loads((root / "capacity.json").read_text())
+          assert len(runs) == 189
+          assert len(summary) == 63
+          assert len(json.loads((root / "resources.json").read_text())) == 441
+          assert len(capacity) == 3
+          assert all(row["repetitions"] == 3 for row in summary)
+          assert all("sustainable" in row for row in summary)
+          for run in runs:
+              assert run["correctness"] == "passed"
+              assert run["completed_windows"] >= 2
+              assert run["signals_per_second"] > 0
+              assert run["generated_signals_after_drain"] == run["validated_signals_after_drain"] > 0
+              assert len(run["resources"]) == 7
+              for role in ("branch_a", "branch_b", "merge", "estimate"):
+                  resource = run["resources"][role]
+                  assert resource["data_rx_bytes"] > 0 and resource["data_tx_bytes"] > 0
+                  assert resource["cpu_seconds"] > 0
+          for path in root.glob("traffic-*-sps/window-*/*mbit/*/*/config.json"):
+              config = json.loads(path.read_text())
+              assigned = list(config["component_cores"].values())
+              assert len(assigned) == 4 and len(set(assigned)) == 4
+              assert config["placement"] in {"exclusive-capacity", "shared-infrastructure-smoke"}
+              if config["placement"] == "exclusive-capacity":
+                  assert set(config["generator_cores"]).isdisjoint(assigned)
+          assert (root / "throughput.svg").is_file()
+          assert (root / "resources.svg").is_file()
+          PYCODE
       - name: Upload review artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: asap-sketch-benchmark-${{ github.run_id }}
