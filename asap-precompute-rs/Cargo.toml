@@ -51,7 +51,7 @@ async-trait = { version = "0.1", optional = true }
 humantime-serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
-tokio = { version = "1", features = ["sync", "rt", "time", "net"], optional = true }
+tokio = { version = "1", features = ["sync", "rt", "time", "net", "macros", "signal"], optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -102,6 +102,11 @@ stream-benchmark = [
 [[bin]]
 name = "asap-otap-demo"
 path = "src/bin/asap_otap_demo.rs"
+required-features = ["otap-engine"]
+
+[[bin]]
+name = "asap-kll-stream-demo"
+path = "src/bin/asap_kll_stream_demo.rs"
 required-features = ["otap-engine"]
 
 [[bin]]
