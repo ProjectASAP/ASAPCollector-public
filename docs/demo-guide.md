@@ -68,3 +68,85 @@ cargo test --features otap-engine --test otap_pipeline_e2e
 
 The runnable binary additionally asserts that the final output contains p50
 and p99 after the four child processes finish successfully.
+
+For a persistent stream with mergeable tumbling panes and rolling quantiles,
+see [the continuous KLL demo](./kll-windows.md).
+
+## Write KLL estimates to Prometheus and view them in Grafana
+
+The optional export sends the validated estimator output as OTLP/HTTP protobuf
+straight to Prometheus. Prometheus stores the gauges and Grafana queries them.
+It requires `curl` (7.76 or newer) on the machine running the demo, plus Docker
+Compose for the bundled backend. No additional collector is required.
+
+From the repository root:
+
+```sh
+docker compose -f demos/kll-grafana/compose.yaml up -d
+cd asap-precompute-rs
+cargo run --bin asap-otap-demo --features otap-engine -- \
+  --prometheus-otlp-endpoint http://localhost:9090/api/v1/otlp/v1/metrics
+```
+
+Open [the KLL dashboard](http://localhost:3000/d/asap-kll) (anonymous viewer
+access is enabled for this local demo). The dashboard provisions its Prometheus
+datasource automatically and displays p50/p99 using:
+
+```promql
+request_duration_estimate{quantile=~"0.5|0.99"}
+```
+
+The [Prometheus OTLP receiver](https://prometheus.io/docs/guides/opentelemetry/)
+is enabled with `--web.enable-otlp-receiver`. Its default translation converts
+`request.duration.estimate` to `request_duration_estimate` and retains the
+`quantile` label. [Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/)
+connects that datasource to the dashboard.
+
+This is a finite demo: one run writes one sample per quantile. Repeat the
+command to add samples to the time series. Instant queries show the latest
+sample for Prometheus's default five-minute lookback; the history panel shows
+previous samples within the selected time range. Values use the demo input's
+units (the sequential input is synthetic). The outbound copy uses the current
+wall-clock timestamp, so the synthetic 1970-era window remains available in
+`out.otlp` and debug traces while the dashboard shows the completed estimate
+now. Original gauge values, resource attributes, and series labels are preserved;
+window-boundary metadata is excluded from Prometheus labels to keep series stable.
+Series labels stored on OTAP scopes (including `quantile`) are also copied to
+gauge point attributes, which Prometheus uses to identify separate series.
+Only the `kll` scenario supports this option. HTTP errors, invalid OTLP
+responses, and partial rejection fail the command; no automatic retry can
+silently duplicate a partially accepted write.
+
+To check the entire path after building the binary, run from the repository root:
+
+```sh
+python3 demos/kll-grafana/verify.py asap-precompute-rs/target/debug/asap-otap-demo
+```
+
+The check compares the printed estimates with Prometheus results and Grafana's
+queries through its configured datasource, and verifies the dashboard exists.
+Set `PROMETHEUS_PORT` and `GRAFANA_PORT` when starting Compose if the default
+ports are occupied, and supply matching `--prometheus` / `--grafana` URLs to
+the check. Services bind to localhost and data persists in Compose volumes.
+Stop them with `docker compose -f demos/kll-grafana/compose.yaml down`; add `-v`
+when you want to remove the demo's stored data.
+
+## Before and after example
+
+Without the export option, the demo prints estimates and retains local OTLP
+files and debug traces. It does not write samples to Prometheus:
+
+![Console output without Prometheus export](./images/kll-before-console.png)
+
+This image renders captured console output from a real run; process launch
+lines and trace directory paths are omitted for readability.
+
+With `--prometheus-otlp-endpoint`, the same estimated values are stored as
+separate quantile series and appear in the provisioned Grafana dashboard:
+
+![Grafana dashboard after exporting KLL estimates](./images/kll-after-grafana.png)
+
+The screenshot is from the running Grafana demo. This run produced p50 = 100
+and p99 = 198 for the synthetic sequential input. Prometheus and Grafana
+queries returned those same values. The history panel uses Prometheus range
+queries; displayed steps can repeat the latest sample between demo runs.

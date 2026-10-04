@@ -119,6 +119,10 @@ pub struct AsapSketchesUserConfig {
     /// Window rotation period — humantime format (e.g. `"10s"`).
     #[serde(with = "humantime_serde")]
     pub window_size: Duration,
+    /// Optional KLL sliding interval/pane size (for example `"5s"`).
+    /// Omit it for ordinary tumbling windows.
+    #[serde(default, with = "humantime_serde::option")]
+    pub window_slide: Option<Duration>,
     /// Stamped onto every emitted envelope.
     pub output_metric_name: String,
     /// Controller-plan join key. Defaults to 0.
@@ -167,6 +171,11 @@ impl AsapSketchesUserConfig {
     fn into_plugin_config(self) -> Result<PluginConfig, OtapConfigError> {
         use crate::config::SketchParams;
 
+        if self.window_slide.is_some_and(|slide| slide.is_zero()) {
+            return Err(OtapConfigError::InvalidUserConfig {
+                error: "window_slide must be positive when specified".into(),
+            });
+        }
         let mut params = SketchParams::new();
         for (k, v) in self.sketch_params {
             // Only numeric tuning knobs survive — strings / bools are
@@ -180,6 +189,7 @@ impl AsapSketchesUserConfig {
         let cfg = PluginConfig {
             sketch_type: self.sketch_type,
             window_size: self.window_size,
+            window_slide: self.window_slide.unwrap_or_default(),
             output_metric_name: self.output_metric_name,
             agg_id: self.agg_id,
             sketch_params: params,
@@ -206,8 +216,36 @@ const fn default_transmit_sketch() -> bool {
     true
 }
 
+fn timer_period(config: &PluginConfig) -> Duration {
+    if config.window_slide.is_zero() {
+        config.window_size
+    } else {
+        config.window_slide
+    }
+}
+
+fn build_precompute(
+    config: crate::config::PrecomputeConfig,
+    dispatch: super::config::SketchDispatch,
+) -> Result<Arc<dyn Precompute>, crate::precompute::PrecomputeError> {
+    if config.mode == crate::config::AggregationMode::Sliding {
+        Ok(Arc::new(crate::kll_windows::KllRollingPrecompute::new(
+            config,
+        )?))
+    } else {
+        Ok(Arc::new(PrecomputeImpl::new(
+            Some(config),
+            Some(dispatch.factory),
+            Some(dispatch.observer),
+        )))
+    }
+}
+
 fn requires_precompute_rebuild(current: &PluginConfig, next: &PluginConfig) -> bool {
     !current.sketch_type.eq_ignore_ascii_case(&next.sketch_type)
+        || current.window_slide != next.window_slide
+        || ((!current.window_slide.is_zero() || !next.window_slide.is_zero())
+            && current.window_size != next.window_size)
         || current.sketch_params != next.sketch_params
         || current.encoding != next.encoding
         || current.default_key != next.default_key
@@ -270,11 +308,11 @@ pub fn create_asap_sketches_processor(
         resolve_plugin_config(&plugin_config).map_err(|e| OtapConfigError::InvalidUserConfig {
             error: format!("asap_sketches: configuration: {e}"),
         })?;
-    let precompute: Arc<dyn Precompute> = Arc::new(PrecomputeImpl::new(
-        Some(precompute_config),
-        Some(dispatch.factory),
-        Some(dispatch.observer),
-    ));
+    let precompute = build_precompute(precompute_config, dispatch).map_err(|e| {
+        OtapConfigError::InvalidUserConfig {
+            error: e.to_string(),
+        }
+    })?;
 
     Ok(ProcessorWrapper::local(
         AsapSketchesProcessor::new(precompute, plugin_config),
@@ -312,7 +350,7 @@ pub struct AsapSketchesProcessor {
 
 impl AsapSketchesProcessor {
     fn new(precompute: Arc<dyn Precompute>, plugin_config: PluginConfig) -> Self {
-        let window_size = plugin_config.window_size;
+        let window_size = timer_period(&plugin_config);
         let sketch_encoder =
             OtapSketchEncoder::with_sketch_params(plugin_config.sketch_params.clone());
         Self {
@@ -432,6 +470,12 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                         }
                     }
                 }
+                if !self.plugin_config.window_slide.is_zero() {
+                    // Completed upstream panes already have a boundary. Emit
+                    // promptly instead of waiting another whole slide interval.
+                    let envs = self.precompute.tick(asap_wall_clock_ms());
+                    self.emit_envelopes(&envs, effect_handler).await?;
+                }
                 Ok(())
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
@@ -465,11 +509,9 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 let factory_changed =
                     requires_precompute_rebuild(&self.plugin_config, &plugin_config);
                 if factory_changed {
-                    let replacement: Arc<dyn Precompute> = Arc::new(PrecomputeImpl::new(
-                        Some(pcfg.clone()),
-                        Some(dispatch.factory),
-                        Some(dispatch.observer),
-                    ));
+                    let Ok(replacement) = build_precompute(pcfg.clone(), dispatch) else {
+                        return Ok(());
+                    };
                     let pending = self.precompute.drain();
                     self.emit_envelopes(&pending, effect_handler).await?;
                     self.precompute = replacement;
@@ -483,16 +525,13 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                     });
                 }
 
-                if plugin_config.window_size != self.window_size {
+                let period = timer_period(&plugin_config);
+                if period != self.window_size {
                     if let Some(timer) = self.timer.take() {
                         let _ = timer.cancel().await;
                     }
-                    self.timer = Some(
-                        effect_handler
-                            .start_periodic_timer(plugin_config.window_size)
-                            .await?,
-                    );
-                    self.window_size = plugin_config.window_size;
+                    self.timer = Some(effect_handler.start_periodic_timer(period).await?);
+                    self.window_size = period;
                 }
                 self.plugin_config = plugin_config;
                 Ok(())
@@ -514,8 +553,26 @@ fn asap_wall_clock_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    //! Unit tests confined to config-shape validation — full lifecycle
-    //! integration tests live in `tests/otap_pipeline_e2e.rs`.
+    #[test]
+    fn sliding_config_selects_pane_timer_and_validates_alignment() {
+        let parse = |size: &str, slide: &str, transmit: bool| {
+            serde_json::from_value::<super::AsapSketchesUserConfig>(serde_json::json!({"sketch_type":"kll","window_size":size,"window_slide":slide,"output_metric_name":"rolling","encoding":"Msgpack","transmit_sketch":transmit,"quantiles":[0.5,0.99]})).unwrap().into_plugin_config()
+        };
+        let config = parse("60s", "5s", false).unwrap();
+        assert_eq!(
+            super::timer_period(&config),
+            std::time::Duration::from_secs(5)
+        );
+        let (runtime, _) = super::resolve_plugin_config(&config).unwrap();
+        assert_eq!(runtime.mode, crate::config::AggregationMode::Sliding);
+        assert!(parse("60s", "7s", false).is_err());
+        assert!(parse("60s", "5s", true).is_err());
+        assert!(parse("5s", "5s", true).is_ok());
+        assert!(parse("5s", "0s", false).is_err());
+        assert!(parse("3ms", "1.5ms", false).is_err());
+    }
+    // Unit tests confined to config-shape validation — full lifecycle
+    // Integration tests live in `tests/otap_pipeline_e2e.rs`.
 
     use super::*;
     use serde_json::json;

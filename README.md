@@ -84,7 +84,11 @@ All of this sits on the host-neutral runtime in the same crate
 ## Build & test
 
 For a presentation-ready walkthrough of the real YAML pipeline integration,
-see the [live OTAP pipeline demo guide](./docs/demo-guide.md).
+see the [live OTAP pipeline demo guide](./docs/demo-guide.md). The guide also
+includes a [Prometheus + Grafana setup](./docs/demo-guide.md#write-kll-estimates-to-prometheus-and-view-them-in-grafana)
+that writes the KLL p50/p99 estimates to Prometheus and displays them in a
+provisioned Grafana dashboard. For continuous computation from retained
+tumbling panes, see the [persistent rolling KLL demo](./docs/kll-windows.md).
 
 ```sh
 cd asap-precompute-rs

@@ -10,6 +10,8 @@ license = "MIT"
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "010457de46ba9ec5574a53476bbe8b4bdb02b965" }
 serde = { version = "1", features = ["derive"] }
 prost = "0.13"
+# OTAP's generated protobuf types implement the 0.14 Message trait.
+prost-otap = { package = "prost", version = "0.14", optional = true }
 thiserror = "1"
 
 # Apache Arrow is only pulled in by the OTAP codec. Consumers on the
@@ -49,7 +51,7 @@ async-trait = { version = "0.1", optional = true }
 humantime-serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
-tokio = { version = "1", features = ["sync", "rt", "time", "net"], optional = true }
+tokio = { version = "1", features = ["sync", "rt", "time", "net", "macros", "signal"], optional = true }
 
 [dev-dependencies]
 proptest = "1"
@@ -73,6 +75,7 @@ otap = ["dep:arrow-array", "dep:arrow-schema"]
 # folded into `otap`.
 otap-engine = [
     "otap",
+    "dep:prost-otap",
     "dep:otel-arrow-dfe-engine",
     "dep:otel-arrow-dfe-otap",
     "dep:otel-arrow-dfe-config",
@@ -99,6 +102,11 @@ stream-benchmark = [
 [[bin]]
 name = "asap-otap-demo"
 path = "src/bin/asap_otap_demo.rs"
+required-features = ["otap-engine"]
+
+[[bin]]
+name = "asap-kll-stream-demo"
+path = "src/bin/asap_kll_stream_demo.rs"
 required-features = ["otap-engine"]
 
 [[bin]]
