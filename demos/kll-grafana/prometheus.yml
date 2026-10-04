@@ -1,0 +1,4 @@
+global:
+  scrape_interval: 15s
+# Estimated gauges arrive through the OTLP HTTP receiver; no scrape target needed.
+scrape_configs: []
