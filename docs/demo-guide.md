@@ -126,3 +126,23 @@ ports are occupied, and supply matching `--prometheus` / `--grafana` URLs to
 the check. Services bind to localhost and data persists in Compose volumes.
 Stop them with `docker compose -f demos/kll-grafana/compose.yaml down`; add `-v`
 when you want to remove the demo's stored data.
+
+## Before and after example
+
+Without the export option, the demo prints estimates and retains local OTLP
+files and debug traces. It does not write samples to Prometheus:
+
+![Console output without Prometheus export](./images/kll-before-console.png)
+
+This image renders captured console output from a real run; process launch
+lines and trace directory paths are omitted for readability.
+
+With `--prometheus-otlp-endpoint`, the same estimated values are stored as
+separate quantile series and appear in the provisioned Grafana dashboard:
+
+![Grafana dashboard after exporting KLL estimates](./images/kll-after-grafana.png)
+
+The screenshot is from the running Grafana demo. This run produced p50 = 100
+and p99 = 198 for the synthetic sequential input. Prometheus and Grafana
+queries returned those same values. The history panel uses Prometheus range
+queries; displayed steps can repeat the latest sample between demo runs.
