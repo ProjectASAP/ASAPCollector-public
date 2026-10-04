@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn timestamp_gauges(bytes: &[u8], now: u64) -> Result<Vec<u8>, String> {
+fn prepare_gauges(bytes: &[u8], now: Option<u64>) -> Result<Vec<u8>, String> {
     let mut request = ExportMetricsServiceRequest::decode(bytes).map_err(|e| e.to_string())?;
     let mut points = 0;
     for resource in &mut request.resource_metrics {
@@ -34,8 +34,19 @@ fn timestamp_gauges(bytes: &[u8], now: u64) -> Result<Vec<u8>, String> {
                     }
                     // Synthetic windows stay in the trace files. Export is a current
                     // snapshot of the completed estimate, not historical telemetry.
-                    point.start_time_unix_nano = 0;
-                    point.time_unix_nano = now;
+                    if let Some(now) = now {
+                        point.start_time_unix_nano = 0;
+                        point.time_unix_nano = now;
+                    }
+                    // Window boundaries are timestamps/metadata, not series
+                    // dimensions: retaining them as labels creates a new
+                    // Prometheus series for every emitted rolling window.
+                    point.attributes.retain(|attribute| {
+                        !matches!(
+                            attribute.key.as_str(),
+                            "sketch.window_start_ms" | "sketch.window_end_ms"
+                        )
+                    });
                     points += 1;
                 }
             }
@@ -55,7 +66,20 @@ pub fn export(path: &Path, endpoint: &str) -> Result<(), String> {
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_nanos() as u64;
-    let body = timestamp_gauges(&std::fs::read(path).map_err(|e| e.to_string())?, now)?;
+    export_bytes(
+        &std::fs::read(path).map_err(|e| e.to_string())?,
+        endpoint,
+        Some(now),
+    )
+}
+
+/// Export estimated OTLP gauges. `None` preserves window-end timestamps for
+/// the streaming demo; `Some` publishes a current snapshot for the finite demo.
+pub fn export_bytes(bytes: &[u8], endpoint: &str, now: Option<u64>) -> Result<(), String> {
+    if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+        return Err("Prometheus OTLP endpoint must be an http:// or https:// URL".into());
+    }
+    let body = prepare_gauges(bytes, now)?;
     let mut child = Command::new("curl")
         .args([
             "--silent",
@@ -119,6 +143,7 @@ mod tests {
                     metrics: vec![Metric {
                         name: "request.duration.estimate".into(),
                         data: Some(Data::Gauge(Gauge { data_points: vec![NumberDataPoint {
+                            attributes: vec![KeyValue { key: "sketch.window_end_ms".into(), value: Some(AnyValue { value: Some(Value::StringValue("2000".into())) }) }],
                             time_unix_nano: 2_000_000_000,
                             value: Some(otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::number_data_point::Value::AsDouble(198.0)),
                             ..Default::default()
@@ -131,12 +156,24 @@ mod tests {
             }],
         };
         let updated = ExportMetricsServiceRequest::decode(
-            timestamp_gauges(&request.encode_to_vec(), 123456)
+            prepare_gauges(&request.encode_to_vec(), Some(123456))
                 .unwrap()
                 .as_slice(),
         )
         .unwrap();
         let metric = &updated.resource_metrics[0].scope_metrics[0].metrics[0];
+        let streaming = ExportMetricsServiceRequest::decode(
+            prepare_gauges(&request.encode_to_vec(), None)
+                .unwrap()
+                .as_slice(),
+        )
+        .unwrap();
+        let Some(Data::Gauge(streaming_gauge)) =
+            &streaming.resource_metrics[0].scope_metrics[0].metrics[0].data
+        else {
+            panic!("expected streaming gauge")
+        };
+        assert_eq!(streaming_gauge.data_points[0].time_unix_nano, 2_000_000_000);
         assert_eq!(metric.name, "request.duration.estimate");
         let Some(Data::Gauge(gauge)) = &metric.data else {
             panic!("expected gauge")
@@ -156,8 +193,10 @@ mod tests {
                 .unwrap()
                 .attributes
         );
-        assert!(
-            timestamp_gauges(&ExportMetricsServiceRequest::default().encode_to_vec(), 1).is_err()
-        );
+        assert!(prepare_gauges(
+            &ExportMetricsServiceRequest::default().encode_to_vec(),
+            Some(1)
+        )
+        .is_err());
     }
 }

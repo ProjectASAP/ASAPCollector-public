@@ -69,6 +69,9 @@ cargo test --features otap-engine --test otap_pipeline_e2e
 The runnable binary additionally asserts that the final output contains p50
 and p99 after the four child processes finish successfully.
 
+For a persistent stream with mergeable tumbling panes and rolling quantiles,
+see [the continuous KLL demo](./kll-windows.md).
+
 ## Write KLL estimates to Prometheus and view them in Grafana
 
 The optional export sends the validated estimator output as OTLP/HTTP protobuf
@@ -106,7 +109,8 @@ previous samples within the selected time range. Values use the demo input's
 units (the sequential input is synthetic). The outbound copy uses the current
 wall-clock timestamp, so the synthetic 1970-era window remains available in
 `out.otlp` and debug traces while the dashboard shows the completed estimate
-now. Original gauge values, resource attributes, and point labels are preserved.
+now. Original gauge values, resource attributes, and series labels are preserved;
+window-boundary metadata is excluded from Prometheus labels to keep series stable.
 Series labels stored on OTAP scopes (including `quantile`) are also copied to
 gauge point attributes, which Prometheus uses to identify separate series.
 Only the `kll` scenario supports this option. HTTP errors, invalid OTLP

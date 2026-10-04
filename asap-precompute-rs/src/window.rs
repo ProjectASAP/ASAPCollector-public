@@ -42,8 +42,8 @@ pub struct SeriesEntry {
     pub count: u64,
 }
 
-/// Per-Precompute window manager. Tumbling-only for now;
-/// Sliding lands in a follow-up.
+/// General tumbling-window manager. Retained KLL panes and sliding
+/// estimates use [`crate::kll_windows`] instead.
 ///
 /// Locking is owned by the enclosing [`std::sync::Mutex`] in
 /// [`crate::precompute::PrecomputeImpl`]; this struct itself is

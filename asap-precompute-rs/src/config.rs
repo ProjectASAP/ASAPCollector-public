@@ -20,8 +20,8 @@ pub type AggId = u64;
 
 /// Picks the windowing strategy.
 ///
-/// Only [`AggregationMode::Tumbling`] is implemented;
-/// [`AggregationMode::Sliding`] is deferred (see [`crate::window`]).
+/// Tumbling uses the general runtime; sliding KLL uses
+/// [`crate::kll_windows::KllRollingPrecompute`].
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -33,7 +33,7 @@ pub enum AggregationMode {
     Tumbling,
     /// Rotates every [`WindowSpec::slide`]; observations land in
     /// every window whose `[start, end)` range covers their
-    /// timestamp. Only Tumbling is implemented today.
+    /// timestamp. KLL implements this by merging disjoint retained panes.
     Sliding,
     /// Processes one batch end-to-end with no windowing (`mode: batch`).
     Batch,

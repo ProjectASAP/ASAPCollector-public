@@ -1,8 +1,8 @@
 {
   "uid": "asap-kll",
-  "title": "ASAP KLL estimates",
+  "title": "ASAP KLL tumbling and rolling estimates",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "5s",
   "time": {
     "from": "now-15m",
@@ -12,14 +12,14 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Latest KLL estimates",
+      "title": "Latest tumbling KLL estimates",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 0
       },
@@ -50,7 +50,7 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "KLL estimates over time",
+      "title": "Tumbling KLL estimates over time",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
@@ -65,6 +65,74 @@
         {
           "refId": "A",
           "expr": "request_duration_estimate{quantile=~\"0.5|0.99\"}",
+          "legendFormat": "quantile {{quantile}}",
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Latest rolling KLL estimates",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "request_duration_rolling_estimate{quantile=~\"0.5|0.99\"}",
+          "legendFormat": "quantile {{quantile}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 3
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Rolling KLL estimates over time",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "request_duration_rolling_estimate{quantile=~\"0.5|0.99\"}",
           "legendFormat": "quantile {{quantile}}",
           "instant": false
         }
