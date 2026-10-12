@@ -26,12 +26,14 @@ use linkme::distributed_slice;
 use otel_arrow_dfe_config::node::NodeUserConfig;
 use otel_arrow_dfe_engine::config::ProcessorConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
+use otel_arrow_dfe_engine::control::AckMsg;
 use otel_arrow_dfe_engine::control::NodeControlMsg;
 use otel_arrow_dfe_engine::error::Error;
 use otel_arrow_dfe_engine::local::processor as local;
 use otel_arrow_dfe_engine::message::Message;
 use otel_arrow_dfe_engine::node::NodeId;
 use otel_arrow_dfe_engine::processor::ProcessorWrapper;
+use otel_arrow_dfe_engine::ConsumerEffectHandlerExtension;
 use otel_arrow_dfe_engine::{MessageSourceLocalEffectHandlerExtension, ProcessorFactory};
 use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
@@ -272,6 +274,8 @@ impl local::Processor<OtapPdata> for SketchDetector {
         let Message::PData(pdata) = msg else {
             return Ok(());
         };
+        // Consumed into state here: ack so upstream (e.g. fanout) can move on.
+        effects.notify_ack(AckMsg::new(pdata.clone())).await?;
         let (mut out, mut events) = (Vec::new(), Vec::new());
         for obs in observations(pdata, effects).await {
             let Some(env) = obs.value.envelope.filter(|e| !e.payload.is_empty()) else {
@@ -420,6 +424,8 @@ impl local::Processor<OtapPdata> for ExactAnswers {
         }
         match msg {
             Message::PData(pdata) => {
+                // Consumed into state here: ack so upstream (e.g. fanout) can move on.
+                effects.notify_ack(AckMsg::new(pdata.clone())).await?;
                 for obs in observations(pdata, effects).await {
                     self.observe(&obs);
                 }

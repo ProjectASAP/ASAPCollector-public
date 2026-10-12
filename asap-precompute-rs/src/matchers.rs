@@ -205,6 +205,29 @@ pub fn series_attrs(labels: &[KeyValue], aggregate_by: &[String]) -> Vec<KeyValu
     out
 }
 
+/// Label carrying the attribute key in per-attribute series.
+pub const ATTRIBUTE_KEY_LABEL: &str = "attribute.key";
+
+/// Splits one data point into one observation per attribute key in `keys`
+/// (`"*"` = every attribute it has): labels `attribute.key=<key>`, value =
+/// the attribute's value as bytes. A cardinality or frequency sketch over
+/// these series answers "how many distinct values" and "which values
+/// dominate" per attribute key.
+pub fn per_attribute(obs: &Observation, keys: &[String]) -> Vec<Observation> {
+    let all = keys.iter().any(|k| k == "*");
+    obs.labels
+        .iter()
+        .filter(|kv| all || keys.contains(&kv.key))
+        .map(|kv| Observation {
+            timestamp_ms: obs.timestamp_ms,
+            metric: obs.metric.clone(),
+            resource_labels: obs.resource_labels.clone(),
+            labels: vec![KeyValue::new(ATTRIBUTE_KEY_LABEL, kv.key.clone())],
+            value: crate::observation::ObservationValue::bytes(kv.value.as_bytes().to_vec()),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,27 +264,4 @@ mod tests {
         let matchers = vec![LabelMatcher::equal("region", "us-east")];
         assert!(LabelMatcher::matches_all(&matchers, &obs));
     }
-}
-
-/// Label carrying the attribute key in per-attribute series.
-pub const ATTRIBUTE_KEY_LABEL: &str = "attribute.key";
-
-/// Splits one data point into one observation per attribute key in `keys`
-/// (`"*"` = every attribute it has): labels `attribute.key=<key>`, value =
-/// the attribute's value as bytes. A cardinality or frequency sketch over
-/// these series answers "how many distinct values" and "which values
-/// dominate" per attribute key.
-pub fn per_attribute(obs: &Observation, keys: &[String]) -> Vec<Observation> {
-    let all = keys.iter().any(|k| k == "*");
-    obs.labels
-        .iter()
-        .filter(|kv| all || keys.contains(&kv.key))
-        .map(|kv| Observation {
-            timestamp_ms: obs.timestamp_ms,
-            metric: obs.metric.clone(),
-            resource_labels: obs.resource_labels.clone(),
-            labels: vec![KeyValue::new(ATTRIBUTE_KEY_LABEL, kv.key.clone())],
-            value: crate::observation::ObservationValue::bytes(kv.value.as_bytes().to_vec()),
-        })
-        .collect()
 }
