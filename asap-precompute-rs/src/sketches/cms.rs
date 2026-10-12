@@ -25,7 +25,7 @@ const MAX_ROW_HASH_BITS: usize = 64;
 /// `log2(cols)` == the per-row bit width. When `bits_per_row == 0`
 /// (cols == 1) every row maps to column 0 regardless, so the slicing
 /// never overflows and `rows` is left as-is. Returns at least 1.
-fn clamp_rows_for_hash_bits(rows: usize, cols: usize) -> usize {
+pub(crate) fn clamp_rows_for_hash_bits(rows: usize, cols: usize) -> usize {
     let bits_per_row = cols.trailing_zeros() as usize;
     if bits_per_row == 0 {
         return rows.max(1);
