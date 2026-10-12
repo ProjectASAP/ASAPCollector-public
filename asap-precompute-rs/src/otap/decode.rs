@@ -235,6 +235,7 @@ pub(super) fn parse_sketch_type(row: usize, raw: &str) -> Result<SketchType, Ota
         "HLLSketch" => Ok(SketchType::HLLSketch),
         "CountSketch" => Ok(SketchType::CountSketch),
         "CountMinSketch" => Ok(SketchType::CountMinSketch),
+        "CountMinSketchWithHeap" => Ok(SketchType::CountMinSketchWithHeap),
         "Unspecified" | "" => Ok(SketchType::Unspecified),
         _ => Err(OtapDecodeError::UnknownSketchType {
             row,

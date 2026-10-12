@@ -61,6 +61,7 @@ fn batch_from_envelope_entries(entries: &[(SketchType, &[u8])]) -> RecordBatch {
             SketchType::HLLSketch => "metric_HLLSketch",
             SketchType::CountSketch => "metric_CountSketch",
             SketchType::CountMinSketch => "metric_CountMinSketch",
+            SketchType::CountMinSketchWithHeap => "metric_CountMinSketchWithHeap",
             SketchType::Unspecified => "metric_Unspecified",
         })
         .collect();
@@ -183,6 +184,7 @@ fn per_sketch_type_round_trip_smoke() {
         (SketchType::HLLSketch, vec![0xcc; 16]),
         (SketchType::CountSketch, vec![0xdd; 128]),
         (SketchType::CountMinSketch, vec![0xee; 256]),
+        (SketchType::CountMinSketchWithHeap, vec![0xef; 96]),
     ] {
         let env = envelope_for(sketch_type, &payload);
         let batch = encode_batch(std::slice::from_ref(&env)).expect("encode");
