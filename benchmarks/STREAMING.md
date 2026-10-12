@@ -44,6 +44,14 @@ wall-clock rotation, late-event handling, or window-watermark policies.
   Msgpack sketch per source/window, merges them, then returns p50/p99.
 - Backend validates every quantile result. Exact must match; KLL tolerance is
   `max(abs(reference) * 0.05, 0.001)`. This is value error, not rank error.
+- Top-k scenarios use 64-bit keys drawn from Zipf(s=1.1) over
+  2^20 ranks instead of durations. `topk-exact` counts keys per window in a
+  hash map, ships every (key, count) entry in bounded batches, sums the maps,
+  then returns the top 10. `cmsheap` updates a Count-Min sketch (4 x 2048)
+  with a 10-slot heavy-hitter heap, sends one ASAPv1 sketch per source/window,
+  merges sketches, then returns the heap's top 10. The backend requires exact
+  answers from `topk-exact` and recall@10 >= 0.9 from `cmsheap` in every
+  window, and reports recall and mean relative count error over the true top 10.
 
 The official generator emits generic synthetic metrics. Each branch maps the
 received item count to the deterministic long-tail HTTP-duration corpus used by
