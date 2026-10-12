@@ -79,17 +79,18 @@ cargo test --features otap-engine,stream-benchmark
 ## Benchmarks
 
 The benchmark is the evidence that a function is cheap enough to leave on.
-Expect three tiers:
+Three tiers run in CI:
 
-| Tier | When | Scope | Gate | State |
+| Tier | When | Scope | Gate | Workflow |
 | --- | --- | --- | --- | --- |
-| Smoke | Every merge to `main` | Short run of each scenario with correctness checks | Fails on wrong answers | Planned |
-| Nightly sweep | Every day | Full rate sweep per scenario | Alerts on a throughput or CPU regression beyond a set margin | The sweep runs today in `.github/workflows/asap-sketch-benchmark.yml` (nightly, on PRs that touch the code, and on manual dispatch); the regression alert is planned |
-| PR comparison | On demand, by a comment on a PR | Same sweep, this PR vs `main` | Posts a comparison table | Planned |
+| Smoke | Every PR and every merge to `main` | fmt, clippy, tests, then `deploy/telemetry-functions/acceptance.py` on real collector containers | Fails on wrong answers | `ci.yml` |
+| Nightly sweep | Every day | Full rate sweep per scenario | Fails when throughput drops more than the margin (default 10%) against the previous night | `asap-sketch-benchmark.yml` |
+| PR comparison | A maintainer comments `/benchmark` on a PR | Reduced sweep, this PR vs `main` | Posts a comparison table | `benchmark-on-demand.yml` |
 
-Until the PR comparison exists, run the relevant benchmark yourself for a
-performance-related change and paste the numbers into the PR. See
-`benchmarks/` and the docs in `docs/`.
+Capacity numbers need dedicated CPUs: the nightly and on-demand tiers run on
+the runner named by the `BENCH_RUNNER` repository variable (see
+`benchmarks/README.md`). For a performance-related change, also paste the
+relevant numbers into the PR.
 
 ## Weekly sync
 
