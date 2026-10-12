@@ -11,6 +11,8 @@ mod schema;
 pub mod config;
 
 #[cfg(feature = "otap-engine")]
+pub mod answer_nodes;
+#[cfg(feature = "otap-engine")]
 pub mod codec;
 #[cfg(feature = "otap-engine")]
 pub mod processor;
