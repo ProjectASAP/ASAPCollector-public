@@ -1,0 +1,34 @@
+# Exact pipeline, stage 1 at each source: every value per route per 1-minute window
+# goes to exact-merge.
+version: otel_dataflow/v1
+engine:
+  http_admin:
+    bind_address: 0.0.0.0:8085
+policies:
+  resources:
+    core_allocation:
+      type: core_count
+      count: 1
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: receiver:otlp
+            config:
+              protocols:
+                http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
+          branch:
+            type: urn:asap:processor:exact_branch
+            config: {window: 60s, group_by: [http.route]}
+          to_merge:
+            type: exporter:otlp_http
+            config:
+              endpoint: http://exact-merge:4318
+              client_pool_size: 1
+              max_in_flight: 1
+              http: {timeout: 30s, compression: none}
+        connections:
+          - {from: receiver, to: branch}
+          - {from: branch, to: to_merge}
