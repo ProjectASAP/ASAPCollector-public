@@ -37,7 +37,17 @@ use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 use serde::Deserialize;
 
-use super::codec::{decode_pdata_to_observations, OtapSketchEncoder};
+use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{
+    AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
+};
+use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
+    Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+};
+use otel_arrow_dfe_pdata::proto::opentelemetry::resource::v1::Resource;
+use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
+use otel_arrow_dfe_pdata::OtapPayload;
+
+use super::codec::decode_pdata_to_observations;
 use crate::answers::{exact_answers, sketch_answers, ExactWindow};
 use crate::envelope::SketchEnvelope;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
@@ -103,15 +113,55 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Plain OTLP gauges with every label on the data point, so backends such
+/// as Prometheus keep them as series labels.
+fn gauges_pdata(envs: &[SketchEnvelope]) -> Result<OtapPdata, String> {
+    let mut by_metric: BTreeMap<&str, Vec<NumberDataPoint>> = BTreeMap::new();
+    for e in envs {
+        let attributes: Vec<OtlpKeyValue> = e
+            .labels
+            .iter()
+            .map(|kv| OtlpKeyValue::new(kv.key.clone(), AnyValue::new_string(kv.value.clone())))
+            .collect();
+        by_metric.entry(&e.metric_name).or_default().push(
+            NumberDataPoint::build()
+                .start_time_unix_nano(e.window_start_ms * 1_000_000)
+                .time_unix_nano(e.window_end_ms * 1_000_000)
+                .value_double(e.value)
+                .attributes(attributes)
+                .finish(),
+        );
+    }
+    let metrics = by_metric
+        .into_iter()
+        .map(|(name, points)| {
+            Metric::build()
+                .name(name.to_string())
+                .data_gauge(Gauge::new(points))
+                .finish()
+        })
+        .collect::<Vec<_>>();
+    let data = MetricsData::new(vec![ResourceMetrics::new(
+        Resource::build().finish(),
+        vec![ScopeMetrics::new(
+            InstrumentationScope::build().name("asap.answers").finish(),
+            metrics,
+        )],
+    )]);
+    let payload: OtapPayload = OtlpProtoMessage::Metrics(data)
+        .try_into()
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(OtapPdata::new_todo_context(payload))
+}
+
 async fn emit(
-    encoder: &mut OtapSketchEncoder,
     envs: &[SketchEnvelope],
     effects: &mut local::EffectHandler<OtapPdata>,
 ) -> Result<(), Error> {
     if envs.is_empty() {
         return Ok(());
     }
-    match encoder.encode(envs) {
+    match gauges_pdata(envs) {
         Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
         Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
     }
@@ -135,7 +185,6 @@ async fn observations(
 
 struct SketchDetector {
     config: DetectorConfig,
-    encoder: OtapSketchEncoder,
 }
 
 #[async_trait(?Send)]
@@ -158,7 +207,7 @@ impl local::Processor<OtapPdata> for SketchDetector {
                 Err(e) => effects.info(&format!("sketch_detector: {e}")).await,
             }
         }
-        emit(&mut self.encoder, &out, effects).await
+        emit(&out, effects).await
     }
 }
 
@@ -173,7 +222,6 @@ struct ExactAnswers {
     /// Open windows by window end.
     windows: BTreeMap<u64, ExactState>,
     emitted_until: u64,
-    encoder: OtapSketchEncoder,
     timer_started: bool,
 }
 
@@ -281,11 +329,11 @@ impl local::Processor<OtapPdata> for ExactAnswers {
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
                 let out = self.due(now_ms());
-                emit(&mut self.encoder, &out, effects).await
+                emit(&out, effects).await
             }
             Message::Control(NodeControlMsg::Shutdown { .. }) => {
                 let out = self.due(u64::MAX);
-                emit(&mut self.encoder, &out, effects).await
+                emit(&out, effects).await
             }
             _ => Ok(()),
         }
@@ -310,10 +358,7 @@ static SKETCH_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         let config: DetectorConfig =
             serde_json::from_value(node_config.config.clone()).map_err(invalid)?;
         Ok(ProcessorWrapper::local(
-            SketchDetector {
-                config,
-                encoder: OtapSketchEncoder::default(),
-            },
+            SketchDetector { config },
             node,
             node_config,
             processor_config,
@@ -339,7 +384,6 @@ static EXACT_ANSWERS: ProcessorFactory<OtapPdata> = ProcessorFactory {
                 config,
                 windows: BTreeMap::new(),
                 emitted_until: 0,
-                encoder: OtapSketchEncoder::default(),
                 timer_started: false,
             },
             node,
@@ -378,7 +422,6 @@ mod tests {
             .unwrap(),
             windows: BTreeMap::new(),
             emitted_until: 0,
-            encoder: OtapSketchEncoder::default(),
             timer_started: false,
         };
         for i in 0..100u64 {
