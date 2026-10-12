@@ -69,9 +69,11 @@ use super::answer_nodes::{
     now_ms, observations, series_key,
 };
 use super::codec::OtapSketchEncoder;
-use crate::answers::{exact_answers, gauge, ExactWindow};
+use crate::answers::{
+    exact_answers, gauge, CardinalityClassifier, CardinalityRules, Event, ExactWindow,
+};
 use crate::envelope::{SketchEnvelope, SketchType};
-
+use crate::matchers::ATTRIBUTE_KEY_LABEL;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
 
 /// Registered URN of the exact branch.
@@ -126,6 +128,9 @@ pub struct ExactDetectorConfig {
     /// Heavy hitters per attribute key.
     #[serde(default = "default_k")]
     pub k: usize,
+    /// Thresholds for classifying per-attribute cardinality.
+    #[serde(default)]
+    pub cardinality: CardinalityRules,
 }
 
 /// `raw_sink` configuration.
@@ -227,7 +232,7 @@ impl ExactBranch {
                 continue;
             }
             let (_, w) = state.entry(format!("a|{}", kv.key)).or_insert_with(|| {
-                let labels = vec![KeyValue::new("attribute.key", kv.key.clone())];
+                let labels = vec![KeyValue::new(ATTRIBUTE_KEY_LABEL, kv.key.clone())];
                 (template(labels), ExactWindow::default())
             });
             *w.counts.entry(kv.value.clone()).or_default() += 1;
@@ -352,25 +357,34 @@ impl local::Processor<OtapPdata> for ExactMerge {
 
 struct ExactDetector {
     config: ExactDetectorConfig,
+    cardinality: CardinalityClassifier,
 }
 
 impl ExactDetector {
-    /// Answers of one merged window.
-    fn answer(&mut self, mut template: SketchEnvelope) -> Vec<SketchEnvelope> {
-        let mut out = Vec::new();
+    /// Answers and events of one merged window.
+    fn answer(&mut self, mut template: SketchEnvelope) -> (Vec<SketchEnvelope>, Vec<Event>) {
+        let (mut out, mut events) = (Vec::new(), Vec::new());
         let Ok(mut w) = ExactWindow::decode(&template.payload) else {
-            return out;
+            return (out, events);
         };
         template.payload = Vec::new();
         template.sketch_type = SketchType::Unspecified;
         template.count = w.points;
+        if !w.counts.is_empty() {
+            let distinct = w.counts.len() as f64;
+            let (gauges, event) = self
+                .cardinality
+                .observe(&template, "exact", distinct, w.points);
+            out.extend(gauges);
+            events.extend(event);
+        }
         out.extend(exact_answers(
             &template,
             &mut w,
             &self.config.quantiles,
             self.config.k,
         ));
-        out
+        (out, events)
     }
 }
 
@@ -385,14 +399,16 @@ impl local::Processor<OtapPdata> for ExactDetector {
             return Ok(());
         };
         effects.notify_ack(AckMsg::new(pdata.clone())).await?;
-        let mut out = Vec::new();
+        let (mut out, mut events) = (Vec::new(), Vec::new());
         for obs in observations(pdata, effects).await {
             let Some(env) = obs.value.envelope.filter(|e| !e.payload.is_empty()) else {
                 continue;
             };
-            out.extend(self.answer(*env));
+            let (gauges, new) = self.answer(*env);
+            out.extend(gauges);
+            events.extend(new);
         }
-        emit(&out, effects).await
+        emit(&out, &events, effects).await
     }
 }
 
@@ -696,7 +712,10 @@ static EXACT_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
              _: &otel_arrow_dfe_engine::capability::registry::Capabilities| {
         let config: ExactDetectorConfig = config(&node_config)?;
         Ok(ProcessorWrapper::local(
-            ExactDetector { config },
+            ExactDetector {
+                cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                config,
+            },
             node,
             node_config,
             processor_config,
@@ -825,10 +844,13 @@ mod tests {
         assert!(merged.iter().all(|e| e.count == 100));
         let config: ExactDetectorConfig =
             serde_json::from_value(serde_json::json!({"k": 2})).unwrap();
-        let mut detector = ExactDetector { config };
+        let mut detector = ExactDetector {
+            cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+            config,
+        };
         let out: Vec<_> = merged
             .into_iter()
-            .flat_map(|e| detector.answer(e))
+            .flat_map(|e| detector.answer(e).0)
             .collect();
         assert_eq!(get(&out, "asap.quantile", ("quantile", "0.5")), Some(50.0));
         assert_eq!(

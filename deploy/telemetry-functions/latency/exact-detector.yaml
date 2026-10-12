@@ -1,4 +1,4 @@
-# Exact pipeline, end: exact answers of each merged window, the
+# Exact pipeline, end: exact answers and events of each merged window, the
 # ground truth (method="exact").
 version: otel_dataflow/v1
 engine:
@@ -27,6 +27,7 @@ groups:
             config:
               endpoint: http://prometheus:9090
               metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+              logs_endpoint: http://loki:3100/otlp/v1/logs
               client_pool_size: 1
               max_in_flight: 1
               http: {timeout: 30s, compression: none}
