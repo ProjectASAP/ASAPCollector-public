@@ -1,13 +1,11 @@
 # Host networking keeps Prometheus, Grafana and the demo metrics endpoint on
-# localhost only (Linux). Prometheus scrapes run-streaming.py --demo on :9465
-# and still accepts OTLP pushes from the finite asap-otap-demo export.
+# localhost only (Linux). Prometheus scrapes run-streaming.py --demo on :9465.
 services:
   prometheus:
     image: prom/prometheus:v3.5.0
     network_mode: host
     command:
       - --config.file=/etc/prometheus/prometheus.yml
-      - --web.enable-otlp-receiver
       - --web.listen-address=127.0.0.1:${PROMETHEUS_PORT:-9090}
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
