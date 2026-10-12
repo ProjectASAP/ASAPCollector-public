@@ -77,6 +77,12 @@ and `resolve()` — the `sketch_type` dispatch table (factory + observer +
 `SketchType`). All of this sits on the host-neutral runtime in the same
 crate (`precompute`, `window`, `sketches/*`).
 
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for roles, PR rules, design
+principles and the local checks. Long or cross-cutting designs are written
+as RFCs in [`docs/rfcs/`](./docs/rfcs/README.md).
+
 ## Build & test
 
 For a continuous KLL vs exact comparison with every processor in its own
