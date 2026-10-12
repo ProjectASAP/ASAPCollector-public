@@ -186,8 +186,11 @@ def topk_checks(stack, t):
     recall = len(top["sketch"] & top["exact"]) / max(1, len(top["exact"]))
     yield check("sketch top-10 recall vs exact >= 0.9", recall >= 0.9, f"recall {recall:.2f}")
     events = stack.events('| event_kind="novelty" | method="sketch"')
+    flagged = stack.vector('max_over_time(asap_topk_new{key="/new/hot-route"}[10m])')
     yield check("novelty event in Loki", any("/new/hot-route" in e for e in events),
-                next((e for e in events if "/new/hot-route" in e), "none"))
+                next((e for e in events if "/new/hot-route" in e),
+                     f"none; {len(events)} sketch novelty events, "
+                     f"asap_topk_new gauge from {sorted(m['method'] for m, _ in flagged)}"))
 
 
 CASES = {
