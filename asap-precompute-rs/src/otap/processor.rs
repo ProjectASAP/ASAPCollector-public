@@ -216,6 +216,9 @@ const fn default_transmit_sketch() -> bool {
     true
 }
 
+/// How long after a tumbling window's end the idle timer waits before closing it.
+const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(5);
+
 /// Tumbling windows close within a second of their end even when idle;
 /// sliding windows emit once per slide.
 fn timer_period(config: &PluginConfig) -> Duration {
@@ -505,7 +508,15 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 Ok(())
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
+                // Data crossing a boundary closes a tumbling window on time; the
+                // timer only closes windows of idle streams, so it waits a grace
+                // for points still queued upstream (e.g. on a contended host).
                 let now_ms = asap_wall_clock_ms();
+                let now_ms = if self.plugin_config.window_slide.is_zero() {
+                    now_ms.saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64)
+                } else {
+                    now_ms
+                };
                 let envs = self.precompute.tick(now_ms);
                 self.emit_envelopes(&envs, effect_handler).await
             }
