@@ -74,6 +74,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use linkme::distributed_slice;
+use otel_arrow_dfe_engine::control::AckMsg;
+use otel_arrow_dfe_engine::ConsumerEffectHandlerExtension;
 use serde::{Deserialize, Serialize};
 
 use otel_arrow_dfe_config::error::Error as OtapConfigError;
@@ -417,6 +419,10 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
 
         match msg {
             Message::PData(pdata) => {
+                // Consumed into state here: ack so upstream (e.g. fanout) can move on.
+                effect_handler
+                    .notify_ack(AckMsg::new(pdata.clone()))
+                    .await?;
                 let outcome = match decode_pdata_to_observations(pdata) {
                     Ok(outcome) => outcome,
                     Err(error) => {
