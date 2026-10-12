@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Verify new tumbling/rolling samples continuously reach Prometheus and Grafana."""
+"""Run the multi-process demo briefly and verify its metrics in Prometheus and Grafana.
+
+Requires the asap-stream-benchmark:local image (built by run-demo.sh) and the
+compose stack. Extra arguments are passed to benchmarks/run-streaming.py.
+"""
 import argparse
 import json
-import os
 import subprocess
-import tempfile
+import sys
 import time
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+PROCESSORS = ('branch_a', 'branch_b', 'merge', 'estimate')
 
 
 def query(base, expression, grafana=False):
@@ -20,64 +27,60 @@ def query(base, expression, grafana=False):
     return payload['data']['result']
 
 
-def counts(base, metric):
-    return {row['metric']['quantile']: int(float(row['value'][1])) for row in query(
-        base, 'count_over_time(' + metric + '{quantile=~"0.5|0.99"}[5m])')}
+def values(base, expression, keys, grafana=False):
+    return {tuple(row['metric'].get(k, '') for k in keys): float(row['value'][1])
+            for row in query(base, expression, grafana)}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('binary', help='path to asap-kll-stream-demo')
     parser.add_argument('--prometheus', default='http://localhost:9090')
     parser.add_argument('--grafana', default='http://localhost:3000')
-    args = parser.parse_args()
-    metrics = ['request_duration_estimate', 'request_duration_rolling_estimate']
-    initial = {metric: counts(args.prometheus, metric) for metric in metrics}
-    observed = []
-    with tempfile.TemporaryFile(mode='w+') as trace:
-        process = subprocess.Popen([
-            os.path.abspath(args.binary), '--window-seconds', '6', '--slide-seconds', '1',
-            '--run-seconds', '16', '--prometheus-otlp-endpoint',
-            args.prometheus.rstrip('/') + '/api/v1/otlp/v1/metrics',
-        ], stdout=trace, stderr=subprocess.STDOUT)
-        try:
-            deadline = time.monotonic() + 40
-            while process.poll() is None:
-                assert time.monotonic() < deadline, 'streaming demo failed to stop'
-                for metric in metrics:
-                    rows = query(args.prometheus, metric + '{quantile=~"0.5|0.99"}')
-                    if not rows:
-                        continue
-                    assert len(rows) == 2, ('expected stable series, not new window labels', rows)
-                    assert {row['metric']['quantile'] for row in rows} == {'0.5', '0.99'}
-                    assert all('sketch_window_start_ms' not in row['metric'] and
-                               'sketch_window_end_ms' not in row['metric'] for row in rows)
-                    if metric.endswith('rolling_estimate'):
-                        observed.append(float(next(row['value'][1] for row in rows
-                                                   if row['metric']['quantile'] == '0.5')))
-                time.sleep(1)
-            assert process.returncode == 0, 'streaming demo returned an error'
-        finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-            trace.seek(0)
-            print(trace.read(), end='')
-    for metric in metrics:
-        after = counts(args.prometheus, metric)
-        assert all(after.get(q, 0) >= initial[metric].get(q, 0) + 6 for q in ['0.5', '0.99']), (initial, after)
-        expression = metric + '{quantile=~"0.5|0.99"}'
-        prometheus = {row['metric']['quantile']: float(row['value'][1])
-                      for row in query(args.prometheus, expression)}
-        grafana = {row['metric']['quantile']: float(row['value'][1])
-                   for row in query(args.grafana, expression, grafana=True)}
-        assert prometheus == grafana, (prometheus, grafana)
-    assert max(observed) - min(observed) > 5, 'rolling median did not follow the changing input'
-    print('Verified repeated tumbling/rolling writes, stable series, changing rolling values, and matching Grafana queries.')
+    parser.add_argument('--docker-command', default='docker')
+    parser.add_argument('--scenarios', nargs='+', default=['exact', 'kll'])
+    parser.add_argument('--tolerance', type=float, default=0.05,
+                        help='maximum relative error for sketch scenarios')
+    args, extra = parser.parse_known_args()
+    demo = subprocess.Popen([
+        sys.executable, str(REPO / 'benchmarks/run-streaming.py'), '--demo',
+        '--docker-command', args.docker_command, '--output', str(REPO / 'benchmark-results/demo-verify'),
+        '--scenarios', *args.scenarios, '--window-points', '65536', '--rolling-windows', '3',
+        '--generator-cores', '1', '--demo-rate', '50000', '--run-seconds', '60', *extra])
+    try:
+        deadline = time.monotonic() + 240
+        while True:
+            assert demo.poll() is None, 'demo exited before metrics were verified'
+            assert time.monotonic() < deadline, 'demo metrics did not appear'
+            windows = values(args.prometheus, 'asap_demo_completed_windows', ['scenario'])
+            rolling = values(args.prometheus, 'asap_demo_estimate{window_kind="rolling"}', ['scenario'])
+            if all(windows.get((s,), 0) >= 4 for s in args.scenarios) and len(rolling) == len(args.scenarios):
+                break
+            time.sleep(2)
+        throughput = values(args.prometheus, 'asap_demo_validated_signals_per_second', ['scenario'])
+        assert all(throughput[(s,)] > 0 for s in args.scenarios), throughput
+        cpu = values(args.prometheus, 'asap_demo_cpu_cores', ['scenario', 'component'])
+        assert all((s, c) in cpu for s in args.scenarios for c in PROCESSORS), cpu
+        errors = values(args.prometheus, 'asap_demo_relative_error',
+                        ['scenario', 'window_kind', 'quantile'])
+        assert {(s, k, q) for s in args.scenarios for k in ('tumbling', 'rolling')
+                for q in ('0.5', '0.99')} <= set(errors), errors
+        for (scenario, _, _), error in errors.items():
+            assert error <= (0.0 if scenario == 'exact' else args.tolerance), errors
+        expression = 'asap_demo_estimate'
+        keys = ['scenario', 'window_kind', 'quantile']
+        assert set(values(args.prometheus, expression, keys)) == set(
+            values(args.grafana, expression, keys, grafana=True))
+        with urllib.request.urlopen(args.grafana.rstrip('/') + '/api/dashboards/uid/asap-kll-stream',
+                                    timeout=10) as response:
+            dashboard = json.load(response)['dashboard']
+        assert any('asap_demo_validated_signals_per_second' in t['expr']
+                   for p in dashboard['panels'] for t in p['targets'])
+        print('throughput (signals/s):', {k[0]: round(v) for k, v in throughput.items()})
+        print('relative error:', {'/'.join(k): round(v, 5) for k, v in sorted(errors.items())})
+        print('Verified per-process throughput/CPU, tumbling and rolling accuracy, and Grafana queries.')
+    finally:
+        demo.wait(timeout=180)
+    assert demo.returncode == 0, 'demo returned an error'
 
 
 if __name__ == '__main__':

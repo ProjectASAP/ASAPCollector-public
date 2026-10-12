@@ -4,6 +4,6 @@ datasources:
     uid: asap-prometheus
     type: prometheus
     access: proxy
-    url: http://prometheus:9090
+    url: http://127.0.0.1:${PROMETHEUS_PORT}
     isDefault: true
     editable: false
