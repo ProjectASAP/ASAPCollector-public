@@ -14,6 +14,8 @@ pub mod config;
 pub mod codec;
 #[cfg(feature = "otap-engine")]
 pub mod processor;
+#[cfg(feature = "otap-engine")]
+pub mod scenario_generator;
 
 pub use config::{ConfigError, PluginConfig, SketchDispatch};
 pub use schema::{
