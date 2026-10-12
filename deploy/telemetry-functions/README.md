@@ -18,13 +18,13 @@ of scenario time, so all three pipelines receive identical points.
 
 | Stage | Config | What it runs |
 | --- | --- | --- |
-| generator-a/b, exact-generator-a/b, raw-generator-a/b | `pipelines/generator-*.yaml` | `scenario_generator`: seeded latency points over 20 routes (temporary stand-in for the official traffic generator) |
-| branch-a/b | `pipelines/branch.yaml` | `asap_sketches`: one KLL per route per 1-minute window |
-| merge | `pipelines/merge.yaml` | `window_merge`: merges both sources' sketches per window, 5 s after the window ends |
-| detector | `pipelines/detector.yaml` | `sketch_detector`: p50/p99 per route with lower/upper bounds (`method="sketch"`) |
-| exact-branch-a/b | `pipelines/exact-branch.yaml` | `exact_branch`: every value per route per 1-minute window |
+| generator-a/b, exact-generator-a/b, raw-generator-a/b | `latency/generator-*.yaml` | `scenario_generator`: seeded latency points over 20 routes (temporary stand-in for the official traffic generator) |
+| branch-a/b | `latency/branch.yaml` | `asap_sketches`: one KLL per route per 1-minute window |
+| merge | `latency/merge.yaml` | `window_merge`: merges both sources' sketches per window, 5 s after the window ends |
+| detector | `latency/detector.yaml` | `sketch_detector`: p50/p99 per route with lower/upper bounds (`method="sketch"`) |
+| exact-branch-a/b | `latency/exact-branch.yaml` | `exact_branch`: every value per route per 1-minute window |
 | exact-merge | `common/exact-merge.yaml` | `exact_merge`: adds both sources' exact windows, 5 s after the window ends |
-| exact-detector | `pipelines/exact-detector.yaml` | `exact_detector`: exact p50/p99 per route (`method="exact"`): the ground truth |
+| exact-detector | `latency/exact-detector.yaml` | `exact_detector`: exact p50/p99 per route (`method="exact"`): the ground truth |
 | raw-branch-a/b, raw-merge | `common/raw-*.yaml` | forward raw points (OTLP receiver -> exporter) |
 | raw-sink | `common/raw-sink.yaml` | `raw_sink`: writes every raw point as one log record to `loki-raw` and reports when `loki-raw` acknowledged each window's last point |
 
