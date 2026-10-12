@@ -53,7 +53,7 @@ impl Meta {
             started_ns: get("bench.started_ns")?,
         })
     }
-    fn envelope(self, value: f64) -> SketchEnvelope {
+    pub fn envelope(self, value: f64) -> SketchEnvelope {
         SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::Unspecified,
