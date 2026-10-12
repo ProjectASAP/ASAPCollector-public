@@ -93,6 +93,7 @@ use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 
 use crate::config::PrecomputeConfigSet;
 use crate::envelope::SketchEnvelope;
+use crate::observation::ObservationValueKind;
 use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::PluginConfig;
 use crate::precompute::{Precompute, PrecomputeError, PrecomputeImpl};
@@ -151,6 +152,9 @@ pub struct AsapSketchesUserConfig {
     /// Quantiles emitted by DDSketch/KLL in estimate mode.
     #[serde(default)]
     pub quantiles: Vec<f64>,
+    /// Labels that identify a series; empty keys series by every label.
+    #[serde(default)]
+    pub aggregate_by: Vec<String>,
 }
 
 impl AsapSketchesUserConfig {
@@ -188,6 +192,7 @@ impl AsapSketchesUserConfig {
             emit_window_stats: self.emit_window_stats,
             transmit_sketch: self.transmit_sketch,
             quantiles: self.quantiles,
+            aggregate_by: self.aggregate_by,
         };
         // Bounce the config through the resolver so config mistakes
         // (unsupported sketch_type, zero window) surface here rather
@@ -203,9 +208,11 @@ const fn default_transmit_sketch() -> bool {
     true
 }
 
+/// Tumbling windows close within a second of their end even when idle;
+/// sliding windows emit once per slide.
 fn timer_period(config: &PluginConfig) -> Duration {
     if config.window_slide.is_zero() {
-        config.window_size
+        config.window_size.min(Duration::from_secs(1))
     } else {
         config.window_slide
     }
@@ -423,6 +430,18 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                         ))
                         .await;
                 }
+                // A tumbling window closes as soon as a point's event time
+                // passes its end, so no point lands in an earlier window.
+                if self.plugin_config.window_slide.is_zero() {
+                    if let Some(first) = outcome
+                        .observations
+                        .iter()
+                        .find(|o| o.value.kind != ObservationValueKind::Envelope)
+                    {
+                        let envs = self.precompute.tick(first.timestamp_ms);
+                        self.emit_envelopes(&envs, effect_handler).await?;
+                    }
+                }
                 for obs in &outcome.observations {
                     // Note: `observe` here handles both "genuine OTLP
                     // metric" and "sketch shipped as binary inside an
@@ -555,6 +574,16 @@ mod tests {
         assert!(parse("60s", "5s", true).is_err());
         assert!(parse("5s", "5s", true).is_ok());
         assert!(parse("5s", "0s", false).is_err());
+        let tumbling = serde_json::from_value::<super::AsapSketchesUserConfig>(
+            serde_json::json!({"sketch_type":"kll","window_size":"60s","output_metric_name":"t"}),
+        )
+        .unwrap()
+        .into_plugin_config()
+        .unwrap();
+        assert_eq!(
+            super::timer_period(&tumbling),
+            std::time::Duration::from_secs(1)
+        );
         assert!(parse("3ms", "1.5ms", false).is_err());
     }
     // Unit tests confined to config-shape validation — full lifecycle

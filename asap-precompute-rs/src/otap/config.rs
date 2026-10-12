@@ -114,6 +114,8 @@ pub struct PluginConfig {
     /// Quantiles emitted per series when `transmit_sketch = false` and the
     /// sketch is a quantile sketch (DDSketch / KLL). Ignored otherwise.
     pub quantiles: Vec<f64>,
+    /// Labels that identify a series; empty keys series by every label.
+    pub aggregate_by: Vec<String>,
 }
 
 impl Default for PluginConfig {
@@ -131,6 +133,7 @@ impl Default for PluginConfig {
             emit_window_stats: false,
             transmit_sketch: true,
             quantiles: Vec::new(),
+            aggregate_by: Vec::new(),
         }
     }
 }
@@ -184,7 +187,7 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
             ..Default::default()
         },
         matchers: Vec::new(),
-        aggregate_by: Vec::new(),
+        aggregate_by: config.aggregate_by.clone(),
         transmit_sketch: config.transmit_sketch,
         quantiles: config.quantiles.clone(),
         sketch_params: config.sketch_params.clone(),
