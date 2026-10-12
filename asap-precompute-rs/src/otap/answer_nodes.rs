@@ -44,8 +44,8 @@ use otel_arrow_dfe_pdata::OtapPayload;
 
 use super::codec::decode_pdata_to_observations;
 use crate::answers::{
-    ks_distance, sketch_answers, CardinalityClassifier, CardinalityRules, DriftRules, DriftTracker,
-    Event,
+    ks_distance, sketch_answers, topk_of, CardinalityClassifier, CardinalityRules, DriftRules,
+    DriftTracker, Event, NoveltyTracker,
 };
 use crate::envelope::SketchEnvelope;
 use crate::envelope::SketchType;
@@ -86,6 +86,13 @@ pub struct DetectorConfig {
     /// Thresholds for distribution drift of quantile series.
     #[serde(default)]
     pub drift: DriftRules,
+    /// Windows whose top keys form the novelty baseline.
+    #[serde(default = "default_novelty_windows")]
+    pub novelty_windows: usize,
+}
+
+pub(super) fn default_novelty_windows() -> usize {
+    10
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -246,6 +253,7 @@ pub(super) async fn observations(
 struct SketchDetector {
     config: DetectorConfig,
     cardinality: CardinalityClassifier,
+    novelty: NoveltyTracker,
     drift: DriftTracker,
     /// Recent KLL windows per series, the drift baseline.
     baselines: HashMap<String, VecDeque<KLLWrapper>>,
@@ -333,6 +341,12 @@ impl local::Processor<OtapPdata> for SketchDetector {
                         out.extend(gauges);
                         events.extend(event);
                     }
+                    let top = topk_of(&answers);
+                    if !top.is_empty() {
+                        let (gauges, new) = self.novelty.observe(&env, "sketch", &top);
+                        out.extend(gauges);
+                        events.extend(new);
+                    }
                     if let Some(d) = estimate_of(&answers, "asap.distinct") {
                         let (gauges, event) =
                             self.cardinality.observe(&env, "sketch", d, env.count);
@@ -368,6 +382,7 @@ static SKETCH_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         Ok(ProcessorWrapper::local(
             SketchDetector {
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                novelty: NoveltyTracker::new(config.novelty_windows),
                 drift: DriftTracker::new(config.drift.clone()),
                 baselines: HashMap::new(),
                 config,
