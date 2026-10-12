@@ -39,8 +39,11 @@ def main():
     parser.add_argument('--docker-command', default='docker')
     parser.add_argument('--scenarios', nargs='+', default=['exact', 'kll'])
     parser.add_argument('--tolerance', type=float, default=0.05,
-                        help='maximum relative error for sketch scenarios')
+                        help='maximum relative (count) error for sketch scenarios')
     args, extra = parser.parse_known_args()
+    topk = set(args.scenarios) <= {'topk-exact', 'cmsheap'}
+    rolling_metric = ('asap_demo_topk_recall{window_kind="rolling"}' if topk
+                      else 'asap_demo_estimate{window_kind="rolling"}')
     demo = subprocess.Popen([
         sys.executable, str(REPO / 'benchmarks/run-streaming.py'), '--demo',
         '--docker-command', args.docker_command, '--output', str(REPO / 'benchmark-results/demo-verify'),
@@ -52,7 +55,7 @@ def main():
             assert demo.poll() is None, 'demo exited before metrics were verified'
             assert time.monotonic() < deadline, 'demo metrics did not appear'
             windows = values(args.prometheus, 'asap_demo_completed_windows', ['scenario'])
-            rolling = values(args.prometheus, 'asap_demo_estimate{window_kind="rolling"}', ['scenario'])
+            rolling = values(args.prometheus, rolling_metric, ['scenario'])
             if all(windows.get((s,), 0) >= 4 for s in args.scenarios) and len(rolling) == len(args.scenarios):
                 break
             time.sleep(2)
@@ -60,17 +63,27 @@ def main():
         assert all(throughput[(s,)] > 0 for s in args.scenarios), throughput
         cpu = values(args.prometheus, 'asap_demo_cpu_cores', ['scenario', 'component'])
         assert all((s, c) in cpu for s in args.scenarios for c in PROCESSORS), cpu
-        errors = values(args.prometheus, 'asap_demo_relative_error',
-                        ['scenario', 'window_kind', 'quantile'])
-        assert {(s, k, q) for s in args.scenarios for k in ('tumbling', 'rolling')
-                for q in ('0.5', '0.99')} <= set(errors), errors
-        for (scenario, _, _), error in errors.items():
-            assert error <= (0.0 if scenario == 'exact' else args.tolerance), errors
-        expression = 'asap_demo_estimate'
-        keys = ['scenario', 'window_kind', 'quantile']
+        if topk:
+            errors = values(args.prometheus, 'asap_demo_topk_mean_relative_error',
+                            ['scenario', 'window_kind'])
+            recall = values(args.prometheus, 'asap_demo_topk_recall', ['scenario', 'window_kind'])
+            assert {(s, k) for s in args.scenarios for k in ('tumbling', 'rolling')} <= set(recall)
+            assert all(r == 1.0 for (s, _), r in recall.items() if s == 'topk-exact'), recall
+            assert all(r >= 0.9 for r in recall.values()), recall
+            print('recall@10:', {'/'.join(k): v for k, v in sorted(recall.items())})
+            expression, keys = 'asap_demo_topk_estimate', ['scenario', 'window_kind', 'rank']
+        else:
+            errors = values(args.prometheus, 'asap_demo_relative_error',
+                            ['scenario', 'window_kind', 'quantile'])
+            assert {(s, k, q) for s in args.scenarios for k in ('tumbling', 'rolling')
+                    for q in ('0.5', '0.99')} <= set(errors), errors
+            expression, keys = 'asap_demo_estimate', ['scenario', 'window_kind', 'quantile']
+        for key, error in errors.items():
+            assert error <= (0.0 if key[0] in ('exact', 'topk-exact') else args.tolerance), errors
         assert set(values(args.prometheus, expression, keys)) == set(
             values(args.grafana, expression, keys, grafana=True))
-        with urllib.request.urlopen(args.grafana.rstrip('/') + '/api/dashboards/uid/asap-kll-stream',
+        uid = 'asap-topk-stream' if topk else 'asap-kll-stream'
+        with urllib.request.urlopen(args.grafana.rstrip('/') + '/api/dashboards/uid/' + uid,
                                     timeout=10) as response:
             dashboard = json.load(response)['dashboard']
         assert any('asap_demo_validated_signals_per_second' in t['expr']
