@@ -11,7 +11,27 @@ profiling.
 ./benchmarks/run-nightly.sh
 ```
 
-## Viewing nightly results today
+## CI tiers
+
+| Tier | Workflow | Trigger | What it checks |
+|---|---|---|---|
+| Per-merge smoke | `ci.yml` | every PR and push to `main` | `cargo fmt`, `clippy -D warnings`, `cargo test`, then `deploy/telemetry-functions/acceptance.py` on real collector containers. All stages share the runner's 4 vCPUs, so this is a correctness smoke, not a capacity measurement. |
+| Nightly sweep | `asap-sketch-benchmark.yml` | 02:30 UTC daily, manual | Full `run-nightly.sh` sweep, then `compare-summaries.py` against the previous successful `main` run. The step fails (with an annotation and the table in the job summary) when any row's median signals/s drops more than `regression_margin` (default 10%). |
+| On-demand comparison | `benchmark-on-demand.yml` | PR comment starting with `/benchmark` from an owner, member or collaborator | Reduced sweep (25k and 100k offered/s/source, 65,536-point windows, 1 repetition) on `main` and on the PR head; the comparison table is posted as a PR comment. |
+
+The benchmark tiers run on the runner named by the repository variable
+`BENCH_RUNNER` (a self-hosted runner label, which needs Docker, `gh` and
+enough cores for exclusive placement) and fall back to `ubuntu-24.04` with
+`--allow-shared-infrastructure` when it is unset. Shared runners are noisy, so
+treat a regression flagged there as a prompt to re-run, not a verdict.
+
+Compare any two runs locally:
+
+```sh
+benchmarks/compare-summaries.py BASE/streaming/summary.csv NEW/streaming/summary.csv --margin 0.10
+```
+
+## Viewing nightly results
 
 There is not yet a published ASAP dashboard. Results are available as GitHub
 Actions artifacts:
@@ -22,9 +42,8 @@ Actions artifacts:
 4. Read `streaming/summary.json`, `streaming/capacity.json`, and the
    `throughput.svg` / `resources.svg` charts.
 
-Artifacts expire after 30 days. GitHub-hosted runners are shared
-infrastructure, so small differences between runs should not be treated as
-regressions without repeated measurements.
+Artifacts expire after 30 days, so the regression check compares against the
+previous successful run rather than a long history.
 
 ## Future dashboard publication
 
@@ -46,11 +65,10 @@ Each dashboard point should link to its commit and Actions run and record the
 benchmark schema version, OTAP revision, runner type, scenario parameters, and
 observation duration so incompatible runs are not plotted as one series.
 
-The first dashboard should remain informational and require manual review.
-Automated regression thresholds should be introduced only after enough
-scheduled runs establish normal GitHub-hosted-runner variance. If stable
-cross-project numbers are required later, the same summary format can be fed by
-an isolated runner or an upstream OTAP shared-server contribution.
+The dashboard should remain informational; the nightly regression check
+above is the only automated threshold. If stable cross-project numbers are
+required later, the same summary format can be fed by an upstream OTAP
+shared-server contribution.
 
 ## Upstream references
 
