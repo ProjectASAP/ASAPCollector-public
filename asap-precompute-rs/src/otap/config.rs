@@ -1,4 +1,4 @@
-//! ASAP processor configuration and five-sketch `sketch_type` dispatch.
+//! ASAP processor configuration and `sketch_type` dispatch.
 //!
 //! A single plugin parameterized by `sketch_type` with a
 //! dispatch table that maps the user-facing string to:
@@ -17,11 +17,12 @@
 use std::time::Duration;
 
 use crate::config::{PrecomputeConfig, SketchParams, WindowSpec};
-use crate::envelope::{Encoding, SketchType};
+use crate::envelope::SketchType;
 use crate::precompute::{BoxedObserver, SketchFactory, SketchObserver};
 use crate::sketches::{
-    CMSObserver, CMSWrapper, CountSketchObserver, CountSketchWrapper, DDSketchObserver,
-    DDSketchWrapper, HLLObserver, HLLWrapper, KLLObserver, KLLWrapper,
+    CMSHeapObserver, CMSHeapWrapper, CMSObserver, CMSWrapper, CountSketchObserver,
+    CountSketchWrapper, DDSketchObserver, DDSketchWrapper, HLLObserver, HLLWrapper, KLLObserver,
+    KLLWrapper,
 };
 
 // -- Sketch-type spellings accepted in the plugin's TOML
@@ -38,6 +39,8 @@ pub const SKETCH_TYPE_HLL: &str = "hll";
 pub const SKETCH_TYPE_COUNTSKETCH: &str = "countsketch";
 /// `sketch_type = "countminsketch"`.
 pub const SKETCH_TYPE_COUNTMINSKETCH: &str = "countminsketch";
+/// `sketch_type = "countminsketch_heap"`.
+pub const SKETCH_TYPE_COUNTMINSKETCH_HEAP: &str = "countminsketch_heap";
 
 /// Dispatch error when [`PluginConfig`] cannot be turned into a
 /// runtime config + sketch factory + observer triple.
@@ -49,8 +52,7 @@ pub enum ConfigError {
         /// Specific validation failure.
         reason: String,
     },
-    /// User-facing `sketch_type` string didn't match any of the five
-    /// supported sketches.
+    /// User-facing `sketch_type` string didn't match a supported sketch.
     #[error("asap_sketches: unsupported sketch_type {value:?} (want one of: {valid})")]
     UnknownSketchType {
         /// Raw value from config.
@@ -66,18 +68,6 @@ pub enum ConfigError {
         /// Raw value from config (in milliseconds, post-parse).
         value: u128,
     },
-
-    /// Sketch payload transport is restricted to codecs that emit the
-    /// canonical self-describing ASAPv1 envelope.
-    #[error(
-        "asap_sketches: sketch transport requires kll with msgpack/ASAPv1; got {sketch_type:?} with {encoding} (set transmit_sketch=false for scalar estimates)"
-    )]
-    UnsupportedSketchTransport {
-        /// Configured sketch implementation.
-        sketch_type: String,
-        /// Configured wire encoding.
-        encoding: &'static str,
-    },
 }
 
 /// Plugin-level config block. Exposes the `sketch_type` knob plus the
@@ -90,7 +80,8 @@ pub enum ConfigError {
 #[derive(Clone, Debug)]
 pub struct PluginConfig {
     /// One of `"ddsketch"` / `"kll"` / `"hll"` / `"countsketch"` /
-    /// `"countminsketch"` (case-insensitive). Mandatory.
+    /// `"countminsketch"` / `"countminsketch_heap"` (case-insensitive).
+    /// Mandatory.
     pub sketch_type: String,
     /// Window rotation period. Mandatory.
     pub window_size: Duration,
@@ -114,19 +105,11 @@ pub struct PluginConfig {
     /// Whether to append `sample_count` / `window_duration_seconds`
     /// to every emitted envelope's labels.
     pub emit_window_stats: bool,
-    /// Outbound wire format for emitted envelopes. Sketch transport requires
-    /// KLL with `Msgpack`/`MsgpackDelta`, which emits the canonical ASAPv1
-    /// self-describing format. Other combinations remain available only when
-    /// `transmit_sketch=false` emits scalar estimates.
-    pub encoding: Encoding,
-    /// Whether to delta-encode emitted state against the cached outbound
-    /// snapshot (per-window against-empty). Combined with a msgpack
-    /// `encoding`, this emits `MsgpackDelta` frames.
-    pub delta_transmission: bool,
     /// When `false`, emit estimated scalar results instead of sketch bytes
     /// (see [`crate::config::PrecomputeConfig::transmit_sketch`]): one Gauge
     /// per [`Self::quantiles`] entry for DDSketch / KLL, a cardinality Gauge
-    /// for HLL. Defaults to `true` (transmit the sketch).
+    /// for HLL, one Gauge per heavy hitter for CMS with heap. Defaults to
+    /// `true` (transmit the ASAPv1 sketch).
     pub transmit_sketch: bool,
     /// Quantiles emitted per series when `transmit_sketch = false` and the
     /// sketch is a quantile sketch (DDSketch / KLL). Ignored otherwise.
@@ -146,8 +129,6 @@ impl Default for PluginConfig {
             omit_resource_attrs: false,
             global_aggregation: false,
             emit_window_stats: false,
-            encoding: Encoding::Msgpack,
-            delta_transmission: false,
             transmit_sketch: true,
             quantiles: Vec::new(),
         }
@@ -188,14 +169,6 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         });
     }
     let dispatch = build_dispatch(config)?;
-    if config.transmit_sketch
-        && (dispatch.sketch_type != SketchType::KLLSketch || !config.encoding.is_msgpack())
-    {
-        return Err(ConfigError::UnsupportedSketchTransport {
-            sketch_type: config.sketch_type.clone(),
-            encoding: config.encoding.name(),
-        });
-    }
     let sliding = !config.window_slide.is_zero();
     let pcfg = PrecomputeConfig {
         agg_id: config.agg_id,
@@ -213,9 +186,6 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         matchers: Vec::new(),
         aggregate_by: Vec::new(),
         transmit_sketch: config.transmit_sketch,
-        delta_transmission: config.delta_transmission,
-        delta_threshold: 0,
-        encoding: config.encoding,
         quantiles: config.quantiles.clone(),
         sketch_params: config.sketch_params.clone(),
         max_series: 0,
@@ -241,10 +211,6 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
 fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> {
     let normalized = config.sketch_type.to_ascii_lowercase();
     let params = &config.sketch_params;
-    // Baked into each msgpack-capable wrapper so its `snapshot` /
-    // `compute_delta_against` / `delta_against_empty_base` pick the right
-    // wire codec (KLL ignores it — proto-only).
-    let encoding = config.encoding;
     match normalized.as_str() {
         SKETCH_TYPE_DDSKETCH => {
             let alpha = positive_in_unit_interval(
@@ -253,9 +219,7 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             );
             Ok(SketchDispatch {
                 sketch_type: SketchType::DDSketch,
-                factory: Box::new(move || {
-                    Box::new(DDSketchWrapper::new(alpha).with_wire_encoding(encoding))
-                }),
+                factory: Box::new(move || Box::new(DDSketchWrapper::new(alpha))),
                 observer: boxed_observer(DDSketchObserver),
             })
         }
@@ -269,28 +233,15 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             };
             Ok(SketchDispatch {
                 sketch_type: SketchType::KLLSketch,
-                factory: Box::new(move || {
-                    Box::new(KLLWrapper::new(k as i32, seed).with_wire_encoding(encoding))
-                }),
+                factory: Box::new(move || Box::new(KLLWrapper::new(k as i32, seed))),
                 observer: boxed_observer(KLLObserver),
             })
         }
-        SKETCH_TYPE_HLL => {
-            let precision = clamp_positive_int(
-                crate::config::sketch_param_get(params, "precision", 12.0),
-                12,
-            );
-            Ok(SketchDispatch {
-                sketch_type: SketchType::HLLSketch,
-                factory: Box::new(move || {
-                    Box::new(
-                        HLLWrapper::new(asap_sketchlib::HllVariant::Regular, precision as u32)
-                            .with_wire_encoding(encoding),
-                    )
-                }),
-                observer: boxed_observer(HLLObserver),
-            })
-        }
+        SKETCH_TYPE_HLL => Ok(SketchDispatch {
+            sketch_type: SketchType::HLLSketch,
+            factory: Box::new(|| Box::new(HLLWrapper::new())),
+            observer: boxed_observer(HLLObserver),
+        }),
         SKETCH_TYPE_COUNTSKETCH => {
             let depth =
                 clamp_positive_int(crate::config::sketch_param_get(params, "depth", 4.0), 4);
@@ -305,10 +256,7 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             Ok(SketchDispatch {
                 sketch_type: SketchType::CountSketch,
                 factory: Box::new(move || {
-                    Box::new(
-                        CountSketchWrapper::new(depth as usize, width as usize)
-                            .with_wire_encoding(encoding),
-                    )
+                    Box::new(CountSketchWrapper::new(depth as usize, width as usize))
                 }),
                 observer: boxed_observer(CountSketchObserver { default_key }),
             })
@@ -323,17 +271,33 @@ fn build_dispatch(config: &PluginConfig) -> Result<SketchDispatch, ConfigError> 
             Ok(SketchDispatch {
                 sketch_type: SketchType::CountMinSketch,
                 factory: Box::new(move || {
-                    Box::new(
-                        CMSWrapper::new(depth as usize, width as usize)
-                            .with_wire_encoding(encoding),
-                    )
+                    Box::new(CMSWrapper::new(depth as usize, width as usize))
                 }),
                 observer: boxed_observer(CMSObserver),
             })
         }
+        SKETCH_TYPE_COUNTMINSKETCH_HEAP => {
+            let rows = clamp_positive_int(crate::config::sketch_param_get(params, "rows", 4.0), 4);
+            let columns = clamp_positive_int(
+                crate::config::sketch_param_get(params, "columns", 2048.0),
+                2048,
+            );
+            let k = clamp_positive_int(crate::config::sketch_param_get(params, "k", 10.0), 10);
+            Ok(SketchDispatch {
+                sketch_type: SketchType::CountMinSketchWithHeap,
+                factory: Box::new(move || {
+                    Box::new(CMSHeapWrapper::new(
+                        rows as usize,
+                        columns as usize,
+                        k as usize,
+                    ))
+                }),
+                observer: boxed_observer(CMSHeapObserver),
+            })
+        }
         _ => Err(ConfigError::UnknownSketchType {
             value: config.sketch_type.clone(),
-            valid: "ddsketch, kll, hll, countsketch, countminsketch",
+            valid: "ddsketch, kll, hll, countsketch, countminsketch, countminsketch_heap",
         }),
     }
 }
@@ -373,45 +337,42 @@ mod tests {
         }
     }
 
-    /// The out-of-box sketch transport must already satisfy the ASAPv1
-    /// self-describing carrier contract.
+    /// Every sketch type transmits its ASAPv1 sketch; the factory's sketch
+    /// snapshots to a payload the processor accepts.
     #[test]
-    fn default_transport_is_self_describing_kll() {
-        let cfg = PluginConfig::default();
-        assert_eq!(cfg.sketch_type, SKETCH_TYPE_KLL);
-        assert_eq!(cfg.encoding, Encoding::Msgpack);
-        assert!(resolve(&cfg).is_ok());
-    }
-
-    /// Until a sketchlib ASAPv1 codec exists for a sketch type, transport of
-    /// its private proto/legacy-msgpack state must fail during configuration.
-    #[test]
-    fn sketch_transport_rejects_non_asapv1_combinations() {
-        for (sketch_type, encoding) in [
-            (SKETCH_TYPE_DDSKETCH, Encoding::Msgpack),
-            (SKETCH_TYPE_HLL, Encoding::Msgpack),
-            (SKETCH_TYPE_COUNTMINSKETCH, Encoding::Msgpack),
-            (SKETCH_TYPE_COUNTSKETCH, Encoding::Msgpack),
-            (SKETCH_TYPE_KLL, Encoding::ProtoFull),
+    fn every_sketch_type_transmits_sketches() {
+        use crate::observation::{Observation, ObservationValue};
+        for sketch_type in [
+            SKETCH_TYPE_DDSKETCH,
+            SKETCH_TYPE_KLL,
+            SKETCH_TYPE_HLL,
+            SKETCH_TYPE_COUNTSKETCH,
+            SKETCH_TYPE_COUNTMINSKETCH,
+            SKETCH_TYPE_COUNTMINSKETCH_HEAP,
         ] {
             let mut cfg = make_config(sketch_type);
-            cfg.encoding = encoding;
             cfg.transmit_sketch = true;
-            assert!(
-                resolve(&cfg).is_err(),
-                "{sketch_type}/{encoding:?} must not emit a private sketch payload"
-            );
+            let (pcfg, dispatch) = resolve(&cfg).expect("resolve");
+            assert!(pcfg.transmit_sketch);
+            let mut sketch = (dispatch.factory)();
+            let obs = Observation::new(1, "m", vec![], vec![], ObservationValue::float(1.5));
+            dispatch.observer.observe(sketch.as_mut(), &obs).unwrap();
+            let bytes = sketch.snapshot().unwrap();
+            assert_eq!(&bytes[..6], b"ASAPv1", "{sketch_type}");
+            let mut fresh = (dispatch.factory)();
+            fresh.merge_snapshot(&bytes).unwrap();
         }
     }
 
     #[test]
-    fn dispatch_handles_all_five_canonical_sketch_types() {
+    fn dispatch_handles_all_canonical_sketch_types() {
         for (in_str, expected) in [
             ("ddsketch", SketchType::DDSketch),
             ("kll", SketchType::KLLSketch),
             ("hll", SketchType::HLLSketch),
             ("countsketch", SketchType::CountSketch),
             ("countminsketch", SketchType::CountMinSketch),
+            ("countminsketch_heap", SketchType::CountMinSketchWithHeap),
         ] {
             let (pcfg, dispatch) = resolve(&make_config(in_str)).expect("resolve");
             assert_eq!(dispatch.sketch_type, expected);
@@ -462,31 +423,5 @@ mod tests {
         let cfg = make_config("countminsketch");
         let (_, dispatch) = resolve(&cfg).expect("resolve");
         let _ = (dispatch.factory)();
-    }
-
-    #[test]
-    fn msgpack_encoding_flows_into_precompute_config() {
-        let mut cfg = make_config("ddsketch");
-        cfg.encoding = Encoding::MsgpackDelta;
-        cfg.delta_transmission = true;
-        let (pcfg, dispatch) = resolve(&cfg).expect("resolve");
-        assert_eq!(pcfg.encoding, Encoding::MsgpackDelta);
-        assert!(pcfg.delta_transmission);
-        // Factory builds a wrapper with the encoding baked in.
-        let _ = (dispatch.factory)();
-    }
-
-    #[test]
-    fn estimate_mode_allows_all_kll_encodings() {
-        // Scalar estimate mode does not put private sketch bytes on the wire.
-        for enc in [
-            Encoding::ProtoFull,
-            Encoding::Msgpack,
-            Encoding::MsgpackDelta,
-        ] {
-            let mut cfg = make_config("kll");
-            cfg.encoding = enc;
-            assert!(resolve(&cfg).is_ok(), "kll should accept {enc:?}");
-        }
     }
 }

@@ -5,7 +5,7 @@
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use asap_precompute_rs::envelope::{Encoding, SketchEnvelope, SketchType};
+use asap_precompute_rs::envelope::{SketchEnvelope, SketchType};
 use asap_precompute_rs::observation::KeyValue;
 use asap_precompute_rs::otap::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata};
 use async_trait::async_trait;
@@ -57,9 +57,7 @@ fn scalar_input(start: i32, end: i32) -> OtapPdata {
             labels: vec![KeyValue::new("route", "/checkout")],
             window_start_ms: 1_000,
             window_end_ms: 2_000,
-            encoding: Encoding::Unspecified,
             payload: vec![],
-            hash_spec: None,
             metric_name: "request.duration".to_owned(),
             count: 0,
             aggregation_temporality: 0,
@@ -200,7 +198,6 @@ nodes:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "kll"
-      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.sketch"
       agg_id: 7
@@ -211,7 +208,6 @@ nodes:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "kll"
-      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.sketch"
       agg_id: 7
@@ -222,7 +218,6 @@ nodes:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "kll"
-      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.merged_sketch"
       agg_id: 7
@@ -233,7 +228,6 @@ nodes:
     type: "urn:asap:processor:asap_sketches"
     config:
       sketch_type: "kll"
-      encoding: "Msgpack"
       window_size: "20ms"
       output_metric_name: "request.duration.estimate"
       agg_id: 7

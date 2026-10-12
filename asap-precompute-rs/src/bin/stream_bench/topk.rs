@@ -6,7 +6,7 @@
 use super::model::{Meta, NormalizedBatch, MAX_PENDING};
 use super::profile::{self, Category};
 use asap_precompute_rs::{
-    envelope::{Encoding, SketchEnvelope, SketchType},
+    envelope::{SketchEnvelope, SketchType},
     observation::{KeyValue, Observation},
     otap::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata},
     precompute::FrequencySketch,
@@ -108,7 +108,6 @@ fn sketch_pdata(sketch: &CMSHeapWrapper, count: usize, meta: Meta) -> Result<Ota
     let _cpu = profile::scope(Category::PdataCodec);
     let mut env: SketchEnvelope = meta.envelope(0.0);
     env.sketch_type = SketchType::CountMinSketchWithHeap;
-    env.encoding = Encoding::Msgpack;
     env.payload = {
         let _cpu = profile::scope(Category::SketchCodec);
         sketch.snapshot().map_err(|e| e.to_string())?

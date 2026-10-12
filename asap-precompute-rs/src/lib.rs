@@ -1,14 +1,10 @@
 //! `asap-precompute-rs` is the host-neutral edge precompute runtime.
 //!
-//! This crate owns the windowing, snapshot caching, and delta encoding
-//! runtime for the Rust **edge** runtime. Future Rust-based
-//! edge agents (Vector adapter, OTAP-Rust, Arrow-backed shims)
-//! consume this crate.
-//!
-//! Per-platform Adapter implementations (the Layer-4 shims) translate
-//! their host's native event into [`Observation`], hand it to a
-//! [`Precompute`], and translate the runtime's emitted
-//! [`SketchEnvelope`] back to the host's native event.
+//! This crate owns the windowing runtime for the Rust **edge** runtime.
+//! A host translates its native event into [`Observation`], hands it to
+//! a [`Precompute`], and translates each emitted [`SketchEnvelope`]
+//! (an ASAPv1 sketch payload from `asap_sketchlib` plus metadata) back
+//! to its own format; the OTAP processor in `otap` is the bundled host.
 
 #![warn(missing_docs)]
 // The sketch code intentionally guards against NaN with the
@@ -17,9 +13,7 @@
 // rewrite behavior-sensitive comparisons.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
-pub mod adapter;
 pub mod config;
-pub mod control_channel;
 pub mod envelope;
 pub mod kll_windows;
 pub mod matchers;
@@ -28,14 +22,13 @@ pub mod observation;
 pub mod otap;
 pub mod precompute;
 pub mod sketches;
-pub mod snapshot_cache;
 pub mod window;
 
 pub use config::{
     AggId, AggregationMode, OnOverflow, PrecomputeConfig, PrecomputeConfigSet, SketchParams,
     WindowSpec,
 };
-pub use envelope::{Encoding, SketchEnvelope, SketchType};
+pub use envelope::{SketchEnvelope, SketchType};
 pub use matchers::{LabelMatcher, MatchOp};
 pub use observation::{KeyValue, Observation, ObservationValue, ObservationValueKind};
 pub use precompute::{

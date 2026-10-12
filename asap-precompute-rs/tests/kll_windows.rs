@@ -2,15 +2,14 @@
 use asap_precompute_rs::kll_windows::{KllRollingPrecompute, KllWindowStore};
 use asap_precompute_rs::precompute::PrecomputeError;
 use asap_precompute_rs::{
-    AggregationMode, Encoding, KeyValue, Observation, ObservationValue, Precompute,
-    PrecomputeConfig, PrecomputeConfigSet, SketchType, WindowSpec,
+    AggregationMode, KeyValue, Observation, ObservationValue, Precompute, PrecomputeConfig,
+    PrecomputeConfigSet, SketchType, WindowSpec,
 };
 use std::time::Duration;
 
 fn config() -> PrecomputeConfig {
     PrecomputeConfig {
         sketch_type: SketchType::KLLSketch,
-        encoding: Encoding::Msgpack,
         mode: AggregationMode::Sliding,
         transmit_sketch: false,
         metric_name: "request.duration.rolling_estimate".into(),
@@ -267,7 +266,7 @@ fn disjoint_mode_transmits_full_panes_for_downstream_rolling_queries() {
     creator.observe(&observation(1, 42., "checkout")).unwrap();
     let pane = creator.tick(10);
     assert_eq!(pane.len(), 1);
-    assert_eq!(pane[0].encoding, Encoding::Msgpack);
+    assert!(pane[0].payload.starts_with(b"ASAPv1"));
     let mut retained = store();
     retained.merge_pane(&pane[0]).unwrap();
     let answer = retained.quantile_over_time(0, 10, &[0.25, 0.75]).unwrap();

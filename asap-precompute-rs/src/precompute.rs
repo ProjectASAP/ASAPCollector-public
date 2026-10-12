@@ -8,10 +8,9 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::config::{PrecomputeConfig, PrecomputeConfigSet};
-use crate::envelope::{Encoding, SketchEnvelope, SketchType};
+use crate::envelope::{SketchEnvelope, SketchType};
 use crate::matchers::series_attrs;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
-use crate::snapshot_cache::SnapshotCache;
 use crate::window::{SeriesEntry, WindowState};
 
 /// Narrow interface the Layer-3 runtime needs from a Layer-1 sketch
@@ -26,81 +25,22 @@ use crate::window::{SeriesEntry, WindowState};
 /// bytes), so the routing layer above lives in the per-shim glue
 /// (see [`SketchObserver`]), not here.
 pub trait Sketch: Send + Sync {
-    /// Serializes the current sketch state to a portable
-    /// proto-encoded byte slice.
-    ///
-    /// Used by [`crate::snapshot_cache::SnapshotCache::compute_delta`]
-    /// and as the `ProtoFull` payload.
+    /// Serializes the current sketch state as sketchlib's self-describing
+    /// ASAPv1 envelope. An empty sketch returns an empty `Vec`.
     fn snapshot(&self) -> Result<Vec<u8>, PrecomputeError>;
 
-    /// Computes a sparse delta between this sketch and the previous
-    /// snapshot bytes.
-    ///
-    /// If the resulting delta is at least as large as a full snapshot
-    /// scaled by `threshold`, returns the full state with
-    /// `is_full = true` so the caller can avoid wasted work
-    /// re-marshaling. `threshold` is the per-sketch absolute count
-    /// cap (see today's `computeDDSketchDelta` /
-    /// `countsketch.ComputeDelta`).
-    fn compute_delta_against(
-        &self,
-        prev: &[u8],
-        threshold: u64,
-    ) -> Result<DeltaResult, PrecomputeError>;
+    /// Decodes an ASAPv1 envelope produced by [`Self::snapshot`] of the same
+    /// sketch type and merges it in. Empty bytes are a no-op.
+    fn merge_snapshot(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError>;
 
-    /// Merges a previously-computed delta into this sketch in place.
-    ///
-    /// Used by [`Precompute::observe_envelope`] when an inbound
-    /// envelope is encoded as `ProtoDelta`.
-    fn apply_delta(&mut self, delta: &[u8]) -> Result<(), PrecomputeError>;
-
-    /// Encoding-aware ingest of an inbound frame (full or delta).
-    ///
-    /// `encoding` is the inbound envelope's [`Encoding`] tag, which may
-    /// differ from this node's configured outbound format (e.g. a central
-    /// merger receiving `MsgpackDelta` while emitting `Msgpack`). The
-    /// default delegates to [`Self::apply_delta`], preserving the proto
-    /// behavior (which auto-detects a full envelope vs a proto delta);
-    /// msgpack-capable wrappers override this to dispatch the proto vs
-    /// msgpack decoder off the tag.
-    fn apply_delta_encoded(
-        &mut self,
-        payload: &[u8],
-        _encoding: Encoding,
-    ) -> Result<(), PrecomputeError> {
-        self.apply_delta(payload)
+    /// Folds another sketch of the same type into this one.
+    fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
+        self.merge_snapshot(&other.snapshot()?)
     }
-
-    /// Folds another sketch (typically a freshly-decoded envelope
-    /// payload) into this one.
-    ///
-    /// Used by [`Precompute::observe_envelope`] on `ProtoFull`
-    /// inbound envelopes.
-    fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError>;
 
     /// Zeros the sketch in place. Used by window rotation and by
     /// sketch object pools.
     fn reset(&mut self);
-
-    /// Per-window delta base for a window-reset producer.
-    ///
-    /// When a family opts in to "true per-window deltas",
-    /// this returns the snapshot bytes
-    /// the [`crate::snapshot_cache::SnapshotCache`] should cache as the
-    /// outbound base AFTER each window-close emit — i.e. the snapshot of
-    /// an EMPTY sketch of the same shape. The next window's
-    /// [`Self::compute_delta_against`] then diffs against empty, so its
-    /// delta is that window's own full per-window state encoded as a
-    /// delta (no cross-window subtraction).
-    ///
-    /// The default returns `None`: such families keep the legacy
-    /// always-refresh behavior (the cache is refreshed to the
-    /// just-emitted full state). DDSketch, CMS, CountSketch, and HLL
-    /// override this to opt in to per-window deltas; KLL keeps the default
-    /// (full-only).
-    fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
-        Ok(None)
-    }
 
     /// Produce estimated output points for the `transmit_sketch = false`
     /// mode. `quantiles` are the configured quantiles (quantile sketches
@@ -124,24 +64,11 @@ pub trait Sketch: Send + Sync {
     /// Implementations that want observer downcasting (e.g. real
     /// sketch wrappers in [`crate::sketches`]) override this with
     /// `fn as_any_mut(&mut self) -> &mut dyn Any { self }`. Test
-    /// fakes that route observations via byte-level apply_delta
+    /// fakes that route observations via byte-level merge_snapshot
     /// (see `tests/runtime.rs::FakeSketch`) can keep the default
     /// impl which never matches a real downcast — the FakeObserver
     /// doesn't call `as_any_mut`.
     fn as_any_mut(&mut self) -> &mut dyn Any;
-}
-
-/// Output of [`Sketch::compute_delta_against`].
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct DeltaResult {
-    /// Wire bytes — either a sparse delta (when `is_full = false`)
-    /// or the full snapshot (when `is_full = true`).
-    pub payload: Vec<u8>,
-    /// Whether `payload` is the full snapshot rather than a sparse
-    /// delta. Caller uses this to set
-    /// [`crate::envelope::Encoding::ProtoFull`] vs
-    /// [`crate::envelope::Encoding::ProtoDelta`].
-    pub is_full: bool,
 }
 
 /// Implemented by sketches that can answer quantile queries.
@@ -274,7 +201,7 @@ pub enum PrecomputeError {
         /// Config-side type.
         config: SketchType,
     },
-    /// Generic catch-all for nested errors (proto decode, sketch
+    /// Generic catch-all for nested errors (ASAPv1 decode, sketch
     /// internal failure, etc.).
     #[error("precompute: {0}")]
     Other(String),
@@ -393,7 +320,6 @@ pub struct PrecomputeImpl {
     sketch_factory: Option<SketchFactory>,
     observer: Option<BoxedObserver>,
     window: Mutex<WindowState>,
-    snapshot_cache: SnapshotCache,
     stats: Mutex<StatsSnapshot>,
     sketch_type: SketchType,
     closed: AtomicBool,
@@ -423,7 +349,6 @@ impl PrecomputeImpl {
             sketch_factory,
             observer,
             window: Mutex::new(WindowState::new()),
-            snapshot_cache: SnapshotCache::new(),
             stats: Mutex::new(StatsSnapshot::default()),
             sketch_type,
             closed: AtomicBool::new(false),
@@ -448,7 +373,7 @@ impl PrecomputeImpl {
     }
 
     /// Walks the closed series, serializes each into a
-    /// [`SketchEnvelope`] (honoring `delta_transmission`), and
+    /// [`SketchEnvelope`], and
     /// updates the rolling stats counters.
     fn finish_rotate(
         &self,
@@ -482,17 +407,13 @@ impl PrecomputeImpl {
         envelopes
     }
 
-    /// Turns a closed series entry into a [`SketchEnvelope`].
-    /// Honors `delta_transmission` via the snapshot cache.
+    /// Turns a closed series entry into [`SketchEnvelope`]s.
     fn serialize_series(
         &self,
         entry: &SeriesEntry,
         cfg: &PrecomputeConfig,
         rng: [u64; 2],
     ) -> Result<Vec<SketchEnvelope>, PrecomputeError> {
-        // Rebuild the same key the window used at admit time.
-        let series_key = cfg.series_key_for_entry(&entry.resource_labels, &entry.labels);
-
         // Base labels shared by both output modes (series attrs + optional
         // operator-visibility window stats).
         let mut base_labels = series_attrs(&entry.labels, &cfg.aggregate_by);
@@ -534,9 +455,7 @@ impl PrecomputeImpl {
                         window_start_ms: rng[0],
                         window_end_ms: rng[1],
                         // No sketch bytes on the estimate path.
-                        encoding: Encoding::Unspecified,
                         payload: Vec::new(),
-                        hash_spec: None,
                         metric_name: cfg.metric_name.clone(),
                         count: entry.count,
                         aggregation_temporality: cfg.temporality,
@@ -547,28 +466,8 @@ impl PrecomputeImpl {
             return Ok(out);
         }
 
-        // Sketch-on-the-wire mode.
-        let (payload, encoding) = if cfg.delta_transmission {
-            let result = self.snapshot_cache.compute_delta(
-                &series_key,
-                entry.sketch.as_ref(),
-                cfg.delta_threshold,
-            )?;
-            let enc = if result.is_full {
-                full_encoding(cfg.encoding)
-            } else {
-                delta_encoding(cfg.encoding)
-            };
-            (result.payload, enc)
-        } else {
-            let snap = entry.sketch.snapshot()?;
-            // Even without delta transmission, refreshing the cached
-            // outbound snapshot keeps the cache consistent for any
-            // later config change that flips delta_transmission to
-            // true.
-            self.snapshot_cache.cache_outbound(&series_key, &snap);
-            (snap, full_encoding(cfg.encoding))
-        };
+        // Sketch-on-the-wire mode: the full ASAPv1 snapshot.
+        let payload = entry.sketch.snapshot()?;
         if payload.is_empty() {
             return Ok(Vec::new());
         }
@@ -580,37 +479,12 @@ impl PrecomputeImpl {
             labels: base_labels,
             window_start_ms: rng[0],
             window_end_ms: rng[1],
-            encoding,
             payload,
-            hash_spec: None,
             metric_name: cfg.metric_name.clone(),
             count: entry.count,
             aggregation_temporality: cfg.temporality,
             value: 0.0,
         }])
-    }
-}
-
-/// Maps a configured wire format to the [`Encoding`] tag stamped on a
-/// **full** frame: msgpack configs emit `Msgpack`, everything else
-/// `ProtoFull`. The wrapper's `snapshot()` produces bytes in the matching
-/// format because its `wire_encoding` is baked from the same `cfg.encoding`.
-fn full_encoding(configured: Encoding) -> Encoding {
-    if configured.is_msgpack() {
-        Encoding::Msgpack
-    } else {
-        Encoding::ProtoFull
-    }
-}
-
-/// Maps a configured wire format to the [`Encoding`] tag stamped on a
-/// **delta** frame: msgpack configs emit `MsgpackDelta`, everything else
-/// `ProtoDelta`.
-fn delta_encoding(configured: Encoding) -> Encoding {
-    if configured.is_msgpack() {
-        Encoding::MsgpackDelta
-    } else {
-        Encoding::ProtoDelta
     }
 }
 
@@ -703,8 +577,7 @@ impl Precompute for PrecomputeImpl {
         let mut window = self.window.lock().expect("window lock poisoned");
         let mut stats = self.stats.lock().expect("stats lock poisoned");
         stats.input_envelopes = stats.input_envelopes.saturating_add(1);
-        let result =
-            window.observe_envelope(env, &cfg, sketch_factory, &self.snapshot_cache, &mut stats);
+        let result = window.observe_envelope(env, &cfg, sketch_factory, &mut stats);
         if let Err(err) = &result {
             if matches!(err, PrecomputeError::SeriesCapExceeded) {
                 stats.dropped_overflow = stats.dropped_overflow.saturating_add(1);

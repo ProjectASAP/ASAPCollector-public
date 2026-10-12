@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::envelope::{Encoding, SketchType};
+use crate::envelope::SketchType;
 use crate::matchers::LabelMatcher;
 use crate::observation::{KeyValue, Observation};
 
@@ -128,11 +128,10 @@ mod duration_millis {
 ///
 /// Expected keys per sketch type:
 /// - DDSketch: `relative_accuracy` (float, 0 < v < 1)
-/// - KLL: `k` (uint, ≥ 8)
-/// - HLL: `precision` (uint, 4-18)
-/// - CountSketch: `epsilon`, `delta` (floats, 0 < v < 1) plus `width`,
-///   `depth` (derived if absent)
-/// - CountMin: `rows`, `columns` (uints)
+/// - KLL: `k` (uint, ≥ 8), optional `seed`
+/// - HLL: none (sketchlib's precision-14 HyperLogLog)
+/// - CountSketch / CountMin: `depth`, `width` (uints)
+/// - CountMin with heap: `rows`, `columns`, `k` (uints)
 pub type SketchParams = HashMap<String, f64>;
 
 /// Returns the parameter value or `default` if not present.
@@ -156,10 +155,8 @@ pub fn sketch_size_string(sketch_type: SketchType, params: &SketchParams) -> Opt
             .get("k")
             .and_then(|v| as_wire_u64(*v))
             .map(|v| v.to_string()),
-        SketchType::HLLSketch => params
-            .get("precision")
-            .and_then(|v| as_wire_u64(*v))
-            .map(|v| v.to_string()),
+        // HLLWrapper is sketchlib's fixed precision-14 HyperLogLog.
+        SketchType::HLLSketch => Some("14".to_string()),
         SketchType::CountSketch => match (params.get("width"), params.get("depth")) {
             (Some(w), Some(d)) => match (as_wire_u64(*w), as_wire_u64(*d)) {
                 (Some(w), Some(d)) => Some(format!("{w} x {d}")),
@@ -188,9 +185,7 @@ pub fn sketch_size_string(sketch_type: SketchType, params: &SketchParams) -> Opt
 /// carrying a fractional part (e.g. a unit mixup like `k = 0.5`) all
 /// indicate a misconfigured param. Silently truncating (`as u64`)
 /// would report a fabricated, wrong `sketch_size` on the wire instead
-/// (`k = 0.5` truncating to `"0"`); better to omit the field, mirroring
-/// `resolve_hash_seed`'s "omit rather than fabricate" stance for a
-/// malformed input.
+/// (`k = 0.5` truncating to `"0"`); better to omit the field.
 fn as_wire_u64(v: f64) -> Option<u64> {
     if !v.is_finite() || v < 0.0 || v.fract() != 0.0 {
         return None;
@@ -222,26 +217,6 @@ pub struct PrecomputeConfig {
     /// Chooses between sketch-on-the-wire and quantile-summary-on-
     /// the-wire output.
     pub transmit_sketch: bool,
-    /// Enables delta encoding against the cached outbound snapshot.
-    pub delta_transmission: bool,
-    /// Caps the absolute delta size; if the computed delta exceeds
-    /// `delta_threshold * full-state size`, the runtime emits the
-    /// full state instead.
-    ///
-    /// Mirrors today's `ddsketch::ComputeDelta` threshold semantics.
-    /// The unit is sketch-specific (`u64` for DDSketch/CMS bucket
-    /// counts; `f64` for CountSketch L2 cells, stored here as
-    /// rounded-up `u64` — adapters convert as needed).
-    pub delta_threshold: u64,
-    /// Overrides the wire encoding of emitted envelopes.
-    ///
-    /// Default zero value (`Unspecified`, treated as `ProtoFull`) is
-    /// used for non-delta transmissions. When `delta_transmission` is
-    /// true, the runtime emits `ProtoDelta` frames after the initial
-    /// `ProtoFull` snapshot. `Msgpack` is supported for legacy paths
-    /// (HLL / CountSketch / CMS today carry an explicit `encoding`
-    /// knob in their existing config).
-    pub encoding: Encoding,
     /// Output mode when `transmit_sketch` is false. For
     /// quantile-sketch types (DDSketch / KLL), each quantile in this
     /// list becomes a separate gauge metric on emit. Empty list means
@@ -340,9 +315,6 @@ impl Default for PrecomputeConfig {
             window: WindowSpec::default(),
             matchers: Vec::new(),
             aggregate_by: Vec::new(),
-            delta_transmission: false,
-            delta_threshold: 0,
-            encoding: Encoding::default(),
             quantiles: Vec::new(),
             sketch_params: SketchParams::default(),
             max_series: 0,
@@ -409,12 +381,10 @@ impl PrecomputeConfig {
     }
 }
 
-/// Versioned bundle of configs delivered by
-/// [`crate::control_channel::ControlChannel`].
+/// Versioned bundle of configs delivered by the control plane.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrecomputeConfigSet {
-    /// Monotonically increasing across plans; ack with
-    /// `ControlChannel::ack`.
+    /// Monotonically increasing across plans.
     pub version: u64,
     /// `PrecomputeConfig`s active for this host.
     pub configs: Vec<PrecomputeConfig>,
@@ -438,26 +408,10 @@ mod tests {
         assert_eq!(cfg.sketch_type, SketchType::Unspecified);
         assert_eq!(cfg.mode, AggregationMode::Tumbling);
         assert_eq!(cfg.on_overflow, OnOverflow::Drop);
-        assert_eq!(cfg.encoding, Encoding::Unspecified);
         assert_eq!(cfg.window.size, Duration::ZERO);
-        assert!(!cfg.delta_transmission);
         assert!(!cfg.global_aggregation);
         assert!(!cfg.omit_resource_attrs);
         assert!(!cfg.emit_window_stats);
-    }
-
-    #[test]
-    fn aggregation_mode_names_match_go() {
-        assert_eq!(AggregationMode::Tumbling.name(), "Tumbling");
-        assert_eq!(AggregationMode::Sliding.name(), "Sliding");
-        assert_eq!(AggregationMode::Batch.name(), "Batch");
-    }
-
-    #[test]
-    fn on_overflow_names_match_go() {
-        assert_eq!(OnOverflow::Drop.name(), "Drop");
-        assert_eq!(OnOverflow::Block.name(), "Block");
-        assert_eq!(OnOverflow::EvictOldest.name(), "EvictOldest");
     }
 
     #[test]
@@ -503,11 +457,9 @@ mod tests {
             Some("200".to_string())
         );
 
-        let mut hll = SketchParams::new();
-        hll.insert("precision".into(), 12.0);
         assert_eq!(
-            sketch_size_string(SketchType::HLLSketch, &hll),
-            Some("12".to_string())
+            sketch_size_string(SketchType::HLLSketch, &SketchParams::new()),
+            Some("14".to_string())
         );
 
         let mut cs = SketchParams::new();

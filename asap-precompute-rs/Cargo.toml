@@ -9,9 +9,6 @@ license = "MIT"
 [dependencies]
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "3fc3442c3275d374f79ba522f473de83912c6345" }
 serde = { version = "1", features = ["derive"] }
-prost = "0.13"
-# OTAP's generated protobuf types implement the 0.14 Message trait.
-prost-otap = { package = "prost", version = "0.14", optional = true }
 thiserror = "1"
 
 # Apache Arrow is only pulled in by the OTAP codec. Consumers on the
@@ -54,16 +51,13 @@ libc = { version = "0.2", optional = true }
 tokio = { version = "1", features = ["sync", "rt", "time", "net"], optional = true }
 
 [dev-dependencies]
-proptest = "1"
 serde_json = "1"
 # The full Tokio runtime is required by the live OTAP pipeline integration test.
 tokio = { version = "1", features = ["full"] }
-criterion = { version = "0.7", features = ["html_reports"] }
 [features]
 default = []
-# Enables the OTAP codec + plugin lifecycle at `crate::otap`
-# (`decode_batch` / `encode_batch` over `arrow::RecordBatch`). No dependency
-# on real OTAP Dataflow crates — this is the standalone-buildable half.
+# Enables `crate::otap` (plugin config + carrier attribute keys). No
+# dependency on real OTAP Dataflow crates.
 otap = ["dep:arrow-array", "dep:arrow-schema"]
 # Enables `otap::processor`/`otap::codec` — the real
 # `local::Processor<OtapPdata>` node (`AsapSketchesProcessor`) and its
@@ -75,7 +69,6 @@ otap = ["dep:arrow-array", "dep:arrow-schema"]
 # folded into `otap`.
 otap-engine = [
     "otap",
-    "dep:prost-otap",
     "dep:otel-arrow-dfe-engine",
     "dep:otel-arrow-dfe-otap",
     "dep:otel-arrow-dfe-config",
@@ -100,20 +93,6 @@ stream-benchmark = [
 ]
 
 [[bin]]
-name = "asap-otap-demo"
-path = "src/bin/asap_otap_demo.rs"
-required-features = ["otap-engine"]
-
-[[bin]]
 name = "asap-stream-bench"
 path = "src/bin/asap_stream_bench.rs"
 required-features = ["stream-benchmark"]
-
-[[bench]]
-name = "asap_sketch_pipeline"
-harness = false
-required-features = ["otap-engine"]
-
-[profile.bench]
-debug = true
-strip = "none"

@@ -2,14 +2,16 @@
 //!
 //! Implements [`Sketch`] + [`FrequencySketch`]. Snapshots are sketchlib's
 //! ASAPv1 envelope (kind `0x03 0x00`): the counter matrix plus the heap's
-//! keys and counts. There is no delta encoding; every payload is full state.
+//! keys and counts.
 
 use std::any::Any;
 
-use asap_sketchlib::{CMSHeap, DataInput, HeapItem};
+use asap_sketchlib::{CMSHeap, DataInput, HeapItem, MATRIX_MAX_ROWS};
 
-use super::cms::clamp_rows_for_hash_bits;
-use crate::precompute::{DeltaResult, FrequencyEntry, FrequencySketch, PrecomputeError, Sketch};
+use crate::observation::{KeyValue, Observation};
+use crate::precompute::{
+    EstimatePoint, FrequencyEntry, FrequencySketch, PrecomputeError, Sketch, SketchObserver,
+};
 
 /// Count-Min sketch plus heavy-hitter heap. Keys are raw bytes.
 pub struct CMSHeapWrapper {
@@ -17,14 +19,11 @@ pub struct CMSHeapWrapper {
 }
 
 impl CMSHeapWrapper {
-    /// Construct with `top_k` heap slots. `cols` is rounded up to a power of
-    /// two and `rows` clamped to the 64-bit hash budget, as for
-    /// [`super::CMSWrapper`].
+    /// Construct with `top_k` heap slots; `rows` is clamped to
+    /// `1..=MATRIX_MAX_ROWS` as for [`super::CMSWrapper`].
     pub fn new(rows: usize, cols: usize, top_k: usize) -> Self {
-        let cols = cols.max(1).next_power_of_two();
-        let rows = clamp_rows_for_hash_bits(rows, cols);
         Self {
-            sk: CMSHeap::new(rows, cols, top_k.max(1)),
+            sk: CMSHeap::new(rows.clamp(1, MATRIX_MAX_ROWS), cols.max(1), top_k.max(1)),
         }
     }
 
@@ -67,26 +66,31 @@ impl Sketch for CMSHeapWrapper {
             .map_err(|e| PrecomputeError::Other(format!("CMSHeapWrapper snapshot: {e}")))
     }
 
-    fn compute_delta_against(&self, _: &[u8], _: u64) -> Result<DeltaResult, PrecomputeError> {
-        Ok(DeltaResult {
-            payload: self.snapshot()?,
-            is_full: true,
-        })
-    }
-
-    fn apply_delta(&mut self, payload: &[u8]) -> Result<(), PrecomputeError> {
-        if payload.is_empty() {
+    fn merge_snapshot(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError> {
+        if bytes.is_empty() {
             return Ok(());
         }
-        self.merge_from(&Self::from_snapshot(payload)?)
-    }
-
-    fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
-        self.apply_delta(&other.snapshot()?)
+        self.merge_from(&Self::from_snapshot(bytes)?)
     }
 
     fn reset(&mut self) {
         self.sk = CMSHeap::new(self.sk.rows(), self.sk.cols(), self.sk.heap().capacity());
+    }
+
+    /// One point per heap entry (the configured `k`), labelled with its
+    /// `key` and 1-based `rank`.
+    fn estimate(&self, _quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {
+        self.top_k(self.sk.heap().capacity())
+            .into_iter()
+            .enumerate()
+            .map(|(rank, entry)| EstimatePoint {
+                labels: vec![
+                    KeyValue::new("key", String::from_utf8_lossy(&entry.key).into_owned()),
+                    KeyValue::new("rank", (rank + 1).to_string()),
+                ],
+                value: entry.count,
+            })
+            .collect()
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -117,6 +121,33 @@ impl FrequencySketch for CMSHeapWrapper {
         entries.sort_by(|a, b| b.count.total_cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
         entries.truncate(k);
         entries
+    }
+}
+
+/// Observer counting each observation's key once into a [`CMSHeapWrapper`].
+///
+/// The key is the observation's `bytes` value when present, otherwise its
+/// full label set via [`crate::matchers::attributes_key`], as for
+/// [`super::CMSObserver`].
+pub struct CMSHeapObserver;
+
+impl SketchObserver for CMSHeapObserver {
+    fn observe(&self, sketch: &mut dyn Sketch, obs: &Observation) -> Result<(), PrecomputeError> {
+        let w = sketch
+            .as_any_mut()
+            .downcast_mut::<CMSHeapWrapper>()
+            .ok_or_else(|| {
+                PrecomputeError::Other("CMSHeapObserver: sketch is not a CMSHeapWrapper".into())
+            })?;
+        if obs.value.bytes.is_empty() {
+            w.update(
+                crate::matchers::attributes_key(&obs.labels, &[]).as_bytes(),
+                1,
+            );
+        } else {
+            w.update(&obs.value.bytes, 1);
+        }
+        Ok(())
     }
 }
 
@@ -162,6 +193,14 @@ mod tests {
         left.merge(&right).unwrap();
         assert_eq!(keys(&left), vec![4, 1, 2]);
         assert_eq!(left.estimate_count(&4u64.to_be_bytes()), 14.0);
+    }
+
+    #[test]
+    fn estimate_emits_ranked_heavy_hitters() {
+        let points = keyed(&[(1, 5), (2, 50), (3, 20)]).estimate(&[], 0);
+        assert_eq!(points.len(), 3);
+        assert_eq!(points[0].value, 50.0);
+        assert_eq!(points[0].labels[1], KeyValue::new("rank", "1"));
     }
 
     #[test]
