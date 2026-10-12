@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build asap-collector, package it, and start every stage plus the observers.
-# USE_CASE=latency (default) or cardinality picks the scenario.
+# USE_CASE=latency (default), cardinality, drift or topk picks the scenario.
 # DOCKER_COMMAND="sudo -n docker" when Docker needs sudo. Stop with:
 #   $DOCKER_COMMAND compose -f deploy/telemetry-functions/compose.yaml down
 set -euo pipefail
