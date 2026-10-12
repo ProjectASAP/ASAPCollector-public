@@ -184,9 +184,150 @@ pub fn exact_answers(
     out
 }
 
+/// Thresholds for [`DriftTracker`].
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DriftRules {
+    /// Windows merged into the baseline.
+    #[serde(default = "default_drift_baseline")]
+    pub baseline_windows: usize,
+    /// Kolmogorov-Smirnov distance above which a series has drifted.
+    #[serde(default = "default_ks")]
+    pub ks_threshold: f64,
+    /// Points needed in the current window before testing.
+    #[serde(default = "default_drift_points")]
+    pub min_points: u64,
+}
+
+fn default_drift_baseline() -> usize {
+    5
+}
+fn default_ks() -> f64 {
+    0.1
+}
+fn default_drift_points() -> u64 {
+    1000
+}
+
+impl Default for DriftRules {
+    fn default() -> Self {
+        Self {
+            baseline_windows: default_drift_baseline(),
+            ks_threshold: default_ks(),
+            min_points: default_drift_points(),
+        }
+    }
+}
+
+/// Largest gap between two CDFs over the points `xs` (Kolmogorov-Smirnov).
+pub fn ks_distance(current: impl Fn(f64) -> f64, baseline: impl Fn(f64) -> f64, xs: &[f64]) -> f64 {
+    xs.iter()
+        .map(|&x| (current(x) - baseline(x)).abs())
+        .fold(0.0, f64::max)
+}
+
+/// Turns each window's KS distance into a drift gauge and an event when a
+/// series starts or stops drifting. Sketch and exact use the same rules.
+#[derive(Default)]
+pub struct DriftTracker {
+    /// Thresholds.
+    pub rules: DriftRules,
+    drifting: HashMap<String, bool>,
+}
+
+impl DriftTracker {
+    /// Tracker with the given thresholds.
+    pub fn new(rules: DriftRules) -> Self {
+        Self {
+            rules,
+            drifting: HashMap::new(),
+        }
+    }
+
+    /// Records one window's distance from its baseline.
+    pub fn observe(
+        &mut self,
+        template: &SketchEnvelope,
+        method: &str,
+        ks: f64,
+        baseline_p50: f64,
+        current_p50: f64,
+    ) -> (Vec<SketchEnvelope>, Option<Event>) {
+        let drift = ks > self.rules.ks_threshold;
+        let out = vec![
+            gauge(template, "asap.drift.ks", method, &[], ks),
+            gauge(
+                template,
+                "asap.drift",
+                method,
+                &[],
+                if drift { 1.0 } else { 0.0 },
+            ),
+        ];
+        let key = format!("{}|{:?}", template.metric_name, template.labels);
+        let previous = self.drifting.insert(key, drift);
+        let series = template
+            .labels
+            .iter()
+            .map(|kv| format!("{}={}", kv.key, kv.value))
+            .collect::<Vec<_>>()
+            .join(",");
+        let event = (previous.unwrap_or(false) != drift).then(|| Event {
+            window_end_ms: template.window_end_ms,
+            method: method.into(),
+            kind: "drift".into(),
+            attributes: template
+                .labels
+                .iter()
+                .cloned()
+                .chain([
+                    KeyValue::new("drift", drift.to_string()),
+                    KeyValue::new("ks", format!("{ks:.3}")),
+                ])
+                .collect(),
+            body: if drift {
+                format!(
+                    "{} {{{series}}} drifted from its baseline: KS distance {ks:.3}, median {baseline_p50:.1} -> {current_p50:.1}",
+                    template.metric_name
+                )
+            } else {
+                format!(
+                    "{} {{{series}}} is back within its baseline: KS distance {ks:.3}",
+                    template.metric_name
+                )
+            },
+        });
+        (out, event)
+    }
+}
+
 #[cfg(test)]
 mod classifier_tests {
     use super::*;
+
+    #[test]
+    fn ks_and_drift_events() {
+        let uniform = |x: f64| x.clamp(0.0, 1.0);
+        let shifted = |x: f64| (x - 0.3).clamp(0.0, 1.0);
+        let xs: Vec<f64> = (0..=100).map(|i| i as f64 / 100.0).collect();
+        let ks = ks_distance(shifted, uniform, &xs);
+        assert!((ks - 0.3).abs() < 1e-9, "{ks}");
+        let mut t = DriftTracker::default();
+        let s = SketchEnvelope {
+            metric_name: "m".into(),
+            ..Default::default()
+        };
+        assert!(t.observe(&s, "sketch", 0.02, 1.0, 1.0).1.is_none());
+        let (out, event) = t.observe(&s, "sketch", 0.3, 1.0, 2.0);
+        assert_eq!(out[1].value, 1.0);
+        assert!(event.unwrap().body.contains("drifted"));
+        assert!(t
+            .observe(&s, "sketch", 0.03, 1.0, 1.0)
+            .1
+            .unwrap()
+            .body
+            .contains("back"));
+    }
 
     fn attr(key: &str) -> SketchEnvelope {
         SketchEnvelope {

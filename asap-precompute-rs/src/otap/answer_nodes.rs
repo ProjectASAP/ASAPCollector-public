@@ -54,10 +54,15 @@ use otel_arrow_dfe_pdata::OtapPayload;
 
 use super::codec::decode_pdata_to_observations;
 use crate::answers::{
-    exact_answers, sketch_answers, CardinalityClassifier, CardinalityRules, Event, ExactWindow,
+    exact_answers, ks_distance, sketch_answers, CardinalityClassifier, CardinalityRules,
+    DriftRules, DriftTracker, Event, ExactWindow,
 };
 use crate::envelope::SketchEnvelope;
+use crate::envelope::SketchType;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
+use crate::precompute::QuantileSketch;
+use crate::sketches::KLLWrapper;
+use std::collections::{HashMap, VecDeque};
 
 /// Registered URN of the sketch detector.
 pub const SKETCH_DETECTOR_URN: &str = "urn:asap:processor:sketch_detector";
@@ -90,6 +95,9 @@ pub struct DetectorConfig {
     /// Thresholds for classifying per-attribute cardinality.
     #[serde(default)]
     pub cardinality: CardinalityRules,
+    /// Thresholds for distribution drift of quantile series.
+    #[serde(default)]
+    pub drift: DriftRules,
 }
 
 /// `exact_answers` configuration.
@@ -117,6 +125,9 @@ pub struct ExactConfig {
     /// Thresholds for classifying per-attribute cardinality.
     #[serde(default)]
     pub cardinality: CardinalityRules,
+    /// Thresholds for distribution drift of quantile series.
+    #[serde(default)]
+    pub drift: DriftRules,
 }
 
 fn now_ms() -> u64 {
@@ -249,6 +260,54 @@ async fn observations(
 struct SketchDetector {
     config: DetectorConfig,
     cardinality: CardinalityClassifier,
+    drift: DriftTracker,
+    /// Recent KLL windows per series, the drift baseline.
+    baselines: HashMap<String, VecDeque<KLLWrapper>>,
+}
+
+fn series_key(env: &SketchEnvelope) -> String {
+    format!("{}|{:?}", env.metric_name, env.labels)
+}
+
+/// Percentile grid of both distributions: where their CDFs are compared.
+fn grid(a: &dyn QuantileSketch, b: &dyn QuantileSketch) -> Vec<f64> {
+    (1..100)
+        .flat_map(|i| [a.quantile(i as f64 / 100.0), b.quantile(i as f64 / 100.0)])
+        .collect()
+}
+
+impl SketchDetector {
+    /// KS distance of this KLL window from the merge of the previous ones.
+    fn drift(&mut self, env: &SketchEnvelope) -> (Vec<SketchEnvelope>, Option<Event>) {
+        let Ok(current) = KLLWrapper::from_snapshot(&env.payload) else {
+            return (Vec::new(), None);
+        };
+        let window = self.baselines.entry(series_key(env)).or_default();
+        let mut result = (Vec::new(), None);
+        if window.len() >= 3 && env.count >= self.drift.rules.min_points {
+            let mut baseline = KLLWrapper::new(current.inner().k() as i32, None);
+            for w in window.iter() {
+                let _ = crate::precompute::Sketch::merge(&mut baseline, w);
+            }
+            fn cdf(s: &KLLWrapper) -> impl Fn(f64) -> f64 + '_ {
+                let n = s.inner().count().max(1) as f64;
+                move |x| s.inner().rank(x) as f64 / n
+            }
+            let ks = ks_distance(cdf(&current), cdf(&baseline), &grid(&current, &baseline));
+            result = self.drift.observe(
+                env,
+                "sketch",
+                ks,
+                baseline.quantile(0.5),
+                current.quantile(0.5),
+            );
+        }
+        window.push_back(current);
+        if window.len() > self.drift.rules.baseline_windows {
+            window.pop_front();
+        }
+        result
+    }
 }
 
 /// The `bound="estimate"` value of `metric` among `answers`.
@@ -283,6 +342,11 @@ impl local::Processor<OtapPdata> for SketchDetector {
             };
             match sketch_answers(&env, &self.config.quantiles, self.config.k) {
                 Ok(answers) => {
+                    if env.sketch_type == SketchType::KLLSketch {
+                        let (gauges, event) = self.drift(&env);
+                        out.extend(gauges);
+                        events.extend(event);
+                    }
                     if let Some(d) = estimate_of(&answers, "asap.distinct") {
                         let (gauges, event) =
                             self.cardinality.observe(&env, "sketch", d, env.count);
@@ -307,6 +371,9 @@ struct ExactState {
 struct ExactAnswers {
     config: ExactConfig,
     cardinality: CardinalityClassifier,
+    drift: DriftTracker,
+    /// Recent windows' sorted values per quantile series.
+    baselines: HashMap<String, VecDeque<Vec<f64>>>,
     /// Open windows by window end.
     windows: BTreeMap<u64, ExactState>,
     emitted_until: u64,
@@ -403,9 +470,51 @@ impl ExactAnswers {
                     &self.config.quantiles,
                     self.config.k,
                 ));
+                if !w.values.is_empty() {
+                    // exact_answers left the values sorted.
+                    let (gauges, event) =
+                        self.exact_drift(&template, std::mem::take(&mut w.values));
+                    out.extend(gauges);
+                    events.extend(event);
+                }
             }
         }
         (out, events)
+    }
+}
+
+impl ExactAnswers {
+    /// Exact KS distance of a window's sorted values from the previous windows.
+    fn exact_drift(
+        &mut self,
+        template: &SketchEnvelope,
+        sorted: Vec<f64>,
+    ) -> (Vec<SketchEnvelope>, Option<Event>) {
+        let window = self.baselines.entry(series_key(template)).or_default();
+        let mut result = (Vec::new(), None);
+        if window.len() >= 3 && sorted.len() as u64 >= self.drift.rules.min_points {
+            let mut baseline: Vec<f64> = window.iter().flatten().copied().collect();
+            baseline.sort_unstable_by(f64::total_cmp);
+            let cdf = |v: &[f64], x: f64| v.partition_point(|&y| y <= x) as f64 / v.len() as f64;
+            let at = |v: &[f64], q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+            let xs: Vec<f64> = (1..100)
+                .flat_map(|i| {
+                    [
+                        at(&sorted, i as f64 / 100.0),
+                        at(&baseline, i as f64 / 100.0),
+                    ]
+                })
+                .collect();
+            let ks = ks_distance(|x| cdf(&sorted, x), |x| cdf(&baseline, x), &xs);
+            result =
+                self.drift
+                    .observe(template, "exact", ks, at(&baseline, 0.5), at(&sorted, 0.5));
+        }
+        window.push_back(sorted);
+        if window.len() > self.drift.rules.baseline_windows {
+            window.pop_front();
+        }
+        result
     }
 }
 
@@ -464,6 +573,8 @@ static SKETCH_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         Ok(ProcessorWrapper::local(
             SketchDetector {
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                drift: DriftTracker::new(config.drift.clone()),
+                baselines: HashMap::new(),
                 config,
             },
             node,
@@ -489,6 +600,8 @@ static EXACT_ANSWERS: ProcessorFactory<OtapPdata> = ProcessorFactory {
         Ok(ProcessorWrapper::local(
             ExactAnswers {
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                drift: DriftTracker::new(config.drift.clone()),
+                baselines: HashMap::new(),
                 config,
                 windows: BTreeMap::new(),
                 emitted_until: 0,
@@ -529,6 +642,8 @@ mod tests {
         .unwrap();
         let mut exact = ExactAnswers {
             cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+            drift: DriftTracker::new(config.drift.clone()),
+            baselines: HashMap::new(),
             config,
             windows: BTreeMap::new(),
             emitted_until: 0,
