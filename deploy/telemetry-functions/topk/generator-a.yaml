@@ -1,0 +1,36 @@
+# Source a: 100,000 routes (Zipf 1.1); a new route takes 15% of traffic after 10 minutes.
+version: otel_dataflow/v1
+engine:
+  http_admin:
+    bind_address: 0.0.0.0:8085
+policies:
+  resources:
+    core_allocation:
+      type: core_count
+      count: 1
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          generator:
+            type: urn:asap:receiver:scenario_generator
+            config:
+              seed: 1
+              signals_per_second: 20000
+              metric_name: http.server.request.duration
+              resource_attributes: {service.name: checkout, source: "a"}
+              attributes:
+                - {key: http.route, cardinality: 100000, zipf: 1.1}
+              value: {lognormal: {median: 50.0, sigma: 0.6}}
+              changes:
+                - {after_seconds: 600, attribute: http.route, inject: /new/hot-route, share: 0.15}
+          export:
+            type: exporter:otlp_http
+            config:
+              endpoint: http://downstream:4318
+              client_pool_size: 1
+              max_in_flight: 1
+              http: {timeout: 30s, compression: none}
+        connections:
+          - {from: generator, to: export}
