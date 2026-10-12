@@ -1,0 +1,35 @@
+# Exact baseline and ground truth: every raw point, exact answers per window.
+version: otel_dataflow/v1
+engine:
+  http_admin:
+    bind_address: 0.0.0.0:8085
+policies:
+  resources:
+    core_allocation:
+      type: core_count
+      count: 1
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: receiver:otlp
+            config:
+              protocols:
+                http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
+          exact:
+            type: urn:asap:processor:exact_answers
+            config: {window: 60s, per_attribute: [http.route], k: 10, novelty_windows: 10}
+          to_prometheus:
+            type: exporter:otlp_http
+            config:
+              endpoint: http://prometheus:9090
+              metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+              logs_endpoint: http://loki:3100/otlp/v1/logs
+              client_pool_size: 1
+              max_in_flight: 1
+              http: {timeout: 30s, compression: none}
+        connections:
+          - {from: receiver, to: exact}
+          - {from: exact, to: to_prometheus}

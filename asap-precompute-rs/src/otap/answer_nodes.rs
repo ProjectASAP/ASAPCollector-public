@@ -54,8 +54,8 @@ use otel_arrow_dfe_pdata::OtapPayload;
 
 use super::codec::decode_pdata_to_observations;
 use crate::answers::{
-    exact_answers, ks_distance, sketch_answers, CardinalityClassifier, CardinalityRules,
-    DriftRules, DriftTracker, Event, ExactWindow,
+    exact_answers, ks_distance, sketch_answers, topk_of, CardinalityClassifier, CardinalityRules,
+    DriftRules, DriftTracker, Event, ExactWindow, NoveltyTracker,
 };
 use crate::envelope::SketchEnvelope;
 use crate::envelope::SketchType;
@@ -98,6 +98,13 @@ pub struct DetectorConfig {
     /// Thresholds for distribution drift of quantile series.
     #[serde(default)]
     pub drift: DriftRules,
+    /// Windows whose top keys form the novelty baseline.
+    #[serde(default = "default_novelty_windows")]
+    pub novelty_windows: usize,
+}
+
+fn default_novelty_windows() -> usize {
+    10
 }
 
 /// `exact_answers` configuration.
@@ -128,6 +135,9 @@ pub struct ExactConfig {
     /// Thresholds for distribution drift of quantile series.
     #[serde(default)]
     pub drift: DriftRules,
+    /// Windows whose top keys form the novelty baseline.
+    #[serde(default = "default_novelty_windows")]
+    pub novelty_windows: usize,
 }
 
 fn now_ms() -> u64 {
@@ -260,6 +270,7 @@ async fn observations(
 struct SketchDetector {
     config: DetectorConfig,
     cardinality: CardinalityClassifier,
+    novelty: NoveltyTracker,
     drift: DriftTracker,
     /// Recent KLL windows per series, the drift baseline.
     baselines: HashMap<String, VecDeque<KLLWrapper>>,
@@ -347,6 +358,12 @@ impl local::Processor<OtapPdata> for SketchDetector {
                         out.extend(gauges);
                         events.extend(event);
                     }
+                    let top = topk_of(&answers);
+                    if !top.is_empty() {
+                        let (gauges, new) = self.novelty.observe(&env, "sketch", &top);
+                        out.extend(gauges);
+                        events.extend(new);
+                    }
                     if let Some(d) = estimate_of(&answers, "asap.distinct") {
                         let (gauges, event) =
                             self.cardinality.observe(&env, "sketch", d, env.count);
@@ -371,6 +388,7 @@ struct ExactState {
 struct ExactAnswers {
     config: ExactConfig,
     cardinality: CardinalityClassifier,
+    novelty: NoveltyTracker,
     drift: DriftTracker,
     /// Recent windows' sorted values per quantile series.
     baselines: HashMap<String, VecDeque<Vec<f64>>>,
@@ -464,12 +482,15 @@ impl ExactAnswers {
                     out.extend(gauges);
                     events.extend(event);
                 }
-                out.extend(exact_answers(
-                    &template,
-                    &mut w,
-                    &self.config.quantiles,
-                    self.config.k,
-                ));
+                let answers =
+                    exact_answers(&template, &mut w, &self.config.quantiles, self.config.k);
+                let top = topk_of(&answers);
+                if !top.is_empty() {
+                    let (gauges, new) = self.novelty.observe(&template, "exact", &top);
+                    out.extend(gauges);
+                    events.extend(new);
+                }
+                out.extend(answers);
                 if !w.values.is_empty() {
                     // exact_answers left the values sorted.
                     let (gauges, event) =
@@ -573,6 +594,7 @@ static SKETCH_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         Ok(ProcessorWrapper::local(
             SketchDetector {
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                novelty: NoveltyTracker::new(config.novelty_windows),
                 drift: DriftTracker::new(config.drift.clone()),
                 baselines: HashMap::new(),
                 config,
@@ -600,6 +622,7 @@ static EXACT_ANSWERS: ProcessorFactory<OtapPdata> = ProcessorFactory {
         Ok(ProcessorWrapper::local(
             ExactAnswers {
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                novelty: NoveltyTracker::new(config.novelty_windows),
                 drift: DriftTracker::new(config.drift.clone()),
                 baselines: HashMap::new(),
                 config,
@@ -642,6 +665,7 @@ mod tests {
         .unwrap();
         let mut exact = ExactAnswers {
             cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+            novelty: NoveltyTracker::new(config.novelty_windows),
             drift: DriftTracker::new(config.drift.clone()),
             baselines: HashMap::new(),
             config,

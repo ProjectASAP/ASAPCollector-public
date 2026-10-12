@@ -301,9 +301,120 @@ impl DriftTracker {
     }
 }
 
+/// The `(key, count)` of every `asap.topk` estimate in `answers`, by rank.
+pub fn topk_of(answers: &[SketchEnvelope]) -> Vec<(String, f64)> {
+    let label = |e: &SketchEnvelope, k: &str| {
+        e.labels
+            .iter()
+            .find(|kv| kv.key == k)
+            .map(|kv| kv.value.clone())
+    };
+    let mut top: Vec<(u32, String, f64)> = answers
+        .iter()
+        .filter(|e| {
+            e.metric_name == "asap.topk" && label(e, "bound").as_deref() == Some("estimate")
+        })
+        .filter_map(|e| Some((label(e, "rank")?.parse().ok()?, label(e, "key")?, e.value)))
+        .collect();
+    top.sort_by_key(|t| t.0);
+    top.into_iter().map(|(_, k, v)| (k, v)).collect()
+}
+
+/// Flags heavy hitters that were not among the top keys of the previous
+/// windows. Sketch and exact use the same rule.
+#[derive(Default)]
+pub struct NoveltyTracker {
+    /// Windows whose top keys form the baseline.
+    pub baseline_windows: usize,
+    history: HashMap<String, std::collections::VecDeque<HashSet<String>>>,
+}
+
+impl NoveltyTracker {
+    /// Tracker remembering `baseline_windows` windows.
+    pub fn new(baseline_windows: usize) -> Self {
+        Self {
+            baseline_windows,
+            history: HashMap::new(),
+        }
+    }
+
+    /// New heavy hitters in this window's `top` (key, count), as gauges and events.
+    pub fn observe(
+        &mut self,
+        template: &SketchEnvelope,
+        method: &str,
+        top: &[(String, f64)],
+    ) -> (Vec<SketchEnvelope>, Vec<Event>) {
+        let key = format!("{}|{:?}", template.metric_name, template.labels);
+        let window = self.history.entry(key).or_default();
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        if window.len() >= 3 {
+            let attribute = template
+                .labels
+                .iter()
+                .find(|kv| kv.key == crate::matchers::ATTRIBUTE_KEY_LABEL)
+                .map(|kv| kv.value.clone())
+                .unwrap_or_default();
+            for (rank, (k, count)) in top.iter().enumerate() {
+                if window.iter().any(|seen| seen.contains(k)) {
+                    continue;
+                }
+                out.push(gauge(
+                    template,
+                    "asap.topk.new",
+                    method,
+                    &[("key", k.clone())],
+                    *count,
+                ));
+                events.push(Event {
+                    window_end_ms: template.window_end_ms,
+                    method: method.into(),
+                    kind: "novelty".into(),
+                    attributes: vec![
+                        KeyValue::new("attribute.key", attribute.clone()),
+                        KeyValue::new("key", k.clone()),
+                        KeyValue::new("rank", (rank + 1).to_string()),
+                        KeyValue::new("count", format!("{count:.0}")),
+                    ],
+                    body: format!(
+                        "new heavy hitter {attribute}={k}: rank {} with {count:.0} points, absent from the top {} of the previous {} windows",
+                        rank + 1,
+                        top.len(),
+                        window.len()
+                    ),
+                });
+            }
+        }
+        window.push_back(top.iter().map(|(k, _)| k.clone()).collect());
+        if window.len() > self.baseline_windows {
+            window.pop_front();
+        }
+        (out, events)
+    }
+}
+
 #[cfg(test)]
 mod classifier_tests {
     use super::*;
+
+    #[test]
+    fn novelty_after_three_windows() {
+        let mut t = NoveltyTracker::new(5);
+        let s = SketchEnvelope {
+            metric_name: "m".into(),
+            ..Default::default()
+        };
+        let usual = vec![("a".to_string(), 10.0), ("b".to_string(), 5.0)];
+        for _ in 0..3 {
+            assert!(t.observe(&s, "sketch", &usual).1.is_empty());
+        }
+        let now = vec![("new".to_string(), 20.0), ("a".to_string(), 10.0)];
+        let (out, events) = t.observe(&s, "sketch", &now);
+        assert_eq!(out.len(), 1);
+        assert!(events[0].body.contains("new heavy hitter =new: rank 1"));
+        // The next window, the key is part of the baseline.
+        assert!(t.observe(&s, "sketch", &now).1.is_empty());
+    }
 
     #[test]
     fn ks_and_drift_events() {
