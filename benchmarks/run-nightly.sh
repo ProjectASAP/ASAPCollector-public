@@ -8,10 +8,6 @@ read -r -a docker_command <<< "${DOCKER_COMMAND:-docker}"
 mkdir -p benchmark-results
 cargo build --manifest-path asap-precompute-rs/Cargo.toml \
   --release --features stream-benchmark --bin asap-stream-bench
-cargo bench --manifest-path asap-precompute-rs/Cargo.toml \
-  --features otap-engine --bench asap_sketch_pipeline -- \
-  kll_isolated_stages --sample-size 10 --warm-up-time 1 --measurement-time 1 \
-  | tee benchmark-results/kll-isolated-stages.txt
 context=$(mktemp -d)
 trap 'rm -rf "$context"' EXIT
 cp "$cargo_target_dir/release/asap-stream-bench" "$context/"

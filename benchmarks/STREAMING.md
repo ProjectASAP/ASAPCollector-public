@@ -1,8 +1,6 @@
 # Sustained OTLP network benchmark
 
-`./benchmarks/run-nightly.sh` now runs persistent streaming, not repeated file-backed demos.
-The historical batch experiment is still available as `./benchmarks/run-file-nightly.sh`;
-its numbers must not be mixed with this benchmark's results.
+`./benchmarks/run-nightly.sh` runs persistent streaming.
 
 For exclusive CPU cost attribution and worker call-stack sampling, see
 [PROFILING.md](PROFILING.md). CPU profiling uses drained accounting boundaries
@@ -41,7 +39,7 @@ wall-clock rotation, late-event handling, or window-watermark policies.
 - Exact retains and sorts each branch's window, sends sorted runs in bounded
   batches, merges the two runs, then returns exact p50/p99.
 - KLL updates a `k=400` sketch incrementally per input batch, sends one ASAPv1
-  Msgpack sketch per source/window, merges them, then returns p50/p99.
+  sketch per source/window, merges them, then returns p50/p99.
 - Backend validates every quantile result. Exact must match; KLL tolerance is
   `max(abs(reference) * 0.05, 0.001)`. This is value error, not rank error.
 - Top-k scenarios use 64-bit keys drawn from Zipf(s=1.1) over
@@ -136,7 +134,7 @@ small sampling skew; each rate uses its own elapsed interval.
 
 ## Running and artifacts
 
-Full suite (builds release binary and Docker image; also runs isolated KLL Criterion):
+Full suite (builds release binary and Docker image):
 
 ```sh
 ./benchmarks/run-nightly.sh
@@ -178,5 +176,4 @@ makes estimate also answer over the last N completed windows; the default of
 
 CI runs the full 189-run matrix, checks actual network traffic, completed windows,
 zero loss after drain, and resource artifacts. It uploads results even on failure.
-The old PR's 2.43× was measured with the file-backed batch harness and is not a
-result of this streaming implementation. New speedups must be measured, not assumed.
+New speedups must be measured, not assumed.

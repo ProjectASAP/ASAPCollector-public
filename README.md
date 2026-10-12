@@ -5,7 +5,8 @@ ASAP's [OTAP Dataflow](https://github.com/open-telemetry/otel-arrow/tree/main/ru
 processor.
 
 It ports ASAP's edge **precompute + sketching** runtime (windowed
-DDSketch / KLL / HLL / CountSketch / CountMin-Sketch aggregation) onto
+DDSketch / KLL / HLL / CountSketch / Count-Min / Count-Min-with-heap
+aggregation) onto
 OTAP Dataflow's Arrow-native streaming model as a single unified
 `asap_sketches` processor.
 
@@ -17,8 +18,8 @@ overlay step:
 
 | Feature | What it adds | Extra dependency |
 |---|---|---|
-| *(default, no features)* | Host-neutral precompute runtime — the five sketch types, windowing, overflow policy. No Arrow, no OTAP, no Tokio. | none |
-| `otap` | The standalone Arrow codec (`encode_batch`/`decode_batch`, `OtapMetricRecords`). | `arrow-array`, `arrow-schema` |
+| *(default, no features)* | Host-neutral precompute runtime — the sketch types, windowing, overflow policy. No Arrow, no OTAP, no Tokio. | none |
+| `otap` | Plugin config (`otap::config`) and the `sketch.*` carrier keys. | `arrow-array`, `arrow-schema` |
 | `otap-engine` | The real OTAP node: `AsapSketchesProcessor` (a genuine `local::Processor<OtapPdata>`, `linkme`-registered) and its direct `SketchEnvelope <-> OtapPdata` binding (`otap::codec`). | the real `otel-arrow-dfe-*` crates, via a plain git dependency pinned to a specific `open-telemetry/otel-arrow` commit — see `Cargo.toml` |
 
 `otap-engine`'s git dependency is what used to require staging this
@@ -44,11 +45,10 @@ same way it already does for the `asap_sketchlib` git dependency —
   `SketchEnvelope <-> OtapPdata` binding: implements OTAP's own
   `MetricsView` trait family straight over `&[SketchEnvelope]`
   (encode) and decodes a real `OtapPdata` straight into
-  `Vec<Observation>` (decode). No intermediate `RecordBatch` or
-  `OtapMetricRecords` two-batch hop — those exist as a general,
-  real-OTAP-free carrier format for other potential Strategy-B
-  adapters (Telegraf, Vector), but this repo only ever ships to OTAP,
-  so the OTAP-facing path skips straight to the real type.
+  `Vec<Observation>` (decode). A sketch record's `sketch.envelope` is
+  the sketch's full state as the self-describing ASAPv1 envelope from
+  `asap_sketchlib`; the codec rejects bytes that do not decode as the
+  declared `sketch.type`. There are no deltas.
 
 **There is exactly one transport: the pipeline.** `AsapSketchesProcessor`
 sends only via `effect_handler.send_message_with_source_node` — an
@@ -70,38 +70,28 @@ pipeline", for the full rationale and the real schema this produces.
 `cargo fmt --check`, against `open-telemetry/otel-arrow` commit
 `3e85c346` (2026-08-24, pinned in `Cargo.toml`).
 
-## Configuration + standalone Arrow codec
+## Configuration
 
-| File | Responsibility |
-|---|---|
-| [`config.rs`](./asap-precompute-rs/src/otap/config.rs) | `PluginConfig` + `resolve()` — the 5-sketch `sketch_type` dispatch table (factory + observer + `SketchType`). |
-| [`decode.rs`](./asap-precompute-rs/src/otap/decode.rs) / [`encode.rs`](./asap-precompute-rs/src/otap/encode.rs) | Standalone Arrow codec: `RecordBatch ↔ Vec<Observation>` / `[SketchEnvelope]`, keyed on well-known columns + Strategy-B `_asap_*` carrier keys ([`schema.rs`](./asap-precompute-rs/src/otap/schema.rs)). |
-| [`records.rs`](./asap-precompute-rs/src/otap/records.rs) | `OtapMetricRecords` + `flatten`/`lift` — projects an `OtapArrowRecords`-shaped sibling-batch family (metrics + per-row attribute child batch joined by `parent_id`) ↔ flat `RecordBatch`. Real-OTAP-free; same scope note as above. |
-
-All of this sits on the host-neutral runtime in the same crate
-(`precompute`, `window`, `snapshot_cache`, `sketches/*`).
+[`config.rs`](./asap-precompute-rs/src/otap/config.rs) holds `PluginConfig`
+and `resolve()` — the `sketch_type` dispatch table (factory + observer +
+`SketchType`). All of this sits on the host-neutral runtime in the same
+crate (`precompute`, `window`, `sketches/*`).
 
 ## Build & test
 
-For a presentation-ready walkthrough of the real YAML pipeline integration,
-see the [live OTAP pipeline demo guide](./docs/demo-guide.md). The guide also
-includes a [Prometheus + Grafana setup](./docs/demo-guide.md#write-kll-estimates-to-prometheus-and-view-them-in-grafana)
-that writes the KLL p50/p99 estimates to Prometheus and displays them in a
-provisioned Grafana dashboard. For a continuous KLL vs exact comparison with
-every processor in its own pinned process, see the
-[multi-process streaming KLL demo](./docs/kll-windows.md).
+For a continuous KLL vs exact comparison with every processor in its own
+pinned process, see the [multi-process streaming KLL demo](./docs/kll-windows.md).
 
 ```sh
 cd asap-precompute-rs
-cargo build --features otap-engine
-cargo test  --features otap-engine       # runtime + codec + lifecycle + real pipeline tests
-cargo clippy --all-targets --features otap-engine -- -D warnings
+cargo test --features otap-engine,stream-benchmark   # runtime + codec + real pipeline tests
+cargo clippy --all-targets --features otap-engine,stream-benchmark -- -D warnings
 cargo fmt --check
 ```
 
 The default (no-feature) build excludes Arrow/Tokio and compiles the
-row-oriented runtime only; `otap` turns on the Arrow codec + legacy
-transport + plugin lifecycle; `otap-engine` additionally turns on the
+row-oriented runtime only; `otap` turns on the plugin config;
+`otap-engine` additionally turns on the
 real OTAP node (and pulls in the real OTAP Dataflow crates — a heavier,
 slower build: datafusion, tonic, and the rest of that dependency tree).
 
@@ -114,20 +104,13 @@ a specific commit in `Cargo.toml`.
 
 ## Status
 
-Phases **B** (Arrow codec) and **C** (five-sketch runtime) are complete and
-tested. Phase **D** (the `linkme` registration + the
+The sketch runtime is complete and tested. Phase **D** (the `linkme` registration + the
 real `OtapPdata` binding) is complete and build/lint/test-verified by
 this repo's own build. `tests/otap_pipeline_e2e.rs` parses a genuine
 OTAP pipeline YAML, builds it through `OTAP_PIPELINE_FACTORY`, runs the
 resulting `RuntimePipeline`, injects real scalar `OtapPdata`, and verifies a
 two-source, four-processor creation → fan-in merge → estimation flow at the
 configured exporter.
-Run the same live pipeline as a terminal demo with:
-
-```sh
-cd asap-precompute-rs
-cargo run --bin asap-otap-demo --features otap-engine
-```
 
 The real OTAP adapter merges an upstream processor's self-describing sketch
 directly from `OtapPdata`. The multi-process demo uses standard OTLP metrics

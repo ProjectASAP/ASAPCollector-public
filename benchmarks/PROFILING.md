@@ -30,7 +30,7 @@ used by other threads cannot inflate a computation scope. Categories are:
 | --- | --- |
 | `computation` | Numeric buffering, Exact sorting/merge/quantile selection; KLL update/merge/quantile query |
 | `pdata_codec` | ASAP observation/envelope construction and conversion, including upstream OTAP/Arrow/protobuf conversion invoked by those adapters |
-| `sketch_codec` | Sketch serialization/deserialization using the production KLL wrapper/Msgpack codec |
+| `sketch_codec` | Sketch serialization/deserialization using the production KLL wrapper/ASAPv1 codec |
 | `processor_bookkeeping` | Remaining synchronous processor work: benchmark labels/validation, window maps, object destruction, pass-through output allocation |
 | `outside_scopes` | Process CPU minus the above: native OTLP receiver/exporter, runtime, channels, native transport conversion, allocator work outside the processor, control listener and probe overhead |
 
