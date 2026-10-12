@@ -4,6 +4,9 @@
 mod model;
 #[path = "stream_bench/profile.rs"]
 mod profile;
+#[path = "stream_bench/topk.rs"]
+mod topk;
+use asap_precompute_rs::otap::codec::decode_pdata_to_observations;
 use async_trait::async_trait;
 use linkme::distributed_slice;
 use otel_arrow_dfe_config::{
@@ -89,7 +92,7 @@ impl Options {
             signals_per_second: number("ASAP_SIGNALS_PER_SECOND", "100000")?,
             rolling_windows: number("ASAP_ROLLING_WINDOWS", "1")?,
         };
-        if !["raw", "exact", "kll"].contains(&o.scenario.as_str())
+        if !["raw", "exact", "kll", "topk-exact", "cmsheap"].contains(&o.scenario.as_str())
             || !["generator", "branch", "merge", "estimate", "backend"].contains(&o.role.as_str())
             || o.points == 0
             || o.batch == 0
@@ -117,6 +120,8 @@ struct Stats {
     output_messages: u64,
     window_latency_ms: BTreeMap<u64, u64>,
     latest_results: Vec<model::ResultPoint>,
+    latest_topk: Vec<topk::TopkPoint>,
+    topk_accuracy: Vec<topk::TopkAccuracy>,
 }
 struct Shared {
     stats: Mutex<Stats>,
@@ -223,8 +228,33 @@ fn start_control() -> Result<(), String> {
     });
     Ok(())
 }
+/// Quantile scenarios (raw/exact/kll) or keyed top-k scenarios (topk-exact/cmsheap).
+enum Stage {
+    Quantile(model::Processor),
+    TopK(topk::Processor),
+}
+impl Stage {
+    fn process(&mut self, pdata: OtapPdata) -> Result<Vec<OtapPdata>, String> {
+        match self {
+            Self::Quantile(p) => p.process(pdata),
+            Self::TopK(p) => p.process(pdata),
+        }
+    }
+    fn process_normalized(
+        &mut self,
+        batch: model::NormalizedBatch,
+    ) -> Result<Vec<OtapPdata>, String> {
+        match self {
+            Self::Quantile(p) => p.process_normalized(batch),
+            Self::TopK(p) => p.process_normalized(batch),
+        }
+    }
+}
+fn is_topk(scenario: &str) -> bool {
+    matches!(scenario, "topk-exact" | "cmsheap")
+}
 struct StreamProcessor {
-    processor: model::Processor,
+    processor: Stage,
     normalizer: Option<model::InputNormalizer>,
 }
 #[async_trait(?Send)]
@@ -284,13 +314,23 @@ fn create_processor(
     let o = OPTIONS.get().unwrap();
     Ok(ProcessorWrapper::local(
         StreamProcessor {
-            processor: model::Processor::new(
-                &o.scenario,
-                &o.role,
-                o.points,
-                o.batch,
-                o.rolling_windows,
-            ),
+            processor: if is_topk(&o.scenario) {
+                Stage::TopK(topk::Processor::new(
+                    &o.scenario,
+                    &o.role,
+                    o.points,
+                    o.batch,
+                    o.rolling_windows,
+                ))
+            } else {
+                Stage::Quantile(model::Processor::new(
+                    &o.scenario,
+                    &o.role,
+                    o.points,
+                    o.batch,
+                    o.rolling_windows,
+                ))
+            },
             normalizer: (o.role == "branch")
                 .then(|| model::InputNormalizer::new(o.source, o.points, o.batch)),
         },
@@ -306,7 +346,35 @@ static PROCESSOR_FACTORY: ProcessorFactory<OtapPdata> = ProcessorFactory {
     wiring_contract: otel_arrow_dfe_engine::wiring_contract::WiringContract::UNRESTRICTED,
     validate_config: otel_arrow_dfe_config::validation::no_config,
 };
-struct ValidatingBackend(model::Backend);
+enum ValidatingBackend {
+    Quantile(model::Backend),
+    TopK(topk::Backend, u64),
+}
+impl ValidatingBackend {
+    /// Completed input signals and optional (window id, start timestamp).
+    fn receive(&mut self, pdata: OtapPdata) -> Result<(u64, Option<(u64, u64)>), String> {
+        match self {
+            Self::Quantile(backend) => {
+                let received = backend.receive(pdata)?;
+                if received.1.is_some() {
+                    let mut stats = shared().stats.lock().unwrap();
+                    stats.latest_results.clone_from(&backend.latest);
+                }
+                Ok(received)
+            }
+            Self::TopK(backend, signals) => {
+                let obs = decode_pdata_to_observations(pdata)
+                    .map_err(|e| e.to_string())?
+                    .observations;
+                let completed = backend.receive(&obs)?;
+                let mut stats = shared().stats.lock().unwrap();
+                stats.latest_topk.clone_from(&backend.latest);
+                stats.topk_accuracy.clone_from(&backend.accuracy);
+                Ok((*signals, Some(completed)))
+            }
+        }
+    }
+}
 #[async_trait(?Send)]
 impl exporter::Exporter<OtapPdata> for ValidatingBackend {
     async fn start(
@@ -319,7 +387,6 @@ impl exporter::Exporter<OtapPdata> for ValidatingBackend {
                 Message::PData(pdata) => {
                     // Validation failures terminate the benchmark, never increment goodput.
                     let (count, completed) = self
-                        .0
                         .receive(pdata.clone())
                         .expect("backend correctness failure");
                     {
@@ -327,7 +394,6 @@ impl exporter::Exporter<OtapPdata> for ValidatingBackend {
                         stats.received_signals += count;
                         if let Some((window, start)) = completed {
                             assert_eq!(window, stats.completed_windows, "backend window gap");
-                            stats.latest_results.clone_from(&self.0.latest);
                             stats.completed_windows += 1;
                             let elapsed_ms = now_ns().saturating_sub(start) / 1_000_000;
                             *stats.window_latency_ms.entry(elapsed_ms).or_default() += 1;
@@ -351,11 +417,18 @@ fn create_backend(
 ) -> Result<ExporterWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
     let o = OPTIONS.get().unwrap();
     Ok(ExporterWrapper::local(
-        ValidatingBackend(model::Backend::new(
-            &o.scenario,
-            o.points,
-            o.rolling_windows,
-        )),
+        if is_topk(&o.scenario) {
+            ValidatingBackend::TopK(
+                topk::Backend::new(&o.scenario, o.points, o.rolling_windows),
+                (o.points * 2) as u64,
+            )
+        } else {
+            ValidatingBackend::Quantile(model::Backend::new(
+                &o.scenario,
+                o.points,
+                o.rolling_windows,
+            ))
+        },
         node,
         config,
         runtime,

@@ -23,7 +23,7 @@ import uuid
 
 ROLES = ("generator_a", "generator_b", "branch_a", "branch_b", "merge", "estimate", "backend")
 PROCESSOR_ROLES = ("branch_a", "branch_b", "merge", "estimate")
-SCENARIOS = ("raw", "exact", "kll")
+SCENARIOS = ("raw", "exact", "kll", "topk-exact", "cmsheap")
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
@@ -375,6 +375,12 @@ class Run:
                   "generated_signals_after_drain": drained["backend"]["stats"]["completed_windows"] * self.window_points * 2,
                   "validated_signals_after_drain": drained["backend"]["stats"]["completed_windows"] * self.window_points * 2,
                   "correctness": "passed", "resources": resources}
+        # Top-k answers are validated per window (exact must match, recall@k >= 0.9);
+        # report the last window's accuracy.
+        for accuracy in after["backend"]["stats"].get("topk_accuracy", []):
+            if accuracy["window_kind"] == "tumbling":
+                report["recall_at_k"] = accuracy["recall"]
+                report["mean_relative_count_error"] = accuracy["mean_relative_error"]
         if accounted:
             inputs = drained["backend"]["stats"]["received_signals"] - cpu_before["backend"]["stats"]["received_signals"]
             cpu_profile = {}
@@ -415,7 +421,7 @@ class Run:
 
 
 def draw_summary(rows, path):
-    colors = {"raw": "#64748b", "exact": "#dc2626", "kll": "#2563eb"}
+    colors = {"raw": "#64748b", "exact": "#dc2626", "kll": "#2563eb", "topk-exact": "#b45309", "cmsheap": "#059669"}
     maximum = max(r["median_signals_per_second"] for r in rows)
     height = 100 + len(rows) * 55
     svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="{height}">',
@@ -504,6 +510,15 @@ def demo_metrics(runs, history):
             gauge("asap_demo_reference", labels, point["reference"])
             gauge("asap_demo_relative_error", labels,
                   abs(point["value"] - point["reference"]) / abs(point["reference"]) if point["reference"] else 0)
+        for point in after["backend"]["stats"].get("latest_topk", []):
+            labels = {"scenario": scenario, "window_kind": point["window_kind"],
+                      "rank": point["rank"], "key": point["key"]}
+            gauge("asap_demo_topk_estimate", labels, point["estimate"])
+            gauge("asap_demo_topk_exact", labels, point["exact"])
+        for accuracy in after["backend"]["stats"].get("topk_accuracy", []):
+            labels = {"scenario": scenario, "window_kind": accuracy["window_kind"]}
+            gauge("asap_demo_topk_recall", labels, accuracy["recall"])
+            gauge("asap_demo_topk_mean_relative_error", labels, accuracy["mean_relative_error"])
     return "\n".join(lines) + "\n"
 
 
@@ -650,6 +665,10 @@ def main():
                                  "min_signals_per_second": min(s["signals_per_second"] for s in samples),
                                  "max_signals_per_second": max(s["signals_per_second"] for s in samples),
                                  "median_window_latency_p99_ms": statistics.median(s["window_latency_p99_ms"] for s in samples)})
+                    if all("recall_at_k" in s for s in samples):
+                        rows[-1]["min_recall_at_k"] = min(s["recall_at_k"] for s in samples)
+                        rows[-1]["median_mean_relative_count_error"] = statistics.median(
+                            s["mean_relative_count_error"] for s in samples)
                     latency_limit_ms = max(
                         args.sustainable_max_p99_ms,
                         2000 * window_points / traffic_rate,
@@ -711,7 +730,7 @@ def main():
         writer.writerows(capacities)
     (args.output / "summary.json").write_text(json.dumps(rows, indent=2) + "\n")
     with (args.output / "summary.csv").open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(f, fieldnames=list(dict.fromkeys(k for row in rows for k in row)), restval="")
         writer.writeheader()
         writer.writerows(rows)
 
