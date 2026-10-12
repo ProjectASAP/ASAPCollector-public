@@ -16,6 +16,8 @@ pub mod codec;
 pub mod processor;
 #[cfg(feature = "otap-engine")]
 pub mod scenario_generator;
+#[cfg(feature = "otap-engine")]
+pub mod window_merge;
 
 pub use config::{ConfigError, PluginConfig, SketchDispatch};
 pub use schema::{
