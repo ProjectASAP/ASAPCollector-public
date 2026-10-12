@@ -185,6 +185,47 @@ pub fn exact_answers(
 }
 
 #[cfg(test)]
+mod classifier_tests {
+    use super::*;
+
+    fn attr(key: &str) -> SketchEnvelope {
+        SketchEnvelope {
+            metric_name: "m".into(),
+            labels: vec![KeyValue::new("attribute.key", key)],
+            ..Default::default()
+        }
+    }
+
+    fn state(out: &[SketchEnvelope]) -> String {
+        out.iter()
+            .find(|e| e.metric_name == "asap.cardinality.state" && e.value == 1.0)
+            .and_then(|e| e.labels.iter().find(|kv| kv.key == "state"))
+            .map(|kv| kv.value.clone())
+            .unwrap()
+    }
+
+    #[test]
+    fn identifier_growing_and_stable() {
+        let mut c = CardinalityClassifier::default();
+        let (out, event) = c.observe(&attr("user.id"), "sketch", 980.0, 1000);
+        assert_eq!(state(&out), "identifier-like");
+        assert!(event.unwrap().body.contains("identifier-like"));
+        for _ in 0..4 {
+            let (out, _) = c.observe(&attr("pod"), "sketch", 50.0, 1000);
+            assert_eq!(state(&out), "stable");
+        }
+        let (out, event) = c.observe(&attr("pod"), "sketch", 70.0, 1000);
+        assert_eq!(state(&out), "growing");
+        assert_eq!(event.unwrap().attributes[1].value, "growing");
+        // No event while the state does not change.
+        let (_, event) = c.observe(&attr("pod"), "sketch", 90.0, 1000);
+        assert!(event.is_none());
+        // Too few points: no answer.
+        assert!(c.observe(&attr("rare"), "sketch", 5.0, 5).0.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::precompute::Sketch;
@@ -280,5 +321,178 @@ mod tests {
             .labels
             .iter()
             .any(|kv| kv.key == "method" && kv.value == "sketch")));
+    }
+}
+
+/// A detection result worth telling a person about, emitted as a log record.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Event {
+    /// Window the event refers to.
+    pub window_end_ms: u64,
+    /// `sketch` or `exact`.
+    pub method: String,
+    /// Event kind, e.g. `cardinality`.
+    pub kind: String,
+    /// Series labels plus event fields.
+    pub attributes: Vec<KeyValue>,
+    /// One readable sentence.
+    pub body: String,
+}
+
+/// Cardinality class of an attribute key in one window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardinalityState {
+    /// Distinct values close to the baseline.
+    Stable,
+    /// Distinct values well above the baseline mean.
+    Growing,
+    /// Almost every point carries a new value, like an identifier.
+    IdentifierLike,
+}
+
+impl CardinalityState {
+    /// Name used in labels and events.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Growing => "growing",
+            Self::IdentifierLike => "identifier-like",
+        }
+    }
+}
+
+/// Thresholds for [`CardinalityClassifier`].
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CardinalityRules {
+    /// Windows kept as the baseline.
+    #[serde(default = "default_baseline")]
+    pub baseline_windows: usize,
+    /// distinct / points at or above which a key is identifier-like.
+    #[serde(default = "default_identifier_ratio")]
+    pub identifier_ratio: f64,
+    /// Fraction above the baseline mean at which a key is growing.
+    #[serde(default = "default_growth")]
+    pub growth: f64,
+    /// Points needed before classifying.
+    #[serde(default = "default_min_points")]
+    pub min_points: u64,
+}
+
+fn default_baseline() -> usize {
+    10
+}
+fn default_identifier_ratio() -> f64 {
+    0.9
+}
+fn default_growth() -> f64 {
+    0.2
+}
+fn default_min_points() -> u64 {
+    100
+}
+
+impl Default for CardinalityRules {
+    fn default() -> Self {
+        Self {
+            baseline_windows: default_baseline(),
+            identifier_ratio: default_identifier_ratio(),
+            growth: default_growth(),
+            min_points: default_min_points(),
+        }
+    }
+}
+
+/// Classifies each attribute key against its own recent windows. The same
+/// rules run on sketch and exact answers so their labels can be compared.
+#[derive(Default)]
+pub struct CardinalityClassifier {
+    rules: CardinalityRules,
+    history: HashMap<String, (std::collections::VecDeque<f64>, Option<CardinalityState>)>,
+}
+
+impl CardinalityClassifier {
+    /// Classifier with the given thresholds.
+    pub fn new(rules: CardinalityRules) -> Self {
+        Self {
+            rules,
+            history: HashMap::new(),
+        }
+    }
+
+    /// Classifies one window of `series` (its distinct count and points), and
+    /// returns its state gauge plus an event when the state changed.
+    pub fn observe(
+        &mut self,
+        template: &SketchEnvelope,
+        method: &str,
+        distinct: f64,
+        points: u64,
+    ) -> (Vec<SketchEnvelope>, Option<Event>) {
+        if points < self.rules.min_points {
+            return (Vec::new(), None);
+        }
+        let key = format!("{}|{:?}", template.metric_name, template.labels);
+        let (window, previous) = self.history.entry(key).or_default();
+        let baseline =
+            (window.len() >= 3).then(|| window.iter().sum::<f64>() / window.len() as f64);
+        let ratio = distinct / points as f64;
+        let state = if ratio >= self.rules.identifier_ratio {
+            CardinalityState::IdentifierLike
+        } else if baseline.is_some_and(|b| distinct > b * (1.0 + self.rules.growth)) {
+            CardinalityState::Growing
+        } else {
+            CardinalityState::Stable
+        };
+        window.push_back(distinct);
+        if window.len() > self.rules.baseline_windows {
+            window.pop_front();
+        }
+        let mut out = vec![gauge(template, "asap.distinct.ratio", method, &[], ratio)];
+        out.extend(
+            [
+                CardinalityState::Stable,
+                CardinalityState::Growing,
+                CardinalityState::IdentifierLike,
+            ]
+            .into_iter()
+            .map(|s| {
+                let v = if s == state { 1.0 } else { 0.0 };
+                gauge(
+                    template,
+                    "asap.cardinality.state",
+                    method,
+                    &[("state", s.name().into())],
+                    v,
+                )
+            }),
+        );
+        let changed = *previous != Some(state);
+        *previous = Some(state);
+        let attribute = template
+            .labels
+            .iter()
+            .find(|kv| kv.key == crate::matchers::ATTRIBUTE_KEY_LABEL)
+            .map(|kv| kv.value.clone())
+            .unwrap_or_default();
+        let event = changed.then(|| Event {
+            window_end_ms: template.window_end_ms,
+            method: method.into(),
+            kind: "cardinality".into(),
+            attributes: vec![
+                KeyValue::new("attribute.key", attribute.clone()),
+                KeyValue::new("state", state.name()),
+                KeyValue::new("distinct", format!("{distinct:.0}")),
+                KeyValue::new("points", points.to_string()),
+            ],
+            body: format!(
+                "attribute {attribute} of {} is {}: {distinct:.0} distinct values in {points} points ({:.0}%){}",
+                template.metric_name,
+                state.name(),
+                ratio * 100.0,
+                baseline.map(|b| format!(", baseline {b:.0}")).unwrap_or_default()
+            ),
+        });
+        (out, event)
     }
 }

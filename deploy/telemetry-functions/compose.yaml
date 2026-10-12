@@ -1,6 +1,7 @@
 # Every pipeline stage is the official OTAP engine (asap-collector) in its
 # own container, pinned to one CPU, talking OTLP/HTTP over the compose
 # network. Prometheus, Grafana and Loki are the observers.
+# USE_CASE picks the pipelines directory (latency, cardinality, ...);
 # CPU_* variables move a stage to another core.
 x-collector: &collector
   image: asap-collector:local
@@ -10,43 +11,43 @@ services:
   generator-a:
     <<: *collector
     command: ["--config", "/pipelines/generator-a.yaml"]
-    volumes: ["./pipelines:/pipelines:ro"]
+    volumes: ["./${USE_CASE:-latency}:/pipelines:ro"]
     cpuset: "${CPU_GENERATOR_A:-0}"
     depends_on: [branch-a]
   generator-b:
     <<: *collector
     command: ["--config", "/pipelines/generator-b.yaml"]
-    volumes: ["./pipelines:/pipelines:ro"]
+    volumes: ["./${USE_CASE:-latency}:/pipelines:ro"]
     cpuset: "${CPU_GENERATOR_B:-1}"
     depends_on: [branch-b]
   branch-a:
     <<: *collector
     command: ["--config", "/pipelines/branch.yaml"]
-    volumes: ["./pipelines:/pipelines:ro"]
+    volumes: ["./${USE_CASE:-latency}:/pipelines:ro"]
     cpuset: "${CPU_BRANCH_A:-2}"
     depends_on: [merge, exact]
   branch-b:
     <<: *collector
     command: ["--config", "/pipelines/branch.yaml"]
-    volumes: ["./pipelines:/pipelines:ro"]
+    volumes: ["./${USE_CASE:-latency}:/pipelines:ro"]
     cpuset: "${CPU_BRANCH_B:-3}"
     depends_on: [merge, exact]
   merge:
     <<: *collector
     command: ["--config", "/pipelines/merge.yaml"]
-    volumes: ["./pipelines:/pipelines:ro"]
+    volumes: ["./${USE_CASE:-latency}:/pipelines:ro"]
     cpuset: "${CPU_MERGE:-4}"
     depends_on: [detector]
   detector:
     <<: *collector
     command: ["--config", "/pipelines/detector.yaml"]
-    volumes: ["./pipelines:/pipelines:ro"]
+    volumes: ["./${USE_CASE:-latency}:/pipelines:ro"]
     cpuset: "${CPU_DETECTOR:-5}"
     depends_on: [prometheus]
   exact:
     <<: *collector
     command: ["--config", "/pipelines/exact.yaml"]
-    volumes: ["./pipelines:/pipelines:ro"]
+    volumes: ["./${USE_CASE:-latency}:/pipelines:ro"]
     cpuset: "${CPU_EXACT:-6}"
     depends_on: [prometheus]
 
