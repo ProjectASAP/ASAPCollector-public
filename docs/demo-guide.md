@@ -69,8 +69,9 @@ cargo test --features otap-engine --test otap_pipeline_e2e
 The runnable binary additionally asserts that the final output contains p50
 and p99 after the four child processes finish successfully.
 
-For a persistent stream with mergeable tumbling panes and rolling quantiles,
-see [the continuous KLL demo](./kll-windows.md).
+For a continuous stream with one pinned process per processor, rolling
+quantiles, and a live KLL vs exact comparison, see
+[the multi-process streaming KLL demo](./kll-windows.md).
 
 ## Write KLL estimates to Prometheus and view them in Grafana
 

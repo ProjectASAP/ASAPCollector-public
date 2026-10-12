@@ -1,70 +1,113 @@
-# Continuous KLL quantiles from mergeable tumbling panes
+# Continuous KLL quantiles: multi-process streaming demo
 
-The persistent demo runs a real OTAP pipeline until Ctrl+C. It creates a KLL
-sketch per disjoint tumbling pane, feeds the same pane stream to a tumbling
-estimator and a rolling estimator, and continuously writes their p50/p99
-gauges to Prometheus. Grafana refreshes both sets of panels every five seconds.
+The demo runs the exact and KLL pipelines side by side on the same traffic.
+Every processor is its own OS process in its own container, pinned to one
+CPU, and every hop is standard OTLP/HTTP over TCP. It is the
+[sustained streaming benchmark](../benchmarks/STREAMING.md) topology, kept
+running at one offered rate until Ctrl+C, with live metrics in Grafana.
 
 ```mermaid
 flowchart LR
-  S["Continuous scalar observations"] --> P["KLL tumbling panes<br/>5 seconds each"]
-  P --> T["Tumbling estimates<br/>p50 / p99"]
-  P --> R["Merge retained panes<br/>60-second rolling p50 / p99"]
-  T --> E["OTLP/HTTP export"]
-  R --> E
-  E --> M[Prometheus]
-  M --> G["Grafana<br/>refresh every 5 seconds"]
+  GA["generator A"] --> BA["branch A<br/>1 CPU"]
+  GB["generator B"] --> BB["branch B<br/>1 CPU"]
+  BA -->|"OTLP/HTTP<br/>KLL pane or sorted run"| M["merge<br/>1 CPU"]
+  BB --> M
+  M --> E["estimate<br/>1 CPU<br/>tumbling + rolling p50/p99"]
+  E --> V["validating backend"]
+  V -. "control /stats" .-> D["run-streaming.py --demo<br/>:9465/metrics"]
+  D --> P[Prometheus] --> G[Grafana]
 ```
 
-## Run the persistent demo
+Each branch builds one KLL sketch (`k=400`) per count-aligned window and
+sends it as an ASAPv1 envelope; merge combines the two sources and estimate
+answers p50/p99. Exact sends every sorted value instead. With
+`--rolling-windows N`, estimate also merges the last N window sketches (exact
+re-sorts the last N windows' values) for rolling p50/p99. The backend checks
+every answer against the exact quantiles of the replayed corpus: exact must
+match, KLL must be within 5%.
 
-From the repository root:
+## Run the demo
+
+Linux with Docker and Docker Compose. From the repository root:
 
 ```sh
-docker compose -f demos/kll-grafana/compose.yaml up -d
-cargo run --manifest-path asap-precompute-rs/Cargo.toml \
-  --features otap-engine --bin asap-kll-stream-demo
+demos/kll-grafana/run-demo.sh                      # Ctrl+C stops it
+demos/kll-grafana/run-demo.sh --demo-rate 100000   # signals/s per source
 ```
 
-Open <http://localhost:3000/d/asap-kll>. The default lookback is 60 seconds,
-with a five-second pane/emission interval. The synthetic input changes its
-latency distribution every ten seconds; tumbling and rolling estimates follow
-that input at different rates. It generates about 2,000 observations per
-second. Values are synthetic milliseconds, not measurements of this machine.
+The script builds `asap-stream-bench`, the benchmark image, and the
+Prometheus/Grafana stack, then runs both pipelines with 65,536-observation
+windows, six-window rolling results, and two generator CPUs per source. Each
+pipeline needs 2 + 4 + 1 CPUs. Extra arguments go to
+`benchmarks/run-streaming.py`. Open
+<http://localhost:3000/d/asap-kll-stream>.
 
-To compute a five-minute rolling quantile every five seconds:
+The dashboard shows, per scenario:
 
-```sh
-cargo run --manifest-path asap-precompute-rs/Cargo.toml \
-  --features otap-engine --bin asap-kll-stream-demo -- \
-  --window-seconds 300 --slide-seconds 5
-```
+- backend-validated throughput, and processor CPU-seconds per million signals
+  (branches + merge + estimate);
+- CPU cores, data-network egress and resident memory of each pinned process;
+- tumbling and rolling p50/p99 against the exact reference, and their
+  relative error.
 
-Use `--prometheus-otlp-endpoint URL` for another Prometheus instance and
-`--run-seconds 60` for a bounded run. Without `--run-seconds`, the process stays
-running until Ctrl+C. Shutdown does not publish incomplete panes or invent a
-future window timestamp. HTTP/OTLP export failures terminate the demo.
+Rates are averaged over the last 30 seconds; windows complete in bursts. Every
+window replays the same deterministic corpus, so the quantile lines are flat
+by design: the moving signals are throughput and resource use.
 
-The dashboard time picker controls displayed history; it does not change the
-computed lookback. Change `--window-seconds` to change the rolling lookback.
-The dashboard queries estimates that OTAP has already computed:
+![KLL vs exact multi-process streaming dashboard](images/kll-streaming-grafana.png)
 
-```promql
-request_duration_estimate{quantile=~"0.5|0.99"}
-request_duration_rolling_estimate{quantile=~"0.5|0.99"}
-```
+The screenshot is from a 56-core x86 server at 50,000
+signals/s per source. KLL keeps up with the offered 100,000 signals/s using
+0.96 processor CPU-seconds per million signals. Exact uses 23 and is
+back-pressured to about 68,000 signals/s although no exact process exceeds
+0.8 CPU cores, consistent with every value crossing merge in 1,024-value
+requests with one request in flight per hop. See
+[benchmark results](#benchmark-results).
 
-Each emission updates the same series with a new window-end timestamp.
-`sketch.window_start_ms` and `sketch.window_end_ms` are removed from exported
-point attributes because treating them as Prometheus labels would create new
-series for every window. Series attributes, including `quantile`, are copied
-from OTAP scope attributes onto points. Prometheus stores estimates; it does
-not store the retained KLL panes or perform their merges.
+## Benchmark results
 
-![Live tumbling and rolling quantiles in Grafana](images/kll-streaming-grafana.png)
+`benchmarks/run-streaming.py --scenarios raw exact kll --window-points 65536
+--repetitions 3` on a 56-core x86 server (Ubuntu 22.04), four generator
+CPUs per source, one dedicated CPU per processor. Median backend-validated
+signals/s over three runs (both sources combined):
 
-The screenshot captures the running demo with a six-second lookback and
-one-second panes, showing both modes receiving repeated samples.
+| Offered | Raw | Exact | KLL |
+| ---: | ---: | ---: | ---: |
+| 20,000 | 21,825 | 21,797 | 21,800 |
+| 50,000 | 48,025 | 47,962 | 47,992 |
+| 100,000 | 100,281 | 61,038 | 100,249 |
+| 200,000 | 200,542 | 61,033 | 200,486 |
+| 400,000 | 296,472 | 61,042 | 396,609 |
+| 600,000 | 300,830 | 52,322 | 601,453 |
+| 800,000 | 305,168 | 47,961 | 797,614 |
+
+(At 20,000 offered, a run's 30-second interval rounds to whole windows.)
+
+![Validated throughput vs offered load](images/kll-streaming-throughput.png)
+
+Exact plateaus near 61,000 signals/s; KLL follows the offered load to the
+highest rate tested, and raw forwarding saturates near 300,000. By the
+[capacity criteria](../benchmarks/CAPACITY_DESIGN.md) (delivery, backlog and
+p99 window latency), the largest sustainable offered rate per source is 10,000
+for exact, 100,000 for raw and at least 400,000 for KLL. Exact already
+misses the latency bound at 25,000 per source (p99 6.0 s).
+
+Summed over branch A, branch B, merge and estimate, at the same offered load:
+
+| Offered per source | Exact CPU cores | KLL CPU cores | Exact egress | KLL egress |
+| ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 0.63 | 0.031 | 36.7 Mbit/s | 0.1 Mbit/s |
+| 25,000 | 1.41 | 0.063 | 84.4 Mbit/s | 0.2 Mbit/s |
+| 50,000 | 1.69 (back-pressured) | 0.117 | 101.6 Mbit/s | 0.4 Mbit/s |
+
+KLL answers stayed within the backend's 5% tolerance in every window
+(p50 0.5%, p99 1.6% relative error); exact answers matched exactly.
+
+The Compose stack uses host networking so Prometheus, Grafana and the metrics
+endpoint listen only on `127.0.0.1` (ports 9090, 3000 and 9465;
+`PROMETHEUS_PORT` and `GRAFANA_PORT` change the first two). The finite
+`asap-otap-demo` export described in the [demo guide](./demo-guide.md) still
+pushes to the same Prometheus over OTLP.
 
 ## Configure an OTAP rolling estimator
 
@@ -153,17 +196,17 @@ of all original observations in the selected panes.
 
 ## Verification
 
-Start the Compose backend and build the persistent binary, then run:
+With the image built and the Compose stack up (`run-demo.sh` does both):
 
 ```sh
-python3 demos/kll-grafana/verify-streaming.py \
-  asap-precompute-rs/target/debug/asap-kll-stream-demo
+python3 demos/kll-grafana/verify-streaming.py
 ```
 
-This runs a 16-second demo with a six-second lookback and one-second panes.
-It verifies repeated writes for both quantiles in both modes, stable series
-labels, changing rolling values, and matching queries through Grafana's
-provisioned datasource. Alternative URLs use `--prometheus` and `--grafana`.
+This runs both pipelines for 60 seconds and checks per-process throughput and
+CPU series for all four processors, tumbling and rolling results within
+tolerance (exact: zero error), and that Grafana's datasource and the
+provisioned dashboard return the same series. Pass `--docker-command
+'sudo -n docker'` when Docker needs sudo.
 
 The runtime tests exercise aligned range merging, compacted unequal-size pane
 weights, series identity, expiration, idle gaps, late data, invalid ranges,
@@ -171,4 +214,11 @@ upstream completion timing, and configuration changes:
 
 ```sh
 cargo test --manifest-path asap-precompute-rs/Cargo.toml --test kll_windows
+```
+
+The benchmark model tests cover rolling estimates over retained windows:
+
+```sh
+cargo test --manifest-path asap-precompute-rs/Cargo.toml \
+  --features stream-benchmark --bin asap-stream-bench
 ```

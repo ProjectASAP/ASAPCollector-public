@@ -3,16 +3,20 @@
 import argparse
 import concurrent.futures
 import csv
+import collections
 import http.client
+import http.server
 import json
 import math
 import os
 import platform
 from pathlib import Path
 import shlex
+import signal
 import socket
 import statistics
 import subprocess
+import threading
 import time
 import urllib.request
 import uuid
@@ -50,8 +54,10 @@ def delta_histogram(before, after):
 
 
 class Run:
-    def __init__(self, args, scenario, rate, repeat, traffic_rate, window_points):
+    def __init__(self, args, scenario, rate, repeat, traffic_rate, window_points, cores=None, rolling_windows=1):
         self.args, self.scenario, self.rate = args, scenario, rate
+        # Demo mode runs several pipelines at once, each on its own CPU slice.
+        self.cores, self.rolling_windows = cores, rolling_windows
         self.generator_core_count, self.traffic_rate, self.window_points = args.generator_cores, traffic_rate, window_points
         self.observation_seconds = max(
             args.duration,
@@ -92,7 +98,7 @@ class Run:
         raise TimeoutError("streaming benchmark readiness/drain timeout")
 
     def setup(self):
-        cores = sorted(os.sched_getaffinity(0))
+        cores = self.cores or sorted(os.sched_getaffinity(0))
         # The backend is benchmark infrastructure, so it receives every host CPU
         # left after the isolated generator and processor assignments. Keep at
         # least one CPU available for it. Memory is intentionally uncapped for
@@ -141,6 +147,7 @@ class Run:
                 "ASAP_GENERATOR_WORKERS": str(self.generator_core_count),
                 "ASAP_SIGNALS_PER_SECOND": str(self.traffic_rate),
                 "ASAP_PROFILE_CPU": "1" if self.args.profile_cpu else "0",
+                "ASAP_ROLLING_WINDOWS": str(self.rolling_windows),
             }
             cmd = ["create", "--name", name, "--network", self.networks[0], "--network-alias", role,
                    "--cpuset-cpus", ",".join(map(str, cpu_set))]
@@ -458,6 +465,103 @@ def draw_resources(rows, path):
     path.write_text("\n".join(svg) + "\n")
 
 
+def demo_metrics(runs, history):
+    """Prometheus text exposition over the last ~30 s of control snapshots."""
+    lines = []
+    def gauge(name, labels, value):
+        rendered = ",".join(f'{key}="{val}"' for key, val in labels.items())
+        lines.append(f"{name}{{{rendered}}} {value}")
+    for scenario, run in runs.items():
+        if len(history[scenario]) < 2:
+            continue
+        before, after = history[scenario][0], history[scenario][-1]
+        seconds = (after["backend"]["timestamp_ns"] - before["backend"]["timestamp_ns"]) / 1e9
+        validated = after["backend"]["stats"]["received_signals"] - before["backend"]["stats"]["received_signals"]
+        gauge("asap_demo_validated_signals_per_second", {"scenario": scenario}, validated / seconds)
+        gauge("asap_demo_completed_windows", {"scenario": scenario}, after["backend"]["stats"]["completed_windows"])
+        processor_cpu = 0
+        for role in ROLES:
+            start, end = before[role], after[role]
+            elapsed = (end["timestamp_ns"] - start["timestamp_ns"]) / 1e9
+            cpu = (end["cpu_nanoseconds"] - start["cpu_nanoseconds"]) / 1e9
+            if role in PROCESSOR_ROLES:
+                processor_cpu += cpu
+            iface = run.data_ifaces[role]
+            tx = end["interfaces"][iface]["tx_bytes"] - start["interfaces"][iface]["tx_bytes"]
+            received = end["stats"]["received_signals"] - start["stats"]["received_signals"]
+            labels = {"scenario": scenario, "component": role}
+            gauge("asap_demo_cpu_cores", labels, cpu / elapsed)
+            gauge("asap_demo_data_tx_mbit_per_second", labels, tx * 8 / elapsed / 1e6)
+            gauge("asap_demo_rss_mib", labels, end["rss_kib"] / 1024)
+            if role.startswith("branch"):
+                gauge("asap_demo_ingested_signals_per_second", labels, received / elapsed)
+        if validated:
+            gauge("asap_demo_processor_cpu_seconds_per_million_signals", {"scenario": scenario},
+                  processor_cpu / validated * 1e6)
+        for point in after["backend"]["stats"].get("latest_results", []):
+            labels = {"scenario": scenario, "window_kind": point["window_kind"], "quantile": point["quantile"]}
+            gauge("asap_demo_estimate", labels, point["value"])
+            gauge("asap_demo_reference", labels, point["reference"])
+            gauge("asap_demo_relative_error", labels,
+                  abs(point["value"] - point["reference"]) / abs(point["reference"]) if point["reference"] else 0)
+    return "\n".join(lines) + "\n"
+
+
+def demo(args):
+    """Run every scenario's pipeline concurrently at one offered rate until Ctrl+C."""
+    cores = sorted(os.sched_getaffinity(0))
+    per_pipeline = args.generator_cores + len(PROCESSOR_ROLES) + args.demo_backend_cores
+    if len(cores) < per_pipeline * len(args.scenarios):
+        raise SystemExit(f"demo needs {per_pipeline} CPUs per scenario ({args.generator_cores} generator, "
+                         f"{len(PROCESSOR_ROLES)} processors, {args.demo_backend_cores} backend); "
+                         f"only {len(cores)} are available")
+    def stop(*_):
+        raise KeyboardInterrupt
+    # Background jobs ignore SIGINT; SIGTERM stops the demo with the same cleanup.
+    signal.signal(signal.SIGTERM, stop)
+    runs, history, body = {}, {}, {"text": ""}
+    class Metrics(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            payload = body["text"].encode()
+            self.send_response(200 if self.path == "/metrics" else 404)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        def log_message(self, *_):
+            pass
+    server = http.server.ThreadingHTTPServer((args.metrics_address, args.metrics_port), Metrics)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        for index, scenario in enumerate(args.scenarios):
+            run = Run(args, scenario, 0, "demo", args.demo_rate, args.window_points[0],
+                      cores=cores[index * per_pipeline:(index + 1) * per_pipeline],
+                      rolling_windows=args.rolling_windows)
+            runs[scenario] = run
+            run.setup()
+            # Windows complete in bursts; rates over ~30 s keep the gauges readable.
+            history[scenario] = collections.deque(maxlen=max(2, round(30 / args.sample_interval) + 1))
+        for run in runs.values():
+            for role in ("generator_a", "generator_b"):
+                request(run.urls[role], "/run", "POST")
+        print(f"demo: {', '.join(args.scenarios)} at {args.demo_rate:,} signals/s/source, "
+              f"window {args.window_points[0]:,}, rolling {args.rolling_windows}; "
+              f"metrics on http://{args.metrics_address}:{args.metrics_port}/metrics; Ctrl+C stops", flush=True)
+        deadline = time.monotonic() + args.run_seconds if args.run_seconds else None
+        while deadline is None or time.monotonic() < deadline:
+            time.sleep(args.sample_interval)
+            for scenario, run in runs.items():
+                run.healthy()
+                history[scenario].append(run.statuses())
+            body["text"] = demo_metrics(runs, history)
+    except KeyboardInterrupt:
+        print("demo: stopping", flush=True)
+    finally:
+        for run in runs.values():
+            run.close()
+        server.shutdown()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", default="asap-stream-benchmark:local")
@@ -487,7 +591,22 @@ def main():
     parser.add_argument("--sustainable-max-backlog-growth-windows", type=float, default=1.0)
     parser.add_argument("--sustainable-max-p99-ms", type=float, default=5000)
     parser.add_argument("--resume", action="store_true", help="reuse completed runs from output/runs.json")
+    parser.add_argument("--demo", action="store_true",
+                        help="run the selected scenarios side by side at --demo-rate until Ctrl+C and serve Prometheus metrics")
+    parser.add_argument("--demo-rate", type=int, default=100000, help="demo offered signals/s per source")
+    parser.add_argument("--demo-backend-cores", type=int, default=1, help="demo backend CPUs per scenario")
+    parser.add_argument("--rolling-windows", type=int, default=1,
+                        help="completed windows merged into each rolling estimate; 1 disables rolling results")
+    parser.add_argument("--run-seconds", type=float, default=0, help="demo duration; 0 runs until Ctrl+C")
+    parser.add_argument("--metrics-address", default="127.0.0.1")
+    parser.add_argument("--metrics-port", type=int, default=9465)
     args = parser.parse_args()
+    if args.demo:
+        if args.demo_rate < 1 or args.rolling_windows < 1 or args.demo_backend_cores < 1 or args.run_seconds < 0:
+            parser.error("invalid demo rate, rolling windows, backend cores, or duration")
+        args.output.mkdir(parents=True, exist_ok=True)
+        demo(args)
+        return
     if any(points < 1 for points in args.window_points) or args.batch_size < 1 or any(args.batch_size > points for points in args.window_points) or args.generator_cores < 1 or any(rate < 1 for rate in args.traffic_rates) or not all(math.isfinite(t) for t in (args.warmup, args.duration, args.sample_interval)) or args.warmup < 0 or args.duration <= 0 or args.minimum_observed_windows < 2 or args.sample_interval <= 0 or args.repetitions < 1 or any(not math.isfinite(r) or r < 0 for r in args.rates_mbit) or not 0 < args.sustainable_min_delivery <= 1 or args.sustainable_max_backlog_growth_windows < 0 or args.sustainable_max_p99_ms <= 0:
         parser.error("invalid benchmark sizes, times, repetitions, or rates")
     args.output.mkdir(parents=True, exist_ok=True)

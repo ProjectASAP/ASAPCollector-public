@@ -8,7 +8,8 @@ use asap_precompute_rs::{
     sketches::KLLWrapper,
 };
 use otel_arrow_dfe_otap::pdata::OtapPdata;
-use std::collections::BTreeMap;
+use serde::Serialize;
+use std::collections::{BTreeMap, VecDeque};
 
 // Independent official generators can drift under high load. Keep the skew
 // explicitly bounded while allowing short scheduler/exporter bursts.
@@ -111,16 +112,25 @@ fn decode_sketch(o: &Observation, count: usize) -> Result<KLLWrapper, String> {
         .map_err(|e| e.to_string())?;
     Ok(sketch)
 }
-fn quantiles_pdata(values: [f64; 2], meta: Meta) -> Result<OtapPdata, String> {
+const QUANTILES: [&str; 2] = ["0.5", "0.99"];
+/// Tumbling quantiles, plus rolling quantiles when the estimate retains windows.
+fn quantiles_pdata(
+    tumbling: [f64; 2],
+    rolling: Option<[f64; 2]>,
+    meta: Meta,
+) -> Result<OtapPdata, String> {
     let _cpu = profile::scope(Category::PdataCodec);
-    let envelopes = ["0.5", "0.99"]
+    let envelopes = [("tumbling", Some(tumbling)), ("rolling", rolling)]
         .into_iter()
-        .zip(values)
-        .map(|(q, value)| {
-            let mut env = meta.envelope(value);
-            env.metric_name = "http.server.request.duration.estimate".into();
-            env.labels.push(KeyValue::new("quantile", q));
-            env
+        .filter_map(|(kind, values)| Some((kind, values?)))
+        .flat_map(|(kind, values)| {
+            QUANTILES.into_iter().zip(values).map(move |(q, value)| {
+                let mut env = meta.envelope(value);
+                env.metric_name = "http.server.request.duration.estimate".into();
+                env.labels.push(KeyValue::new("quantile", q));
+                env.labels.push(KeyValue::new("window_kind", kind));
+                env
+            })
         })
         .collect::<Vec<_>>();
     encode_envelopes_to_pdata(&envelopes).map_err(|e| e.to_string())
@@ -128,10 +138,9 @@ fn quantiles_pdata(values: [f64; 2], meta: Meta) -> Result<OtapPdata, String> {
 pub fn exact(values: &[f64]) -> [f64; 2] {
     [0.5, 0.99].map(|q| values[((values.len() - 1) as f64 * q).round() as usize])
 }
-pub fn reference(points: usize) -> [f64; 2] {
-    let mut values = (1..=points as u64 * 2).map(value).collect::<Vec<_>>();
-    values.sort_by(f64::total_cmp);
-    exact(&values)
+/// Exact quantiles of `copies` concatenated copies of one sorted window.
+fn exact_repeated(sorted: &[f64], copies: usize) -> [f64; 2] {
+    [0.5, 0.99].map(|q| sorted[((sorted.len() * copies - 1) as f64 * q).round() as usize / copies])
 }
 
 pub struct InputNormalizer {
@@ -209,9 +218,13 @@ pub struct Processor {
     pub batch: usize,
     windows: BTreeMap<u64, Window>,
     next: [u64; 3],
+    /// Completed windows merged into each rolling estimate; 1 disables rolling.
+    rolling: usize,
+    kll_history: VecDeque<KLLWrapper>,
+    exact_history: VecDeque<Vec<f64>>,
 }
 impl Processor {
-    pub fn new(scenario: &str, role: &str, points: usize, batch: usize) -> Self {
+    pub fn new(scenario: &str, role: &str, points: usize, batch: usize, rolling: usize) -> Self {
         Self {
             scenario: scenario.into(),
             role: role.into(),
@@ -219,7 +232,43 @@ impl Processor {
             batch,
             windows: BTreeMap::new(),
             next: [0; 3],
+            rolling,
+            kll_history: VecDeque::new(),
+            exact_history: VecDeque::new(),
         }
+    }
+    /// Merge the last `rolling` window sketches; quantiles of their union.
+    fn rolling_kll(&mut self, sketch: KLLWrapper) -> Result<Option<[f64; 2]>, String> {
+        if self.rolling <= 1 {
+            return Ok(None);
+        }
+        self.kll_history.push_back(sketch);
+        if self.kll_history.len() > self.rolling {
+            self.kll_history.pop_front();
+        }
+        let mut merged = new_sketch(5);
+        for sketch in &self.kll_history {
+            merged.merge(sketch).map_err(|e| e.to_string())?;
+        }
+        Ok(Some([merged.quantile(0.5), merged.quantile(0.99)]))
+    }
+    /// Exact rolling quantiles must retain and re-sort every value in the range.
+    fn rolling_exact(&mut self, values: Vec<f64>) -> Option<[f64; 2]> {
+        if self.rolling <= 1 {
+            return None;
+        }
+        self.exact_history.push_back(values);
+        if self.exact_history.len() > self.rolling {
+            self.exact_history.pop_front();
+        }
+        let mut all = self
+            .exact_history
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        all.sort_unstable_by(f64::total_cmp);
+        Some(exact(&all))
     }
     pub fn process(&mut self, pdata: OtapPdata) -> Result<Vec<OtapPdata>, String> {
         let _cpu = profile::scope(Category::ProcessorBookkeeping);
@@ -308,13 +357,12 @@ impl Processor {
         };
         if self.scenario == "kll" {
             return Ok(vec![if estimate {
-                quantiles_pdata(
-                    {
-                        let _cpu = profile::scope(Category::Computation);
-                        [w.sketch.quantile(0.5), w.sketch.quantile(0.99)]
-                    },
-                    out_meta,
-                )?
+                let (tumbling, rolling) = {
+                    let _cpu = profile::scope(Category::Computation);
+                    let tumbling = [w.sketch.quantile(0.5), w.sketch.quantile(0.99)];
+                    (tumbling, self.rolling_kll(w.sketch)?)
+                };
+                quantiles_pdata(tumbling, rolling, out_meta)?
             } else {
                 sketch_pdata(
                     &w.sketch,
@@ -350,11 +398,12 @@ impl Processor {
             }
         };
         if estimate {
-            let quantiles = {
+            let (tumbling, rolling) = {
                 let _cpu = profile::scope(Category::Computation);
-                exact(&values)
+                let tumbling = exact(&values);
+                (tumbling, self.rolling_exact(values))
             };
-            return Ok(vec![quantiles_pdata(quantiles, out_meta)?]);
+            return Ok(vec![quantiles_pdata(tumbling, rolling, out_meta)?]);
         }
         values
             .chunks(self.batch)
@@ -445,23 +494,39 @@ impl Processor {
     }
 }
 
+/// One validated result and its exact reference, reported for dashboards.
+#[derive(Serialize, Clone, Debug, Default)]
+pub struct ResultPoint {
+    pub window_kind: String,
+    pub quantile: String,
+    pub value: f64,
+    pub reference: f64,
+}
 pub struct Backend {
     scenario: String,
     points: usize,
-    expected: [f64; 2],
+    rolling: usize,
+    /// The sorted two-source corpus; every window replays it.
+    sorted: Vec<f64>,
     windows: BTreeMap<u64, ([usize; 2], u64)>,
     next: [u64; 2],
     next_quantile: u64,
+    /// Results of the most recently completed window.
+    pub latest: Vec<ResultPoint>,
 }
 impl Backend {
-    pub fn new(scenario: &str, points: usize) -> Self {
+    pub fn new(scenario: &str, points: usize, rolling: usize) -> Self {
+        let mut sorted = (1..=points as u64 * 2).map(value).collect::<Vec<_>>();
+        sorted.sort_by(f64::total_cmp);
         Self {
             scenario: scenario.into(),
             points,
-            expected: reference(points),
+            rolling,
+            sorted,
             windows: BTreeMap::new(),
             next: [0; 2],
             next_quantile: 0,
+            latest: Vec::new(),
         }
     }
     /// Return completed input signals and optional (window id, start timestamp).
@@ -509,36 +574,56 @@ impl Backend {
             }
             return Ok((obs.len() as u64, completed));
         }
-        if meta.window != self.next_quantile || meta.source != 2 || obs.len() != 2 {
+        let mut kinds = vec![("tumbling", exact(&self.sorted))];
+        if self.rolling > 1 {
+            let copies = (meta.window as usize + 1).min(self.rolling);
+            kinds.push(("rolling", exact_repeated(&self.sorted, copies)));
+        }
+        if meta.window != self.next_quantile || meta.source != 2 || obs.len() != kinds.len() * 2 {
             return Err("quantile window missing/duplicated".into());
         }
-        for (q, expected) in ["0.5", "0.99"].into_iter().zip(self.expected) {
-            let matching = obs
+        let label = |o: &Observation, key: &str| {
+            o.labels
                 .iter()
-                .filter(|o| {
-                    o.labels
-                        .iter()
-                        .any(|kv| kv.key == "quantile" && kv.value == q)
-                })
-                .collect::<Vec<_>>();
-            if matching.len() != 1 {
-                return Err("missing/duplicate quantile".into());
-            }
-            let o = matching[0];
-            let other = Meta::read(o)?;
-            let tolerance = if self.scenario == "exact" {
-                0.0
-            } else {
-                (expected.abs() * 0.05).max(0.001)
-            };
-            if other.window != meta.window
-                || other.source != 2
-                || !o.value.float.is_finite()
-                || (o.value.float - expected).abs() > tolerance
-            {
-                return Err(format!("{q}: {} != {expected}", o.value.float));
+                .find(|kv| kv.key == key)
+                .map(|kv| kv.value.clone())
+        };
+        let mut latest = Vec::with_capacity(obs.len());
+        for (kind, expected) in kinds {
+            for (q, expected) in QUANTILES.into_iter().zip(expected) {
+                let matching = obs
+                    .iter()
+                    .filter(|o| {
+                        label(o, "quantile").as_deref() == Some(q)
+                            && label(o, "window_kind").as_deref() == Some(kind)
+                    })
+                    .collect::<Vec<_>>();
+                if matching.len() != 1 {
+                    return Err("missing/duplicate quantile".into());
+                }
+                let o = matching[0];
+                let other = Meta::read(o)?;
+                let tolerance = if self.scenario == "exact" {
+                    0.0
+                } else {
+                    (expected.abs() * 0.05).max(0.001)
+                };
+                if other.window != meta.window
+                    || other.source != 2
+                    || !o.value.float.is_finite()
+                    || (o.value.float - expected).abs() > tolerance
+                {
+                    return Err(format!("{kind} {q}: {} != {expected}", o.value.float));
+                }
+                latest.push(ResultPoint {
+                    window_kind: kind.into(),
+                    quantile: q.into(),
+                    value: o.value.float,
+                    reference: expected,
+                });
             }
         }
+        self.latest = latest;
         self.next_quantile += 1;
         Ok((
             (self.points * 2) as u64,
@@ -550,15 +635,15 @@ impl Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn exercise(scenario: &str) {
+    fn exercise(scenario: &str, rolling: usize) {
         let (n, batch) = (1024, 127);
         let mut branches = [
-            Processor::new(scenario, "branch", n, batch),
-            Processor::new(scenario, "branch", n, batch),
+            Processor::new(scenario, "branch", n, batch, rolling),
+            Processor::new(scenario, "branch", n, batch, rolling),
         ];
-        let mut merge = Processor::new(scenario, "merge", n, batch);
-        let mut estimate = Processor::new(scenario, "estimate", n, batch);
-        let mut backend = Backend::new(scenario, n);
+        let mut merge = Processor::new(scenario, "merge", n, batch, rolling);
+        let mut estimate = Processor::new(scenario, "estimate", n, batch, rolling);
+        let mut backend = Backend::new(scenario, n, rolling);
         let (mut received, mut completed) = (0, 0);
         for window in 0..3 {
             for offset in (0..n).step_by(batch) {
@@ -588,11 +673,25 @@ mod tests {
         }
         assert_eq!(received, 6 * n as u64);
         assert_eq!(completed, 3);
+        if scenario != "raw" {
+            let rolling_points = backend
+                .latest
+                .iter()
+                .filter(|p| p.window_kind == "rolling")
+                .count();
+            assert_eq!(rolling_points, if rolling > 1 { 2 } else { 0 });
+        }
     }
     #[test]
     fn streaming_windows_survive_batch_boundaries() {
         for scenario in ["raw", "exact", "kll"] {
-            exercise(scenario);
+            exercise(scenario, 1);
+        }
+    }
+    #[test]
+    fn rolling_estimates_merge_retained_windows() {
+        for scenario in ["exact", "kll"] {
+            exercise(scenario, 2);
         }
     }
     #[test]
@@ -604,10 +703,10 @@ mod tests {
             started_ns: 1,
         };
         let input = || values_pdata(&[value(1)], meta).unwrap();
-        let mut backend = Backend::new("raw", 10);
+        let mut backend = Backend::new("raw", 10, 1);
         backend.receive(input()).unwrap();
         assert!(backend.receive(input()).is_err());
-        let mut processor = Processor::new("kll", "branch", 10, 2);
+        let mut processor = Processor::new("kll", "branch", 10, 2, 1);
         assert!(processor
             .process(values_pdata(&[value(1)], Meta { offset: 1, ..meta }).unwrap())
             .is_err());
