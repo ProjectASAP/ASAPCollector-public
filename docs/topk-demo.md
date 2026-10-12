@@ -47,6 +47,50 @@ counts, recall@10, and mean relative count error over the true top 10.
 
 ![CMS with heap vs exact top-k dashboard](images/topk-streaming-grafana.png)
 
+*56-core x86 server, 50,000 signals/s per source. Both pipelines keep up;
+CMS + heap uses 1.7 processor CPU-seconds per million signals, exact 13.0,
+and its top 10 matches the exact keys and order with counts within 0.6%.*
+
+## Benchmark results
+
+`benchmarks/run-streaming.py --scenarios raw topk-exact cmsheap
+--window-points 65536 --repetitions 3` on a 56-core x86 server, four generator CPUs per source and one dedicated CPU
+per processor. Median backend-validated signals/s over three runs (both
+sources combined):
+
+| Offered | Raw | Exact top-k | CMS + heap |
+| ---: | ---: | ---: | ---: |
+| 20,000 | 21,813 | 21,813 | 21,813 |
+| 50,000 | 47,988 | 52,348 | 47,989 |
+| 100,000 | 100,327 | 100,336 | 100,335 |
+| 200,000 | 196,309 | 148,316 | 200,675 |
+| 400,000 | 274,848 | 130,879 | 397,004 |
+| 600,000 | 279,185 | 130,860 | 597,659 |
+| 800,000 | 283,555 | 126,516 | 798,355 |
+
+(Short runs round to whole windows, so low-rate rows can exceed the offer.)
+
+![Validated throughput vs offered load](images/topk-streaming-throughput.png)
+
+By the [capacity criteria](../benchmarks/CAPACITY_DESIGN.md), the largest
+sustainable offered rate per source is 50,000 for exact top-k, 100,000 for
+raw, and at least 400,000 (the highest tested) for CMS + heap. Exact top-k
+plateaus near 130,000 signals/s; raw forwarding near 280,000.
+
+Summed over branch A, branch B, merge and estimate, at the same offered load:
+
+| Offered per source | Exact CPU | CMS + heap CPU | Exact egress | CMS + heap egress |
+| ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 0.29 cores | 0.039 cores | 43.9 Mbit/s | 0.1 Mbit/s |
+| 25,000 | 0.66 cores | 0.084 cores | 102.9 Mbit/s | 0.3 Mbit/s |
+| 50,000 | 1.29 cores | 0.165 cores | 201.1 Mbit/s | 0.5 Mbit/s |
+
+Accuracy, checked by the backend in every window of every run: exact top-k
+matched exactly; CMS + heap had **recall@10 = 1.0** (same ten keys, same
+order) and a **0.62% mean relative count error** over the true top 10, in
+tumbling windows. Count-Min only overestimates, so every reported count is
+at or above the true count.
+
 Verify the demo end to end (60 seconds):
 
 ```sh
