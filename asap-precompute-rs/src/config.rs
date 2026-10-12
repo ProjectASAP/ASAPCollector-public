@@ -170,13 +170,15 @@ pub fn sketch_size_string(sketch_type: SketchType, params: &SketchParams) -> Opt
                 _ => None,
             },
         },
-        SketchType::CountMinSketch => match (params.get("rows"), params.get("columns")) {
-            (Some(r), Some(c)) => match (as_wire_u64(*r), as_wire_u64(*c)) {
-                (Some(r), Some(c)) => Some(format!("{r} x {c}")),
+        SketchType::CountMinSketch | SketchType::CountMinSketchWithHeap => {
+            match (params.get("rows"), params.get("columns")) {
+                (Some(r), Some(c)) => match (as_wire_u64(*r), as_wire_u64(*c)) {
+                    (Some(r), Some(c)) => Some(format!("{r} x {c}")),
+                    _ => None,
+                },
                 _ => None,
-            },
-            _ => None,
-        },
+            }
+        }
         SketchType::Unspecified => None,
     }
 }

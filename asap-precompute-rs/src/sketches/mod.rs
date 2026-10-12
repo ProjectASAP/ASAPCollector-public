@@ -33,12 +33,14 @@
 //!   inner state proto.
 
 pub mod cms;
+pub mod cms_heap;
 pub mod countsketch;
 pub mod ddsketch;
 pub mod hll;
 pub mod kll;
 
 pub use cms::{CMSObserver, CMSWrapper};
+pub use cms_heap::CMSHeapWrapper;
 pub use countsketch::{CountSketchObserver, CountSketchWrapper};
 pub use ddsketch::{DDSketchObserver, DDSketchWrapper};
 pub use hll::{HLLObserver, HLLWrapper};
