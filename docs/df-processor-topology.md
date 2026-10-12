@@ -8,7 +8,7 @@ crosses each edge. The whole design turns on one fact:
 > hop is a pointer + refcount bump, not a memcpy. But a **sketch is not a
 > column**: the moment a value lands in a `DdSketch`/`Hll`/… it becomes opaque
 > single-owner state that never rides a channel. Crossing a node boundary with
-> a sketch therefore *always* costs one serialize (proto or **msgpack**).
+> a sketch therefore *always* costs one serialize (the ASAPv1 envelope).
 
 Design rule: **keep every sketch inside the one node that owns its window
 state; only ever let SUMMARIES (estimated datapoints) or SERIALIZED envelopes
@@ -39,41 +39,39 @@ The sketch state lives inside `P`, owned, never on a channel. At `Wakeup`
 
 ### Topology B — edge → central (ship the sketch, merge & estimate downstream)
 
-`transmit_sketch = true`, `encoding = Msgpack | MsgpackDelta`: the edge ships
-sketch bytes; a **second instance of the same processor** on the central tier
+`transmit_sketch = true`: the edge ships each window's full sketch as the
+self-describing ASAPv1 envelope from `asap_sketchlib`; a **second instance of the same processor** on the central tier
 decodes, merges across edges, and estimates.
 
 ```mermaid
 flowchart LR
   subgraph EDGE["Edge host"]
     R1["receiver"] -->|"raw"| P1["<b>asap_sketches</b><br/>observe · window<br/>output = sketch bytes"]
-    P1 -->|"Arrow _asap_envelope Binary<br/>msgpack full / delta<br/>serialize once"| E1["OTAP exporter / gRPC"]
+    P1 -->|"sketch.envelope Binary<br/>ASAPv1 full state<br/>serialize once"| E1["OTAP exporter / gRPC"]
   end
   subgraph CENTRAL["Central host"]
     R2["OTAP receiver"] -->|"Arrow envelope col"| P2["<b>asap_sketches</b><br/>input = envelope<br/>merge · window · estimate"]
     P2 -->|"Arrow typed datapoints"| X2["exporter → backend"]
   end
-  E1 ==>|"network — msgpack full / delta"| R2
+  E1 ==>|"network — ASAPv1 full state"| R2
   style P1 fill:#2b6cb0,color:#fff
   style P2 fill:#2b6cb0,color:#fff
 ```
 
-The only real network copy is the `==>` hop. Delta-encoding
-(`MsgpackDelta`, per-window against-empty) shrinks it.
+The only real network copy is the `==>` hop.
 
 ---
 
-## The four cases
+## The cases
 
-All four are the **same processor**, parameterized by two knobs —
-`transmit_sketch` (sketch vs. estimate out) and `encoding` (proto vs. msgpack,
-full vs. delta) — deployed once (terminal) or twice (edge + central).
+All are the **same processor**, parameterized by `transmit_sketch` (sketch
+vs. estimate out) — deployed once (terminal) or twice (edge + central).
 
 | Case | Topology | Config | Compute in node | What crosses the boundary |
 |---|---|---|---|---|
 | **1** — insert → merge → estimate, ship results | A | `transmit_sketch=false`, `quantiles=[…]` | insert **+ merge inbound** + estimate | typed OTAP datapoints (gauges) |
-| **2** — insert only, ship msgpack full | B (edge) | `transmit_sketch=true`, `encoding=Msgpack` | insert + window | `_asap_envelope` Binary — **msgpack full** |
-| **3** — insert-merge, ship msgpack delta | B (edge **+** central) | `encoding=MsgpackDelta`, `delta_transmission=true` | insert (edge); merge + estimate (central) | `_asap_envelope` Binary — **msgpack delta** (edge); gauges (central) |
+| **2** — insert only, ship the sketch | B (edge) | `transmit_sketch=true` | insert + window | `sketch.envelope` Binary — **ASAPv1 full state** |
+| **3** — insert, then central merge | B (edge **+** central) | `transmit_sketch=true` (edge), `false` (central) | insert (edge); merge + estimate (central) | `sketch.envelope` Binary (edge); gauges (central) |
 | **4** — insert + estimate, ship via metric types | A | `transmit_sketch=false` | insert + estimate | OTAP Gauge / Sum datapoints |
 
 **Case 1 ⊇ Case 4:** same terminal node; Case 1 also folds *inbound* sketch
@@ -83,10 +81,7 @@ envelopes (`observe_envelope`), Case 4 is raw-in only.
 flowchart TD
   C{"cfg.transmit_sketch?"}
   C -->|"false → estimate mode"| A["<b>Topology A</b><br/>Cases 1 and 4<br/>emit gauges"]
-  C -->|"true → sketch on wire"| D{"cfg.encoding?"}
-  D -->|"Msgpack (full)"| B2["<b>Topology B</b> · Case 2<br/>ship full sketch"]
-  D -->|"MsgpackDelta<br/>(+ delta_transmission)"| B3["<b>Topology B</b> · Case 3<br/>ship sparse delta<br/>+ central merger"]
-  D -->|"ProtoFull / ProtoDelta"| B4["Topology B (proto variant)"]
+  C -->|"true → sketch on wire"| B2["<b>Topology B</b> · Cases 2 and 3<br/>ship ASAPv1 sketch<br/>(+ central merger)"]
 ```
 
 ---
@@ -110,8 +105,7 @@ flush():   # serialize_series per closed series
      for p in sketch.estimate(quantiles):         # DDSketch/KLL: 1 gauge per quantile
         emit Gauge{ value=p.value, labels+=p.labels }   # HLL: 1 cardinality gauge
   else:                                           # SKETCH mode (Topology B)
-     payload,enc = delta_transmission ? compute_delta(...) : snapshot()
-     emit Envelope{ _asap_envelope=payload, encoding=enc }   # proto | msgpack (full/delta)
+     emit Envelope{ sketch.envelope=snapshot() }   # ASAPv1 full state
   effect_handler.send_message(batch)              # zero-copy hop downstream
 ```
 
@@ -126,10 +120,10 @@ Every boundary and its true cost:
 | receiver → proc | raw metrics (OTAP Arrow) | **zero-copy** (`Arc` buffers, channel move) |
 | decode inside proc | Arrow columns → `f64`/`bytes` → `sketch.update()` | **read-in-place**, no intermediate object |
 | the windowed sketches | owned `asap_sketchlib` structs | **resident, never serialized while live** |
-| inbound sketch (merge) | Binary col → prost/msgpack decode → struct → `merge()` | **one deserialize** per envelope |
+| inbound sketch (merge) | Binary col → ASAPv1 decode → struct → `merge()` | **one deserialize** per envelope |
 | proc → next, **estimate mode** | small Arrow gauge batch (series × quantiles) | **one small alloc**, then zero-copy |
-| proc → next, **sketch mode** | `to_msgpack()` / delta → bytes in Binary col | **one serialize** (sketch isn't columnar) |
-| edge → central (gRPC) | the envelope batch | the **only real network copy**; delta shrinks it |
+| proc → next, **sketch mode** | `serialize_to_bytes()` → bytes in Binary col | **one serialize** (sketch isn't columnar) |
+| edge → central (gRPC) | the envelope batch | the **only real network copy** |
 | control (`Wakeup`/`Config`/…) | tiny `NodeControlMsg` | negligible |
 
 ---
@@ -144,24 +138,24 @@ Every boundary and its true cost:
   the *same* processor in `input=Envelope, output=Estimate` mode.
 - **Stock OTAP nodes** around it — OTLP/OTAP receiver, OTAP/gRPC exporter,
   batch, retry, signal-router. Sketches ride the standard metrics batch in the
-  `_asap_envelope` Binary carrier column, untouched by stock nodes.
+  `sketch.envelope` Binary attribute, untouched by stock nodes.
 
 ---
 
 ## Implemented status (this repo)
 
-- **Sketch-on-wire**: KLL in sketchlib's canonical self-describing ASAPv1
-  MessagePack envelope. Private proto and legacy unframed MessagePack payloads
-  are rejected at configuration time. Other algorithms remain usable in
-  scalar estimate mode where implemented.
+- **Sketch-on-wire**: every sketch type, as sketchlib's self-describing ASAPv1
+  envelope (full state; no deltas). The codec rejects bytes that do not
+  decode as the declared sketch type.
 - **Estimate mode** (`transmit_sketch=false`): DDSketch / KLL emit one Gauge per
-  configured quantile (`quantile` label); HLL emits a cardinality Gauge.
-  CMS / CountSketch top-k output needs a heavy-hitter tracker (not yet built).
+  configured quantile (`quantile` label); HLL emits a cardinality Gauge;
+  Count-Min with heap emits one Gauge per heavy hitter (`key`, `rank` labels).
+  Plain CMS / CountSketch track no keys, so they emit no estimates.
 - **Cross-host merge**: KLL uses sketchlib's level-aware merge, preserving the
   logical weights of retained items after compaction.
 
 Config knobs live on `PluginConfig` / `PrecomputeConfig`:
-`encoding`, `delta_transmission`, `transmit_sketch`, `quantiles`.
+`transmit_sketch`, `quantiles`.
 
 ---
 
@@ -169,7 +163,10 @@ Config knobs live on `PluginConfig` / `PrecomputeConfig`:
 
 Each seam in the diagrams/pseudocode above, linked to source. Permalinks are
 pinned to the merged commits (`ASAPCollector-public@1be24ef`,
-`asap_sketchlib@0a2ac37`) so the line numbers don't drift.
+`asap_sketchlib@0a2ac37`) so the line numbers don't drift. Those commits
+predate the ASAPv1-only wire format: the `Encoding`, delta, and
+`decode_batch`/`encode_batch` rows below describe code that has since been
+removed.
 
 ### The OTAP node
 

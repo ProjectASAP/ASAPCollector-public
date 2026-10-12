@@ -18,8 +18,7 @@ builds the whole thing.
 
 Design notes:
 
-- This is a single unified plugin rather than five per-sketch
-  plugins.
+- This is a single unified plugin rather than one plugin per sketch.
 - Registered under the URN `urn:asap:processor:asap_sketches`
   (`processor.rs`'s `ASAP_SKETCHES_PROCESSOR_FACTORY`).
 - The configuration shape is documented by
@@ -37,26 +36,26 @@ Field reference:
 
 | Field | Required | Description |
 |---|---|---|
-| `sketch_type` | yes | One of `ddsketch` / `kll` / `hll` / `countsketch` / `countminsketch`. Case-insensitive. |
+| `sketch_type` | yes | One of `ddsketch` / `kll` / `hll` / `countsketch` / `countminsketch` / `countminsketch_heap`. Case-insensitive. |
 | `window_size` | yes | Duration string (e.g. `"10s"`). Tumbling window rotation period. |
 | `output_metric_name` | yes | Metric name stamped onto every emitted envelope. |
 | `agg_id` | optional | Controller-plan join key. Defaults to `0`. |
 | `sketch_params.relative_accuracy` | ddsketch | DDSketch alpha (`0 < α < 1`). Default `0.01`. |
 | `sketch_params.k` | kll | KLL buffer size. Default `200`. |
 | `sketch_params.seed` | kll | Optional deterministic compaction seed. Default unseeded. |
-| `sketch_params.precision` | hll | HLL register-count exponent (4-18). Default `12`. |
 | `sketch_params.width` | countsketch, cms | Sketch column count. Default `2048`. |
 | `sketch_params.depth` | countsketch, cms | Sketch row count. Default `4`. |
+| `sketch_params.rows` / `columns` | countminsketch_heap | CMS dimensions. Default `4` / `2048`. |
+| `sketch_params.k` | countminsketch_heap | Heavy-hitter heap size. Default `10`. |
 | `default_key` | optional | CountSketch fallback key when an observation has neither bytes nor labels. Defaults to `output_metric_name`. |
 | `omit_resource_attrs` | optional | Exclude resource attributes from series identity. Default `false`. |
 | `global_aggregation` | optional | Collapse all observations into one series. Default `false`. |
 | `emit_window_stats` | optional | Add `sample_count` and `window_duration_seconds` labels. Default `false`. |
-| `encoding` | optional | Sketch transport uses KLL `Msgpack`/`MsgpackDelta`, the canonical self-describing ASAPv1 format. Default `Msgpack`. Other sketch/encoding combinations require estimate mode. |
-| `delta_transmission` | optional | Emit deltas after the initial full snapshot. Default `false`. |
-| `transmit_sketch` | optional | `true` emits canonical KLL ASAPv1 state; `false` permits supported scalar estimates from other algorithms. Default `true`. |
+| `transmit_sketch` | optional | `true` emits each window's full sketch as the self-describing ASAPv1 envelope from `asap_sketchlib` (every sketch type; there are no deltas). `false` emits scalar estimates: quantiles (DDSketch/KLL), a cardinality (HLL), or the top-k keys with `key` and `rank` labels (`countminsketch_heap`). Default `true`. |
 | `quantiles` | estimate mode | DDSketch/KLL quantiles to emit, such as `[0.5, 0.99]`. |
-| `controller_url` | optional | Legacy bootstrap field, predates the engine's own OpAMP controller extension (which now owns `instance_uid`/`endpoint`/`agent_description` centrally) — likely a deprecation candidate rather than something to keep pushing new values into. |
-| `agent_id` | optional | Same caveat as `controller_url`. |
+
+HLL uses sketchlib's fixed precision-14 HyperLogLog, so it has no
+`sketch_params`.
 
 ## Lifecycle
 
@@ -66,7 +65,7 @@ calls — no separate Tokio-task lifecycle needed:
 
 1. **`Message::PData`** — `codec::decode_pdata_to_observations()`
    turns the real `OtapPdata` directly into `Vec<Observation>`
-   (content-routed: a data point carrying `_asap_envelope` merges as a
+   (content-routed: a data point carrying `sketch.envelope` merges as a
    pre-aggregated sketch via `Precompute::observe_envelope`; everything
    else is a plain scalar sample).
 2. **`NodeControlMsg::TimerTick`** (regular flush) / **`Shutdown`**

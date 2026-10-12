@@ -1,112 +1,51 @@
 //! KLL wrapper over [`asap_sketchlib::KLL`].
 //!
-//! KLL uses random compaction so the wrapper takes an explicit
-//! (optional) seed for deterministic byte-identical replay
-//! (`init_with_seed` lands a deterministic compaction RNG).
+//! Implements [`Sketch`] + [`QuantileSketch`]. Snapshots are sketchlib's
+//! ASAPv1 envelope. KLL uses random compaction, so the wrapper takes an
+//! optional seed for deterministic compaction.
 
 use asap_sketchlib::sketches::KLL;
-use prost::Message;
 
-use asap_sketchlib::proto::sketchlib::{
-    sketch_envelope, CoinState, KllState, SketchEnvelope as ProtoEnvelope,
-};
-
-use crate::envelope::Encoding;
 use crate::observation::{KeyValue, Observation};
-use crate::precompute::{
-    DeltaResult, EstimatePoint, PrecomputeError, QuantileSketch, Sketch, SketchObserver,
-};
+use crate::precompute::{EstimatePoint, PrecomputeError, QuantileSketch, Sketch, SketchObserver};
 
-/// KLL wrapper.
-///
-/// Owns one `asap_sketchlib::KLL<f64>`. Construction takes
-/// `(k, optional seed)`; the seed is forwarded to
-/// [`asap_sketchlib::KLL::init_kll_with_seed`] when provided so two
-/// wrappers built with the same seed and fed the same input produce
-/// byte-identical state.
+/// KLL wrapper over `asap_sketchlib::KLL<f64>`.
 pub struct KLLWrapper {
     sk: KLL<f64>,
-    k: i32,
-    seed: Option<u64>,
-    /// Replay history used only by the legacy proto path. The ASAPv1 path
-    /// retains the compacted KLL state alone, keeping pane memory independent
-    /// of the number of incoming observations.
-    history: Vec<f64>,
-    /// Outbound wire format. KLL is full-only, so msgpack means the
-    /// self-describing ASAPv1 form; proto means the legacy `KllState` envelope.
-    /// Baked from `cfg.encoding` by the OTAP sketch factory.
-    wire_encoding: Encoding,
 }
 
 impl KLLWrapper {
     /// Construct an empty KLL with accuracy parameter `k`.
     /// `seed = Some(s)` enables deterministic compaction.
     pub fn new(k: i32, seed: Option<u64>) -> Self {
-        Self {
-            sk: build_kll(k, seed),
-            k,
-            seed,
-            history: Vec::new(),
-            wire_encoding: Encoding::ProtoFull,
-        }
+        let sk = match seed {
+            Some(s) => KLL::init_kll_with_seed(k, s),
+            None => KLL::init_kll(k),
+        };
+        Self { sk }
     }
 
-    /// Set the outbound wire format (proto vs msgpack). Builder form used
-    /// by the OTAP sketch factory to bake in `cfg.encoding`.
-    pub fn with_wire_encoding(mut self, encoding: Encoding) -> Self {
-        self.wire_encoding = encoding;
-        self
+    /// Decode a full ASAPv1 snapshot.
+    pub fn from_snapshot(bytes: &[u8]) -> Result<Self, PrecomputeError> {
+        KLL::deserialize_from_bytes(bytes)
+            .map(|sk| Self { sk })
+            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper decode: {e}")))
     }
 
-    /// Canonical self-describing ASAPv1 KLL envelope.
-    ///
-    /// `asap_sketchlib` owns the framing, metadata, and payload encoding;
-    /// in particular these bytes start with the `b"ASAPv1"` magic number.
-    fn encode_msgpack(&self) -> Result<Vec<u8>, PrecomputeError> {
-        self.sk
-            .serialize_to_bytes()
-            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper ASAPv1 serialize: {e}")))
-    }
-
-    /// Merge a self-describing ASAPv1 KLL frame in.
-    ///
-    /// Uses sketchlib's level-aware merge so each retained item keeps its
-    /// `2^level` weight after compaction.
-    fn merge_msgpack(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError> {
-        let other: KLL<f64> = KLL::deserialize_from_bytes(bytes)
-            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper ASAPv1 decode: {e}")))?;
-        self.sk.merge(&other);
-        Ok(())
-    }
-
-    /// Insert a single observation.
+    /// Insert a single observation. Non-finite values are ignored.
     pub fn update(&mut self, value: f64) {
         if value.is_finite() {
-            if !self.wire_encoding.is_msgpack() {
-                self.history.push(value);
-            }
             self.sk.update(&value);
         }
     }
 
-    /// Insert a batch without forcing callers to materialize a value vector.
-    /// The upstream compactor currently exposes scalar updates, so this keeps
-    /// the loop local and reserves the replay history once per batch.
+    /// Insert a batch of observations.
     pub fn update_batch<I>(&mut self, values: I)
     where
         I: IntoIterator<Item = f64>,
     {
-        let values = values.into_iter();
-        if !self.wire_encoding.is_msgpack() {
-            self.history.reserve(values.size_hint().0);
-        }
         for value in values {
-            if value.is_finite() {
-                if !self.wire_encoding.is_msgpack() {
-                    self.history.push(value);
-                }
-                self.sk.update(&value);
-            }
+            self.update(value);
         }
     }
 
@@ -114,146 +53,30 @@ impl KLLWrapper {
     pub fn inner(&self) -> &KLL<f64> {
         &self.sk
     }
-
-    fn build_state(&self) -> KllState {
-        // Wire-format-aligned: read directly from the compactor via
-        // the `wire_*` accessors added in asap_sketchlib so the
-        // emitted `KllState.levels` / `items` / `coin` bytes match the
-        // portable serialization output.
-        let (state, bit_cache, remaining_bits) = self.sk.wire_coin();
-        KllState {
-            k: self.sk.wire_k(),
-            m: self.sk.wire_m(),
-            num_levels: self.sk.wire_num_levels(),
-            levels: self.sk.wire_levels(),
-            items: self.sk.wire_items(),
-            coin: Some(CoinState {
-                state,
-                bit_cache,
-                remaining_bits,
-            }),
-            // Emit the raw-f64 item representation (field 5); the
-            // value-offset fixed-point encoding (offset/value_scale/
-            // residuals, fields 7-9) is left at its off defaults so the
-            // wire form is unchanged.
-            offset: 0.0,
-            value_scale: 0,
-            residuals: Vec::new(),
-        }
-    }
-
-    fn encode_envelope(&self) -> Vec<u8> {
-        let env = ProtoEnvelope {
-            format_version: 1,
-            producer: None,
-            hash_spec: None,
-            sample_p: 0.0,
-            sketch_state: Some(sketch_envelope::SketchState::Kll(self.build_state())),
-        };
-        let mut buf = Vec::with_capacity(env.encoded_len());
-        env.encode(&mut buf).expect("prost encode");
-        buf
-    }
-
-    fn decode_envelope_into_history(bytes: &[u8]) -> Result<Vec<f64>, PrecomputeError> {
-        let env = ProtoEnvelope::decode(bytes)
-            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper decode: {e}")))?;
-        match env.sketch_state {
-            Some(sketch_envelope::SketchState::Kll(s)) => Ok(s.items),
-            _ => Err(PrecomputeError::Other(
-                "KLLWrapper: envelope did not carry KllState".into(),
-            )),
-        }
-    }
-}
-
-fn build_kll(k: i32, seed: Option<u64>) -> KLL<f64> {
-    match seed {
-        Some(s) => KLL::init_kll_with_seed(k, s),
-        None => KLL::init_kll(k),
-    }
 }
 
 impl Sketch for KLLWrapper {
     fn snapshot(&self) -> Result<Vec<u8>, PrecomputeError> {
-        if self.wire_encoding.is_msgpack() {
-            // Msgpack reads the compactor directly (not the history vec).
-            if self.sk.count() == 0 {
-                return Ok(Vec::new());
-            }
-            return self.encode_msgpack();
-        }
-        if self.history.is_empty() {
+        if self.sk.count() == 0 {
             return Ok(Vec::new());
         }
-        Ok(self.encode_envelope())
+        self.sk
+            .serialize_to_bytes()
+            .map_err(|e| PrecomputeError::Other(format!("KLLWrapper snapshot: {e}")))
     }
 
-    fn compute_delta_against(
-        &self,
-        _prev: &[u8],
-        _threshold: u64,
-    ) -> Result<DeltaResult, PrecomputeError> {
-        // KLL uses random compaction and is not additively mergeable
-        // in a delta sense. Always return the full snapshot.
-        let full = self.snapshot()?;
-        Ok(DeltaResult {
-            payload: full,
-            is_full: true,
-        })
-    }
-
-    fn apply_delta(&mut self, payload: &[u8]) -> Result<(), PrecomputeError> {
-        if payload.is_empty() {
-            return Ok(());
-        }
-        let other_history = Self::decode_envelope_into_history(payload)?;
-        for &v in &other_history {
-            if v.is_finite() {
-                self.history.push(v);
-                self.sk.update(&v);
-            }
-        }
-        Ok(())
-    }
-
-    fn apply_delta_encoded(
-        &mut self,
-        payload: &[u8],
-        encoding: Encoding,
-    ) -> Result<(), PrecomputeError> {
-        if payload.is_empty() {
-            return Ok(());
-        }
-        // KLL is full-only; a msgpack frame is a portable KLL full state —
-        // merge its compactor. Proto frames keep the history-replay path.
-        if encoding.is_msgpack() {
-            return self.merge_msgpack(payload);
-        }
-        self.apply_delta(payload)
-    }
-
-    fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
-        let bytes = other.snapshot()?;
+    /// Uses sketchlib's level-aware merge so each retained item keeps its
+    /// `2^level` weight after compaction.
+    fn merge_snapshot(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError> {
         if bytes.is_empty() {
             return Ok(());
         }
-        if self.wire_encoding.is_msgpack() {
-            return self.merge_msgpack(&bytes);
-        }
-        let other_history = Self::decode_envelope_into_history(&bytes)?;
-        for &v in &other_history {
-            if v.is_finite() {
-                self.history.push(v);
-                self.sk.update(&v);
-            }
-        }
+        self.sk.merge(&Self::from_snapshot(bytes)?.sk);
         Ok(())
     }
 
     fn reset(&mut self) {
-        self.sk = build_kll(self.k, self.seed);
-        self.history.clear();
+        self.sk.clear();
     }
 
     fn estimate(&self, quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {
@@ -309,68 +132,59 @@ impl SketchObserver for KLLObserver {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn asapv1_keeps_compacted_state_without_raw_replay_history() {
-        use super::*;
-        let mut sketch = KLLWrapper::new(200, Some(42)).with_wire_encoding(Encoding::Msgpack);
-        sketch.update_batch((0..20_000).map(|value| value as f64));
-        assert!(sketch.history.is_empty());
-        // The compactor reports retained weight, not the exact raw input count.
-        assert!(sketch.inner().count().abs_diff(20_000) < 400);
-        assert!(sketch.snapshot().unwrap().len() < 20_000);
-    }
     use super::*;
 
     #[test]
     fn new_wrapper_is_empty() {
-        let w = KLLWrapper::new(200, Some(0xDEAD));
-        assert_eq!(w.snapshot().unwrap().len(), 0);
+        assert!(KLLWrapper::new(200, Some(0xDEAD))
+            .snapshot()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn update_then_quantile() {
         let mut w = KLLWrapper::new(200, Some(0xDEAD));
-        for i in 1..=100 {
-            w.update(i as f64);
-        }
+        w.update_batch((1..=100).map(f64::from));
         let p50 = w.quantile(0.5);
         assert!((40.0..=60.0).contains(&p50), "p50={p50}");
     }
 
     #[test]
-    fn snapshot_roundtrip_preserves_count() {
+    fn snapshot_round_trips_through_asapv1() {
         let mut w = KLLWrapper::new(200, Some(0xDEAD));
-        for i in 1..=10 {
-            w.update(i as f64);
-        }
+        w.update_batch((1..=10).map(f64::from));
         let bytes = w.snapshot().unwrap();
-        let history = KLLWrapper::decode_envelope_into_history(&bytes).unwrap();
-        assert_eq!(history.len(), 10);
+        let decoded = KLLWrapper::from_snapshot(&bytes).unwrap();
+        assert_eq!(decoded.inner().count(), 10);
+    }
+
+    #[test]
+    fn compacted_state_stays_small() {
+        let mut w = KLLWrapper::new(200, Some(42));
+        w.update_batch((0..20_000).map(f64::from));
+        // The compactor reports retained weight, not the exact raw input count.
+        assert!(w.inner().count().abs_diff(20_000) < 400);
+        assert!(w.snapshot().unwrap().len() < 20_000);
     }
 
     #[test]
     fn deterministic_seed_yields_identical_snapshot() {
         let mut a = KLLWrapper::new(200, Some(42));
         let mut b = KLLWrapper::new(200, Some(42));
-        for i in 1..=50 {
-            a.update(i as f64);
-            b.update(i as f64);
-        }
+        a.update_batch((1..=50).map(f64::from));
+        b.update_batch((1..=50).map(f64::from));
         assert_eq!(a.snapshot().unwrap(), b.snapshot().unwrap());
     }
 
-    /// Merging a compacted ASAPv1 sketch must preserve the source's logical
-    /// sample weight, not reduce it to the number of retained items.
+    /// Merging a compacted sketch must preserve the source's logical sample
+    /// weight, not reduce it to the number of retained items.
     #[test]
-    fn asapv1_merge_preserves_compacted_sample_count() {
-        let mut source = KLLWrapper::new(200, Some(42)).with_wire_encoding(Encoding::Msgpack);
-        for value in 0..50_000 {
-            source.update(value as f64);
-        }
-        let mut target = KLLWrapper::new(200, Some(99)).with_wire_encoding(Encoding::Msgpack);
-
+    fn merge_preserves_compacted_sample_count() {
+        let mut source = KLLWrapper::new(200, Some(42));
+        source.update_batch((0..50_000).map(f64::from));
+        let mut target = KLLWrapper::new(200, Some(99));
         target.merge(&source).expect("merge compacted KLL");
-
         assert_eq!(target.inner().count(), source.inner().count());
         let p50 = target.quantile(0.5);
         assert!((23_000.0..=27_000.0).contains(&p50), "p50={p50}");
