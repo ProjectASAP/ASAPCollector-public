@@ -1,368 +1,73 @@
-//! CountMinSketch wrapper over [`asap_sketchlib::CountMinSketch`].
+//! Count-Min sketch wrapper over [`asap_sketchlib::CountMin`].
 //!
-//! Implements [`Sketch`] + [`FrequencySketch`].
+//! Implements [`Sketch`] + [`FrequencySketch`]. Snapshots are sketchlib's
+//! ASAPv1 envelope (kind `0x02 0x00`).
 
-use asap_sketchlib::proto::sketchlib::{
-    sketch_envelope, CountMinState, CounterType, SketchEnvelope as ProtoEnvelope,
-};
-use asap_sketchlib::{CountMinSketch, MessagePackCodec};
-use prost::Message;
+use asap_sketchlib::{CountMin, DataInput, RegularPath, Vector2D, MATRIX_MAX_ROWS};
 
-use crate::envelope::Encoding;
 use crate::observation::Observation;
-use crate::precompute::{
-    DeltaResult, FrequencyEntry, FrequencySketch, PrecomputeError, Sketch, SketchObserver,
-};
+use crate::precompute::{FrequencyEntry, FrequencySketch, PrecomputeError, Sketch, SketchObserver};
 
-/// Width, in bits, of the single 64-bit per-item hash that sketchlib's
-/// CMS / CountSketch bit-slice across rows. Each row consumes
-/// `ceil(log2(cols))` bits; once `rows * bitsPerRow > 64` the high rows
-/// read shifted-out (zero) bits and collapse onto column 0.
-const MAX_ROW_HASH_BITS: usize = 64;
+type Cms = CountMin<Vector2D<i64>, RegularPath>;
 
-/// Clamp `rows` so `rows * ceil(log2(cols)) <= 64`. `cols` is assumed
-/// already rounded to a power of two, so `cols.trailing_zeros()` ==
-/// `log2(cols)` == the per-row bit width. When `bits_per_row == 0`
-/// (cols == 1) every row maps to column 0 regardless, so the slicing
-/// never overflows and `rows` is left as-is. Returns at least 1.
-pub(crate) fn clamp_rows_for_hash_bits(rows: usize, cols: usize) -> usize {
-    let bits_per_row = cols.trailing_zeros() as usize;
-    if bits_per_row == 0 {
-        return rows.max(1);
-    }
-    let max_rows = (MAX_ROW_HASH_BITS / bits_per_row).max(1);
-    rows.min(max_rows).max(1)
-}
-
-/// CountMinSketch wrapper.
+/// Count-Min sketch wrapper. Keys are raw bytes.
 pub struct CMSWrapper {
-    sk: CountMinSketch,
-    rows: usize,
-    cols: usize,
-    /// Outbound wire format for this series' snapshots/deltas. Baked from
-    /// `cfg.encoding` by the OTAP sketch factory.
-    wire_encoding: Encoding,
+    sk: Cms,
 }
 
 impl CMSWrapper {
-    /// Construct a CMS with the given dimensions.
-    ///
-    /// The dimensions are normalized as follows for byte-parity:
-    ///
-    /// - `cols` is rounded UP to the next power of two (after a floor of
-    ///   1). sketchlib's CMS folds inserts with `% cols` but masks /
-    ///   bit-slices the query hash assuming a power-of-two width, so a
-    ///   non-pow2 cols mis-indexes. The canonical `cols = 2000` config
-    ///   rounds to `2048`.
-    /// - `rows` is clamped so `rows * log2(cols) <= 64` (the single
-    ///   64-bit per-item hash budget); beyond that the high rows read
-    ///   shifted-out (zero) bits and collapse onto column 0.
-    ///
-    /// The normalized `rows`/`cols` are stored on the struct AND used to
-    /// build the underlying `CountMinSketch`, so `build_state` serializes
-    /// the normalized dimensions onto the wire.
+    /// Construct a CMS with `rows` hash rows (clamped to `1..=MATRIX_MAX_ROWS`,
+    /// the number of independent sketchlib row seeds) and `cols` columns.
     pub fn new(rows: usize, cols: usize) -> Self {
-        let cols = cols.max(1).next_power_of_two();
-        let rows = clamp_rows_for_hash_bits(rows, cols);
         Self {
-            sk: CountMinSketch::new(rows, cols),
-            rows,
-            cols,
-            wire_encoding: Encoding::ProtoFull,
+            sk: Cms::with_dimensions(rows.clamp(1, MATRIX_MAX_ROWS), cols.max(1)),
         }
     }
 
-    /// Set the outbound wire format (proto vs msgpack). Builder form used
-    /// by the OTAP sketch factory to bake in `cfg.encoding`.
-    pub fn with_wire_encoding(mut self, encoding: Encoding) -> Self {
-        self.wire_encoding = encoding;
-        self
+    /// Decode a full ASAPv1 snapshot.
+    pub fn from_snapshot(bytes: &[u8]) -> Result<Self, PrecomputeError> {
+        Cms::deserialize_from_bytes(bytes)
+            .map(|sk| Self { sk })
+            .map_err(|e| PrecomputeError::Other(format!("CMSWrapper decode: {e}")))
     }
 
-    /// Insert a string-keyed weighted observation.
-    pub fn update(&mut self, key: &str, value: f64) {
-        self.sk.update(key, value);
+    /// Add `count` occurrences of `key`.
+    pub fn update(&mut self, key: &[u8], count: i64) {
+        self.sk.insert_many(&DataInput::Bytes(key), count);
     }
 
-    /// Borrow the underlying `CountMinSketch`.
-    pub fn inner(&self) -> &CountMinSketch {
+    /// Borrow the underlying sketch.
+    pub fn inner(&self) -> &Cms {
         &self.sk
-    }
-
-    fn build_state(&self) -> CountMinState {
-        // Emit packed sint64 `counts_int` (Opt-2: 4–8× smaller than
-        // f64 for typical small-integer counter values) and per-row
-        // L1/L2 norms (the sketch maintains `L1[r] += weight` and
-        // `L2[r] += curr*curr - prev*prev`, which collapse to
-        // `sum_c count[r][c]` and `sum_c count[r][c]^2` for the
-        // unweighted unit-step stream the parity harness drives — the
-        // only producer pattern this wire path serves today). Omit
-        // `sum_counts` / `sum2_counts` (Frequency-Only mode) to match
-        // the portable serialization payload bit-for-bit.
-        let matrix = self.sk.sketch();
-        let mut counts_int = Vec::with_capacity(self.rows * self.cols);
-        let mut l1 = Vec::with_capacity(self.rows);
-        let mut l2 = Vec::with_capacity(self.rows);
-        for row in matrix.iter().take(self.rows) {
-            let mut row_l1 = 0.0f64;
-            let mut row_l2 = 0.0f64;
-            for &cell in row.iter().take(self.cols) {
-                counts_int.push(cell as i64);
-                row_l1 += cell;
-                row_l2 += cell * cell;
-            }
-            l1.push(row_l1);
-            l2.push(row_l2);
-        }
-        CountMinState {
-            rows: self.rows as u32,
-            cols: self.cols as u32,
-            counter_type: CounterType::Int64 as i32,
-            counts_int,
-            counts_float: Vec::new(),
-            sum_counts: Vec::new(),
-            sum2_counts: Vec::new(),
-            l1,
-            l2,
-        }
-    }
-
-    fn encode_envelope(&self) -> Vec<u8> {
-        let env = ProtoEnvelope {
-            format_version: 1,
-            producer: None,
-            hash_spec: None,
-            sample_p: 0.0,
-            sketch_state: Some(sketch_envelope::SketchState::CountMin(self.build_state())),
-        };
-        let mut buf = Vec::with_capacity(env.encoded_len());
-        env.encode(&mut buf).expect("prost encode");
-        buf
-    }
-
-    fn decode_envelope(bytes: &[u8]) -> Result<CountMinSketch, PrecomputeError> {
-        let env = ProtoEnvelope::decode(bytes)
-            .map_err(|e| PrecomputeError::Other(format!("CMSWrapper decode: {e}")))?;
-        let state = match env.sketch_state {
-            Some(sketch_envelope::SketchState::CountMin(s)) => s,
-            _ => {
-                return Err(PrecomputeError::Other(
-                    "CMSWrapper: envelope did not carry CountMinState".into(),
-                ));
-            }
-        };
-        let rows = state.rows as usize;
-        let cols = state.cols as usize;
-        let mut matrix = vec![vec![0.0f64; cols]; rows];
-        if !state.counts_float.is_empty() {
-            for (r, row) in matrix.iter_mut().enumerate().take(rows) {
-                for (c, cell) in row.iter_mut().enumerate().take(cols) {
-                    let idx = r * cols + c;
-                    if idx < state.counts_float.len() {
-                        *cell = state.counts_float[idx];
-                    }
-                }
-            }
-        } else if !state.counts_int.is_empty() {
-            for (r, row) in matrix.iter_mut().enumerate().take(rows) {
-                for (c, cell) in row.iter_mut().enumerate().take(cols) {
-                    let idx = r * cols + c;
-                    if idx < state.counts_int.len() {
-                        *cell = state.counts_int[idx] as f64;
-                    }
-                }
-            }
-        }
-        Ok(CountMinSketch::from_legacy_matrix(matrix, rows, cols))
-    }
-
-    fn is_empty(&self) -> bool {
-        let m = self.sk.sketch();
-        m.iter().all(|row| row.iter().all(|&v| v == 0.0))
     }
 }
 
 impl Sketch for CMSWrapper {
     fn snapshot(&self) -> Result<Vec<u8>, PrecomputeError> {
-        if self.is_empty() {
+        if self.sk.as_storage().as_slice().iter().all(|&c| c == 0) {
             return Ok(Vec::new());
         }
-        if self.wire_encoding.is_msgpack() {
-            return self
-                .sk
-                .to_msgpack()
-                .map_err(|e| PrecomputeError::Other(format!("CMSWrapper msgpack snapshot: {e}")));
-        }
-        Ok(self.encode_envelope())
-    }
-
-    fn compute_delta_against(
-        &self,
-        prev: &[u8],
-        threshold: u64,
-    ) -> Result<DeltaResult, PrecomputeError> {
-        // Decode the prior snapshot envelope, then diff via
-        // `asap_sketchlib`'s `CountMinSketch::compute_delta`. On an empty /
-        // undecodable prior, or an empty current sketch, fall back to a
-        // full snapshot so the emit path always produces a valid payload.
-        //
-        // Under per-window delta-against-empty (the snapshot cache resets
-        // the cached base to the empty-sketch snapshot at each window
-        // close), `prev` decodes to an empty `CountMinSketch`, so the
-        // computed delta IS this window's full per-cell matrix encoded as
-        // cell deltas — no cross-window subtraction.
-        if self.is_empty() {
-            let full = self.snapshot()?;
-            return Ok(DeltaResult {
-                payload: full,
-                is_full: true,
-            });
-        }
-        if prev.is_empty() {
-            let full = self.snapshot()?;
-            return Ok(DeltaResult {
-                payload: full,
-                is_full: true,
-            });
-        }
-        if self.wire_encoding.is_msgpack() {
-            let prev_sk = match CountMinSketch::from_msgpack(prev) {
-                Ok(sk) => sk,
-                Err(_) => {
-                    let full = self.snapshot()?;
-                    return Ok(DeltaResult {
-                        payload: full,
-                        is_full: true,
-                    });
-                }
-            };
-            return match self.sk.compute_delta_msgpack(&prev_sk, threshold as f64) {
-                Ok(delta) => Ok(DeltaResult {
-                    payload: delta,
-                    is_full: false,
-                }),
-                Err(_) => {
-                    let full = self.snapshot()?;
-                    Ok(DeltaResult {
-                        payload: full,
-                        is_full: true,
-                    })
-                }
-            };
-        }
-        let prev_sk = match Self::decode_envelope(prev) {
-            Ok(sk) => sk,
-            Err(_) => {
-                let full = self.snapshot()?;
-                return Ok(DeltaResult {
-                    payload: full,
-                    is_full: true,
-                });
-            }
-        };
-        match self.sk.compute_delta(&prev_sk, threshold as f64) {
-            Ok(delta) => Ok(DeltaResult {
-                payload: delta,
-                is_full: false,
-            }),
-            Err(_) => {
-                let full = self.snapshot()?;
-                Ok(DeltaResult {
-                    payload: full,
-                    is_full: true,
-                })
-            }
-        }
-    }
-
-    fn apply_delta(&mut self, payload: &[u8]) -> Result<(), PrecomputeError> {
-        if payload.is_empty() {
-            return Ok(());
-        }
-        // Dispatch on payload shape. A full-state envelope (the
-        // `SketchEnvelope{CountMinState}` wire format) takes the decode +
-        // merge path; otherwise the payload is a `CountMinDelta` proto and
-        // is applied additively via `apply_delta_bytes`.
-        if let Ok(other) = Self::decode_envelope(payload) {
-            return self
-                .sk
-                .merge(&other)
-                .map_err(|e| PrecomputeError::Other(format!("CMSWrapper merge: {e}")));
-        }
         self.sk
-            .apply_delta_bytes(payload)
-            .map_err(|e| PrecomputeError::Other(format!("CMSWrapper apply_delta: {e}")))
+            .serialize_to_bytes()
+            .map_err(|e| PrecomputeError::Other(format!("CMSWrapper snapshot: {e}")))
     }
 
-    fn apply_delta_encoded(
-        &mut self,
-        payload: &[u8],
-        encoding: Encoding,
-    ) -> Result<(), PrecomputeError> {
-        if payload.is_empty() {
-            return Ok(());
-        }
-        match encoding {
-            Encoding::MsgpackDelta => self.sk.apply_delta_msgpack_bytes(payload).map_err(|e| {
-                PrecomputeError::Other(format!("CMSWrapper msgpack apply_delta: {e}"))
-            }),
-            Encoding::Msgpack => {
-                let other = CountMinSketch::from_msgpack(payload).map_err(|e| {
-                    PrecomputeError::Other(format!("CMSWrapper msgpack decode: {e}"))
-                })?;
-                self.sk
-                    .merge(&other)
-                    .map_err(|e| PrecomputeError::Other(format!("CMSWrapper merge: {e}")))
-            }
-            _ => self.apply_delta(payload),
-        }
-    }
-
-    fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
-        let bytes = other.snapshot()?;
+    fn merge_snapshot(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError> {
         if bytes.is_empty() {
             return Ok(());
         }
-        // `other.snapshot()` is in that wrapper's `wire_encoding`; same
-        // Precompute ⇒ same encoding as ours, so decode by our own tag.
-        let decoded = if self.wire_encoding.is_msgpack() {
-            CountMinSketch::from_msgpack(&bytes).map_err(|e| {
-                PrecomputeError::Other(format!("CMSWrapper msgpack merge decode: {e}"))
-            })?
-        } else {
-            Self::decode_envelope(&bytes)?
-        };
-        self.sk
-            .merge(&decoded)
-            .map_err(|e| PrecomputeError::Other(format!("CMSWrapper merge: {e}")))
+        let other = Self::from_snapshot(bytes)?;
+        if (self.sk.rows(), self.sk.cols()) != (other.sk.rows(), other.sk.cols()) {
+            return Err(PrecomputeError::Other(
+                "CMSWrapper merge: dimension mismatch".into(),
+            ));
+        }
+        self.sk.merge(&other.sk);
+        Ok(())
     }
 
     fn reset(&mut self) {
-        self.sk = CountMinSketch::new(self.rows, self.cols);
-    }
-
-    fn delta_against_empty_base(&self) -> Result<Option<Vec<u8>>, PrecomputeError> {
-        // CMS opts in to per-window deltas. After a window-close emit the
-        // snapshot cache caches THIS
-        // — the encoded envelope of an EMPTY CountMinSketch of the same
-        // dimensions — so the next window's `compute_delta_against` diffs
-        // against empty and emits that window's own per-cell matrix as a
-        // delta (no cross-window subtraction).
-        //
-        // We encode the empty envelope rather than returning
-        // `Sketch::snapshot()` of an empty sketch, because the latter
-        // short-circuits to empty bytes (the runtime drops empty
-        // payloads), and empty bytes would make `compute_delta_against`
-        // fall back to a full snapshot instead of a delta.
-        if self.wire_encoding.is_msgpack() {
-            let empty = CountMinSketch::new(self.rows, self.cols);
-            let bytes = empty.to_msgpack().map_err(|e| {
-                PrecomputeError::Other(format!("CMSWrapper msgpack empty base: {e}"))
-            })?;
-            return Ok(Some(bytes));
-        }
-        let empty = CMSWrapper::new(self.rows, self.cols);
-        Ok(Some(empty.encode_envelope()))
+        self.sk = Cms::with_dimensions(self.sk.rows(), self.sk.cols());
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -372,34 +77,21 @@ impl Sketch for CMSWrapper {
 
 impl FrequencySketch for CMSWrapper {
     fn estimate_count(&self, key: &[u8]) -> f64 {
-        if key.is_empty() {
-            return 0.0;
-        }
-        let s = std::str::from_utf8(key).unwrap_or_default();
-        if s.is_empty() {
-            return 0.0;
-        }
-        self.sk.estimate(s)
+        self.sk.estimate(&DataInput::Bytes(key)) as f64
     }
 
+    /// A plain Count-Min does not track keys; use
+    /// [`super::CMSHeapWrapper`] for top-k.
     fn top_k(&self, _k: usize) -> Vec<FrequencyEntry> {
-        // CountMinSketch is a frequency estimator over a known key
-        // set; it does not natively track top-k. Returning an empty
-        // slice is the expected behavior.
         Vec::new()
     }
 }
 
-/// Observer routing observations into the wrapper, counting the
-/// per-attribute-set frequency.
+/// Observer counting each observation's key once.
 ///
-/// The key is the observation's `bytes` value when present (preserves
-/// pre-shaped callers / unit tests) or, for OTAP scalar observations
-/// (Float-kind, empty bytes), the full label set via
-/// [`crate::matchers::attributes_key`]. Each observation contributes
-/// weight `1.0`. We accept any value kind (including Float decoded from the
-/// OTAP `value` column) so CMS records the attribute-set on the OTAP
-/// edge instead of silently dropping every observation.
+/// The key is the observation's `bytes` value when present, otherwise its
+/// full label set via [`crate::matchers::attributes_key`]. Any value kind
+/// is accepted (OTAP scalar rows arrive as `Float` with empty bytes).
 pub struct CMSObserver;
 
 impl SketchObserver for CMSObserver {
@@ -410,12 +102,14 @@ impl SketchObserver for CMSObserver {
             .ok_or_else(|| {
                 PrecomputeError::Other("CMSObserver: sketch is not a CMSWrapper".into())
             })?;
-        let key = if !obs.value.bytes.is_empty() {
-            String::from_utf8_lossy(&obs.value.bytes).into_owned()
+        if obs.value.bytes.is_empty() {
+            w.update(
+                crate::matchers::attributes_key(&obs.labels, &[]).as_bytes(),
+                1,
+            );
         } else {
-            crate::matchers::attributes_key(&obs.labels, &[])
-        };
-        w.update(&key, 1.0);
+            w.update(&obs.value.bytes, 1);
+        }
         Ok(())
     }
 }
@@ -426,50 +120,50 @@ mod tests {
 
     #[test]
     fn new_wrapper_is_empty() {
-        let w = CMSWrapper::new(4, 32);
-        assert_eq!(w.snapshot().unwrap().len(), 0);
+        assert!(CMSWrapper::new(4, 32).snapshot().unwrap().is_empty());
     }
 
     #[test]
     fn update_then_estimate() {
         let mut w = CMSWrapper::new(8, 64);
-        for _ in 0..50 {
-            w.update("k1", 1.0);
-        }
-        for _ in 0..3 {
-            w.update("k2", 1.0);
-        }
-        let k1 = w.estimate_count(b"k1");
-        let k2 = w.estimate_count(b"k2");
-        assert!(k1 >= 50.0, "k1 underestimate: {k1}");
-        assert!(k2 >= 3.0, "k2 underestimate: {k2}");
+        w.update(b"k1", 50);
+        w.update(b"k2", 3);
+        assert!(w.estimate_count(b"k1") >= 50.0);
+        assert!(w.estimate_count(b"k2") >= 3.0);
     }
 
     #[test]
-    fn snapshot_roundtrip_preserves_matrix() {
+    fn snapshot_round_trips_through_asapv1() {
         let mut w = CMSWrapper::new(4, 8);
-        w.update("k", 1.0);
+        w.update(b"k", 1);
         let bytes = w.snapshot().unwrap();
-        let decoded = CMSWrapper::decode_envelope(&bytes).unwrap();
-        assert_eq!(decoded.sketch(), w.sk.sketch());
+        let decoded = CMSWrapper::from_snapshot(&bytes).unwrap();
+        assert_eq!(
+            decoded.inner().as_storage().as_slice(),
+            w.inner().as_storage().as_slice()
+        );
     }
 
-    // B6 regression: on the OTAP edge, observations arrive Float-kind
-    // with empty bytes. CMS must (a) accept them instead of erroring
-    // and (b) count the per-attribute-set key, NOT the metric name.
+    #[test]
+    fn merge_adds_counts() {
+        let mut a = CMSWrapper::new(4, 64);
+        let mut b = CMSWrapper::new(4, 64);
+        a.update(b"k", 2);
+        b.update(b"k", 5);
+        a.merge(&b).unwrap();
+        assert_eq!(a.estimate_count(b"k"), 7.0);
+    }
+
+    /// OTAP scalar rows arrive Float-kind with empty bytes; CMS must count
+    /// the attribute set, not the metric name.
     #[test]
     fn observe_counts_attribute_set_not_metric_name() {
         use crate::matchers::attributes_key;
-        use crate::observation::{KeyValue, Observation, ObservationValue};
-        use crate::precompute::SketchObserver;
+        use crate::observation::{KeyValue, ObservationValue};
 
         let mut sketch = CMSWrapper::new(8, 64);
-        let observer = CMSObserver;
         let labels = vec![KeyValue::new("host", "h1")];
-        // Float-kind, empty bytes — exactly what the OTAP decoder
-        // produces for a scalar row.
-        let n = 25;
-        for _ in 0..n {
+        for _ in 0..25 {
             let obs = Observation::new(
                 1_000,
                 "flow_count",
@@ -477,21 +171,11 @@ mod tests {
                 labels.clone(),
                 ObservationValue::float(1.0),
             );
-            observer.observe(&mut sketch, &obs).expect("observe");
+            CMSObserver.observe(&mut sketch, &obs).expect("observe");
         }
-
         let attr_key = attributes_key(&labels, &[]);
         assert_eq!(attr_key, "host=h1;");
-        let counted = sketch.estimate_count(attr_key.as_bytes());
-        assert!(
-            counted >= n as f64,
-            "attribute-set key undercounted: {counted} < {n}"
-        );
-        // The metric NAME must not be the counted subject.
-        let metric_count = sketch.estimate_count(b"flow_count");
-        assert!(
-            metric_count < n as f64,
-            "metric name was counted ({metric_count}); should be the attribute set"
-        );
+        assert!(sketch.estimate_count(attr_key.as_bytes()) >= 25.0);
+        assert!(sketch.estimate_count(b"flow_count") < 25.0);
     }
 }

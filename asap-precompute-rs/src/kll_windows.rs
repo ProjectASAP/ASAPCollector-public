@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::config::{AggregationMode, PrecomputeConfig, PrecomputeConfigSet};
-use crate::envelope::{Encoding, SketchEnvelope, SketchType};
+use crate::envelope::{SketchEnvelope, SketchType};
 use crate::matchers::series_attrs;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
 use crate::precompute::{Precompute, PrecomputeError, Sketch, StatsSnapshot};
@@ -43,8 +43,8 @@ pub struct KllWindowStore {
 
 impl KllWindowStore {
     /// Create a store. Retention must be a positive multiple of the pane size.
-    /// Only KLL/ASAPv1 full sketches are accepted; no delta replay or partial
-    /// pane splitting is supported.
+    /// Only KLL sketches are accepted; partial pane splitting is not
+    /// supported.
     pub fn new(
         config: PrecomputeConfig,
         pane: Duration,
@@ -64,11 +64,8 @@ impl KllWindowStore {
                 "retention must be a positive multiple of a nonzero millisecond pane",
             ));
         }
-        if config.sketch_type != SketchType::KLLSketch
-            || config.encoding != Encoding::Msgpack
-            || config.delta_transmission
-        {
-            return Err(invalid("requires KLL with full ASAPv1/Msgpack encoding"));
+        if config.sketch_type != SketchType::KLLSketch {
+            return Err(invalid("requires KLL"));
         }
         let k = config.sketch_params.get("k").copied().unwrap_or(200.0);
         if !k.is_finite() || k < 8.0 || k > i32::MAX as f64 || k.fract() != 0.0 {
@@ -154,7 +151,7 @@ impl KllWindowStore {
             .or_default()
             .entry(key)
             .or_insert_with(|| PaneSeries {
-                sketch: KLLWrapper::new(k, seed).with_wire_encoding(Encoding::Msgpack),
+                sketch: KLLWrapper::new(k, seed),
                 resource_labels: resource,
                 labels,
                 count: 0,
@@ -168,10 +165,7 @@ impl KllWindowStore {
     /// to the same pane. Overlapping wide sketches and unaligned panes are
     /// rejected because their observations cannot be assigned to one pane.
     pub fn merge_pane(&mut self, envelope: &SketchEnvelope) -> Result<(), PrecomputeError> {
-        if envelope.sketch_type != SketchType::KLLSketch
-            || envelope.encoding != Encoding::Msgpack
-            || envelope.payload.is_empty()
-        {
+        if envelope.sketch_type != SketchType::KLLSketch || envelope.payload.is_empty() {
             return Err(invalid(
                 "inbound pane must contain a full ASAPv1 KLL sketch",
             ));
@@ -189,9 +183,8 @@ impl KllWindowStore {
                 "inbound sketch must cover exactly one aligned pane",
             ));
         }
-        let mut sketch = KLLWrapper::new(self.k, self.seed).with_wire_encoding(Encoding::Msgpack);
         // Decode before changing state: invalid payloads cannot advance retention.
-        sketch.apply_delta_encoded(&envelope.payload, Encoding::Msgpack)?;
+        let sketch = KLLWrapper::from_snapshot(&envelope.payload)?;
         let cutoff = self.closed_until.saturating_sub(self.retention_ms);
         if envelope.window_start_ms < cutoff {
             return Err(PrecomputeError::LateData);
@@ -206,7 +199,7 @@ impl KllWindowStore {
             .or_default()
             .entry(key)
             .or_insert_with(|| PaneSeries {
-                sketch: KLLWrapper::new(self.k, self.seed).with_wire_encoding(Encoding::Msgpack),
+                sketch: KLLWrapper::new(self.k, self.seed),
                 resource_labels: resource,
                 labels,
                 count: 0,
@@ -267,8 +260,7 @@ impl KllWindowStore {
         for (_, pane) in self.panes.range(start_ms..end_ms) {
             for (key, source) in pane {
                 let entry = merged.entry(key.clone()).or_insert_with(|| PaneSeries {
-                    sketch: KLLWrapper::new(self.k, self.seed)
-                        .with_wire_encoding(Encoding::Msgpack),
+                    sketch: KLLWrapper::new(self.k, self.seed),
                     resource_labels: source.resource_labels.clone(),
                     labels: source.labels.clone(),
                     count: 0,
@@ -288,9 +280,7 @@ impl KllWindowStore {
                     labels: entry.labels,
                     window_start_ms: start_ms,
                     window_end_ms: end_ms,
-                    encoding: Encoding::Msgpack,
                     payload: entry.sketch.snapshot()?,
-                    hash_spec: None,
                     metric_name: self.config.metric_name.clone(),
                     count: entry.count,
                     aggregation_temporality: 1,
@@ -327,13 +317,10 @@ impl KllWindowStore {
         }
         let mut results = Vec::new();
         for envelope in self.query(start_ms, end_ms)? {
-            let mut sketch =
-                KLLWrapper::new(self.k, self.seed).with_wire_encoding(Encoding::Msgpack);
-            sketch.apply_delta_encoded(&envelope.payload, Encoding::Msgpack)?;
+            let sketch = KLLWrapper::from_snapshot(&envelope.payload)?;
             for point in sketch.estimate(quantiles, 0) {
                 let mut result = envelope.clone();
                 result.payload.clear();
-                result.encoding = Encoding::Unspecified;
                 result.value = point.value;
                 result.labels.extend(point.labels);
                 results.push(result);

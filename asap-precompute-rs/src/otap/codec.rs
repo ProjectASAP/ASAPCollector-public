@@ -3,26 +3,8 @@
 
 //! Direct `SketchEnvelope <-> OtapPdata` binding — the real `OtapPdata`
 //! is built straight from a `&[SketchEnvelope]` slice, and a real
-//! `OtapPdata` is decoded straight into `Vec<Observation>`. No
-//! intermediate `RecordBatch` or `OtapMetricRecords` two-batch family
-//! in between.
-//!
-//! # Why direct, not via `encode_batch`/`decode_batch`/`records::{flatten,lift}`
-//!
-//! Those three exist as a *general*, real-OTAP-free carrier format —
-//! useful for other Strategy-B adapters (Telegraf, Vector) that might
-//! one day consume the same flat shape, and for testing this codec
-//! without any OTAP dependency at all. But this repo only ever ships
-//! to OTAP, and no second adapter has actually shown up. Going through
-//! them here would mean: `SketchEnvelope` -> flat `RecordBatch`
-//! (`encode_batch`) -> two-batch `OtapMetricRecords` (`lift`) -> real
-//! `OtapPdata` (this module) — three representations for what's really
-//! one job. This module skips straight to the last step, implementing
-//! OTAP's own `MetricsView` trait directly over `&[SketchEnvelope]`.
-//!
-//! `encode_batch`/`decode_batch`/`records::{flatten,lift}` still exist as a
-//! standalone Arrow adapter surface, but are not an additional node-to-node
-//! transport.
+//! `OtapPdata` is decoded straight into `Vec<Observation>`, by
+//! implementing OTAP's own `MetricsView` over `&[SketchEnvelope]`.
 //!
 //! # Native protocol mapping
 //!
@@ -84,41 +66,17 @@ use otel_arrow_dfe_pdata_views::views::metrics::{
 use otel_arrow_dfe_pdata_views::views::resource::ResourceView;
 
 use crate::config::{sketch_size_string, SketchParams};
-use crate::envelope::{Encoding, SketchEnvelope};
+use crate::envelope::{SketchEnvelope, SketchType};
 use crate::observation::{KeyValue, Observation, ObservationValue};
 
-use super::decode::{parse_encoding, parse_sketch_type};
-use super::schema::{
-    OTAP_ATTR_AGG_ID as ATTR_AGG_ID, OTAP_ATTR_ENCODING as ATTR_ENCODING,
-    OTAP_ATTR_ENVELOPE as ATTR_ENVELOPE, OTAP_ATTR_HASH_FUNCTION as ATTR_HASH_FUNCTION,
-    OTAP_ATTR_HASH_SEED as ATTR_HASH_SEED, OTAP_ATTR_SCHEMA_VERSION as ATTR_SCHEMA_VERSION,
-    OTAP_ATTR_SERIES_ID as ATTR_SERIES_ID, OTAP_ATTR_SKETCH_SIZE as ATTR_SKETCH_SIZE,
-    OTAP_ATTR_SKETCH_TYPE as ATTR_SKETCH_TYPE, OTAP_ATTR_WINDOW_END_MS as ATTR_WINDOW_END_MS,
-    OTAP_ATTR_WINDOW_START_MS as ATTR_WINDOW_START_MS,
+use crate::sketches::{
+    CMSHeapWrapper, CMSWrapper, CountSketchWrapper, DDSketchWrapper, HLLWrapper, KLLWrapper,
 };
 
-fn resolve_hash_seed(
-    sketch_type: crate::envelope::SketchType,
-    spec: Option<&asap_sketchlib::proto::sketchlib::HashSpec>,
-) -> (Option<u64>, Option<String>) {
-    let Some(spec) = spec else {
-        return (None, None);
-    };
-    let seed = if matches!(
-        sketch_type,
-        crate::envelope::SketchType::CountSketch | crate::envelope::SketchType::CountMinSketch
-    ) {
-        spec.seed_list.first().copied()
-    } else {
-        spec.seed_list
-            .get(spec.canonical_seed_index as usize)
-            .copied()
-    };
-    let function = asap_sketchlib::proto::sketchlib::HashAlgorithm::try_from(spec.algorithm)
-        .ok()
-        .map(|algorithm| algorithm.as_str_name().to_owned());
-    (seed, function)
-}
+use super::schema::{
+    ATTR_AGG_ID, ATTR_ENVELOPE, ATTR_SCHEMA_VERSION, ATTR_SERIES_ID, ATTR_SKETCH_SIZE,
+    ATTR_SKETCH_TYPE, ATTR_WINDOW_END_MS, ATTR_WINDOW_START_MS,
+};
 
 /// Failure modes for [`encode_envelopes_to_pdata`] / [`decode_pdata_to_observations`].
 #[derive(Debug, Error)]
@@ -185,7 +143,7 @@ impl OtapSketchEncoder {
     /// Encodes one flush while retaining series identity across later flushes.
     pub fn encode(&mut self, envelopes: &[SketchEnvelope]) -> Result<OtapPdata, CodecError> {
         for env in envelopes {
-            validate_self_describing_payload(env.sketch_type, env.encoding, &env.payload)
+            validate_self_describing_payload(env.sketch_type, &env.payload)
                 .map_err(CodecError::Encode)?;
         }
         let series_ids = envelopes
@@ -219,32 +177,25 @@ impl OtapSketchEncoder {
     }
 }
 
-/// Enforces the native OTAP carrier contract for sketch records.
-///
-/// `sketch.envelope` contains the canonical sketchlib ASAPv1 envelope:
-/// magic, version, kind ID, length-prefixed metadata, and payload.
-fn validate_self_describing_payload(
-    sketch_type: crate::envelope::SketchType,
-    encoding: Encoding,
-    payload: &[u8],
-) -> Result<(), String> {
+/// Enforces the native OTAP carrier contract for sketch records: a
+/// non-empty `sketch.envelope` must decode as the sketchlib ASAPv1 envelope
+/// of the declared `sketch.type`.
+fn validate_self_describing_payload(sketch_type: SketchType, payload: &[u8]) -> Result<(), String> {
     if payload.is_empty() {
         return Ok(());
     }
-    if encoding != Encoding::Msgpack {
-        return Err(format!(
-            "sketch.envelope requires the self-describing ASAPv1 MessagePack format, got {}",
-            encoding.name()
-        ));
-    }
-    if sketch_type == crate::envelope::SketchType::CountMinSketchWithHeap {
-        return crate::sketches::CMSHeapWrapper::from_snapshot(payload)
-            .map(|_| ())
-            .map_err(|error| format!("invalid self-describing CMSHeap sketch.envelope: {error}"));
-    }
-    asap_sketchlib::sketches::KLL::<f64>::deserialize_from_bytes(payload)
-        .map(|_| ())
-        .map_err(|error| format!("invalid self-describing KLL sketch.envelope: {error}"))
+    let decoded = match sketch_type {
+        SketchType::DDSketch => DDSketchWrapper::from_snapshot(payload).map(drop),
+        SketchType::KLLSketch => KLLWrapper::from_snapshot(payload).map(drop),
+        SketchType::HLLSketch => HLLWrapper::from_snapshot(payload).map(drop),
+        SketchType::CountSketch => CountSketchWrapper::from_snapshot(payload).map(drop),
+        SketchType::CountMinSketch => CMSWrapper::from_snapshot(payload).map(drop),
+        SketchType::CountMinSketchWithHeap => CMSHeapWrapper::from_snapshot(payload).map(drop),
+        SketchType::Unspecified => {
+            return Err("sketch.envelope requires a sketch.type".into());
+        }
+    };
+    decoded.map_err(|error| format!("invalid {} sketch.envelope: {error}", sketch_type.name()))
 }
 
 fn append_labels_to_key(key: &mut String, labels: &[KeyValue]) {
@@ -264,9 +215,7 @@ fn append_labels_to_key(key: &mut String, labels: &[KeyValue]) {
 fn same_resource(left: &SketchEnvelope, right: &SketchEnvelope) -> bool {
     if left.agg_id != right.agg_id
         || left.sketch_type != right.sketch_type
-        || left.encoding != right.encoding
         || left.schema_version != right.schema_version
-        || left.hash_spec != right.hash_spec
     {
         return false;
     }
@@ -289,8 +238,6 @@ struct AsapMetricsView<'a> {
 struct AsapResourceGroup {
     representative: usize,
     sketch_size: Option<String>,
-    hash_seed: Option<u64>,
-    hash_function: Option<String>,
     scopes: Vec<AsapScopeGroup>,
 }
 
@@ -311,14 +258,10 @@ impl<'a> AsapMetricsView<'a> {
                 .iter()
                 .position(|group| same_resource(&envelopes[group.representative], env))
                 .unwrap_or_else(|| {
-                    let (hash_seed, hash_function) =
-                        resolve_hash_seed(env.sketch_type, env.hash_spec.as_ref());
                     resources.push(AsapResourceGroup {
                         representative: row,
                         sketch_size: sketch_params
                             .and_then(|params| sketch_size_string(env.sketch_type, params)),
-                        hash_seed,
-                        hash_function,
                         scopes: Vec::new(),
                     });
                     resources.len() - 1
@@ -343,10 +286,8 @@ impl<'a> AsapMetricsView<'a> {
     }
 
     /// One row's worth of attributes, built directly from the
-    /// envelope's own fields — no intermediate Arrow columns. The
-    /// `_asap_*` Strategy-B carriers only appear when this row is
-    /// actually an envelope-payload row (see this module's doc, "A
-    /// real bug this rewrite fixes").
+    /// envelope's own fields. `sketch.envelope` only appears when this
+    /// row actually carries a sketch payload.
     fn attributes_for_row(&self, row: usize) -> Vec<AsapAttribute<'a>> {
         let env = &self.envelopes[row];
         let mut attrs = Vec::with_capacity(3);
@@ -800,7 +741,7 @@ impl<'a> AnyValueView<'a> for AsapAnyValueView<'a> {
     fn as_int64(&self) -> Option<i64> {
         match self.0 {
             // Lossy above i64::MAX, which ASAP never actually
-            // produces here (the only `_asap_*` int-typed attributes
+            // produces here (the only `sketch.*` int-typed attributes
             // are small counters/timestamps well under that bound).
             AsapAnyValue::Int(v) => Some(*v as i64),
             _ => None,
@@ -881,10 +822,6 @@ impl<'v, 'a> ResourceView for AsapResourceView<'v, 'a> {
                 value: AsapAnyValue::Str(env.sketch_type.name()),
             },
             AsapAttribute {
-                key: ATTR_ENCODING,
-                value: AsapAnyValue::Str(env.encoding.name()),
-            },
-            AsapAttribute {
                 key: ATTR_SCHEMA_VERSION,
                 value: AsapAnyValue::Int(u64::from(env.schema_version)),
             },
@@ -892,18 +829,6 @@ impl<'v, 'a> ResourceView for AsapResourceView<'v, 'a> {
         if let Some(value) = group.sketch_size.as_deref() {
             attrs.push(AsapAttribute {
                 key: ATTR_SKETCH_SIZE,
-                value: AsapAnyValue::Str(value),
-            });
-        }
-        if let Some(value) = group.hash_seed {
-            attrs.push(AsapAttribute {
-                key: ATTR_HASH_SEED,
-                value: AsapAnyValue::Int(value),
-            });
-        }
-        if let Some(value) = group.hash_function.as_deref() {
-            attrs.push(AsapAttribute {
-                key: ATTR_HASH_FUNCTION,
                 value: AsapAnyValue::Str(value),
             });
         }
@@ -1329,9 +1254,9 @@ pub fn describe_pdata_protocol(pdata: &OtapPdata) -> Result<String, CodecError> 
         if let Some(envelope) = observation.value.envelope {
             writeln!(
                 output,
-                "    +-- Metric  {}\n        |-- labels     {{{}}}\n        |-- value      self-describing sketch envelope ({} bytes)\n        |-- schema     agg_id={}  {}  {}  v{}\n        +-- window     [{}, {})",
+                "    +-- Metric  {}\n        |-- labels     {{{}}}\n        |-- value      self-describing sketch envelope ({} bytes)\n        |-- schema     agg_id={}  {}  v{}\n        +-- window     [{}, {})",
                 observation.metric, labels, envelope.payload.len(), envelope.agg_id,
-                envelope.sketch_type.name(), envelope.encoding.name(), envelope.schema_version,
+                envelope.sketch_type.name(), envelope.schema_version,
                 envelope.window_start_ms, envelope.window_end_ms
             )
             .expect("write String");
@@ -1426,12 +1351,7 @@ pub fn decode_pdata_to_observations(pdata: OtapPdata) -> Result<DecodeOutcome, C
                     ATTR_SCHEMA_VERSION => {
                         schema.schema_version = val.as_int64().filter(|v| *v >= 0).map(|v| v as u32)
                     }
-                    ATTR_ENCODING => {
-                        schema.encoding = val
-                            .as_string()
-                            .map(|s| String::from_utf8_lossy(s).into_owned())
-                    }
-                    ATTR_SKETCH_SIZE | ATTR_HASH_SEED | ATTR_HASH_FUNCTION => {}
+                    ATTR_SKETCH_SIZE => {}
                     _ => {
                         if let Some(s) = val.as_string() {
                             resource_labels
@@ -1525,12 +1445,20 @@ struct DecodeAccumulator {
     observations: Vec<Observation>,
 }
 
+/// Parses an optional `sketch.type` value; absent means `Unspecified`.
+fn parse_sketch_type(raw: Option<&str>) -> Result<SketchType, CodecError> {
+    match raw {
+        None => Ok(SketchType::Unspecified),
+        Some(raw) => SketchType::from_name(raw)
+            .ok_or_else(|| CodecError::Decode(format!("unknown sketch type {raw:?}"))),
+    }
+}
+
 #[derive(Default)]
 struct DecodeSchema {
     sketch_type: Option<String>,
     agg_id: Option<u64>,
     schema_version: Option<u32>,
-    encoding: Option<String>,
 }
 
 impl DecodeAccumulator {
@@ -1574,22 +1502,8 @@ impl DecodeAccumulator {
             .ok_or_else(|| {
                 CodecError::Decode("summary sketch is missing sketch.envelope".into())
             })?;
-        let sketch_type = inherited_schema
-            .sketch_type
-            .as_deref()
-            .map(|value| parse_sketch_type(0, value))
-            .transpose()
-            .map_err(|error| CodecError::Decode(error.to_string()))?
-            .unwrap_or(crate::envelope::SketchType::Unspecified);
-        let encoding = inherited_schema
-            .encoding
-            .as_deref()
-            .map(|value| parse_encoding(0, value))
-            .transpose()
-            .map_err(|error| CodecError::Decode(error.to_string()))?
-            .unwrap_or(crate::envelope::Encoding::Unspecified);
-        validate_self_describing_payload(sketch_type, encoding, &payload)
-            .map_err(CodecError::Decode)?;
+        let sketch_type = parse_sketch_type(inherited_schema.sketch_type.as_deref())?;
+        validate_self_describing_payload(sketch_type, &payload).map_err(CodecError::Decode)?;
         let timestamp_ms = dp.time_unix_nano() / 1_000_000;
         let envelope = SketchEnvelope {
             schema_version: inherited_schema.schema_version.unwrap_or(0),
@@ -1599,9 +1513,7 @@ impl DecodeAccumulator {
             labels: labels.clone(),
             window_start_ms: window_start_ms.unwrap_or(dp.start_time_unix_nano() / 1_000_000),
             window_end_ms: window_end_ms.unwrap_or(timestamp_ms),
-            encoding,
             payload,
-            hash_spec: None,
             metric_name: metric_name.to_string(),
             count: dp.count(),
             aggregation_temporality: 0,
@@ -1618,14 +1530,9 @@ impl DecodeAccumulator {
     }
 
     /// Builds and appends one `Observation` from a data point — a
-    /// no-op if the data point carries no value.
-    ///
-    /// Mirrors `decode.rs`'s `decode_batch` row-decode logic exactly
-    /// (same `_asap_*` key recognition, same envelope-vs-scalar
-    /// routing, same hard error on an unrecognized
-    /// `_asap_sketch_type`/`_asap_encoding`), just reading attributes
-    /// directly off the real `NumberDataPointView` instead of off
-    /// Arrow columns.
+    /// no-op if the data point carries no value. A non-empty
+    /// `sketch.envelope` attribute routes it as a sketch envelope, validated
+    /// like a Summary carrier; an unrecognized `sketch.type` is an error.
     fn push_data_point<D: NumberDataPointView>(
         &mut self,
         dp: D,
@@ -1649,7 +1556,6 @@ impl DecodeAccumulator {
         let mut schema_version = inherited_schema.schema_version;
         let mut window_start_ms: Option<u64> = None;
         let mut window_end_ms: Option<u64> = None;
-        let mut encoding_raw = inherited_schema.encoding.clone();
         let mut labels: Vec<KeyValue> = series_labels.to_vec();
 
         for attr in dp.attributes() {
@@ -1672,17 +1578,10 @@ impl DecodeAccumulator {
                 ATTR_WINDOW_END_MS => {
                     window_end_ms = val.as_int64().filter(|v| *v >= 0).map(|v| v as u64);
                 }
-                ATTR_ENCODING => {
-                    encoding_raw = val
-                        .as_string()
-                        .map(|s| String::from_utf8_lossy(s).into_owned());
-                }
                 _ => {
                     // Non-reserved: treated as a per-row label. Only
-                    // string-typed values are representable as a
-                    // label (matches decode.rs's Utf8-only label
-                    // column behavior) — a non-string, non-reserved
-                    // attribute is dropped, same as the legacy path.
+                    // string-typed values are representable as a label;
+                    // a non-string, non-reserved attribute is dropped.
                     if let Some(s) = val.as_string() {
                         labels.push(KeyValue::new(key, String::from_utf8_lossy(s).into_owned()));
                     }
@@ -1690,26 +1589,13 @@ impl DecodeAccumulator {
             }
         }
 
-        // `.filter(|b| !b.is_empty())`: defensive guard against the
-        // same empty-but-present-Binary-cell class of bug this
-        // module's encoder fixes on the way out (see module doc, "A
-        // real bug this rewrite fixes") — an empty `_asap_envelope`
-        // from some other producer still routes to the scalar path
-        // here rather than an empty-payload envelope.
+        // An empty `sketch.envelope` from some other producer routes to
+        // the scalar path rather than an empty-payload envelope.
         let observation_value = match envelope_bytes.filter(|b| !b.is_empty()) {
             Some(payload) => {
-                let sketch_type = match sketch_type_raw {
-                    Some(s) => {
-                        parse_sketch_type(0, &s).map_err(|e| CodecError::Decode(e.to_string()))?
-                    }
-                    None => crate::envelope::SketchType::Unspecified,
-                };
-                let encoding = match encoding_raw {
-                    Some(s) => {
-                        parse_encoding(0, &s).map_err(|e| CodecError::Decode(e.to_string()))?
-                    }
-                    None => crate::envelope::Encoding::Unspecified,
-                };
+                let sketch_type = parse_sketch_type(sketch_type_raw.as_deref())?;
+                validate_self_describing_payload(sketch_type, &payload)
+                    .map_err(CodecError::Decode)?;
                 ObservationValue::envelope(SketchEnvelope {
                     schema_version: schema_version.unwrap_or(0),
                     sketch_type,
@@ -1718,9 +1604,7 @@ impl DecodeAccumulator {
                     labels: labels.clone(),
                     window_start_ms: window_start_ms.unwrap_or(0),
                     window_end_ms: window_end_ms.unwrap_or(0),
-                    encoding,
                     payload,
-                    hash_spec: None,
                     metric_name: metric_name.to_string(),
                     count: 0,
                     aggregation_temporality: 0,
@@ -1744,7 +1628,6 @@ impl DecodeAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::SketchType;
     use crate::observation::{KeyValue as Kv, ObservationValueKind};
     use crate::precompute::Sketch;
     use crate::sketches::KLLWrapper;
@@ -1763,9 +1646,7 @@ mod tests {
             labels: vec![Kv::new(attr_key, attr_value)],
             window_start_ms: 1_000,
             window_end_ms: 2_000,
-            encoding: Encoding::Unspecified,
             payload: Vec::new(),
-            hash_spec: None,
             metric_name: metric_name.to_string(),
             count: 0,
             aggregation_temporality: 0,
@@ -1866,9 +1747,8 @@ mod tests {
     fn summary_carrier_round_trips_a_self_describing_sketch_envelope() {
         let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
         env.sketch_type = SketchType::KLLSketch;
-        env.encoding = Encoding::Msgpack;
         env.agg_id = 7;
-        let mut sketch = KLLWrapper::new(200, Some(42)).with_wire_encoding(Encoding::Msgpack);
+        let mut sketch = KLLWrapper::new(200, Some(42));
         sketch.update(42.0);
         env.payload = sketch
             .snapshot()
@@ -1885,7 +1765,6 @@ mod tests {
         let decoded_env = obs.value.envelope.as_ref().expect("envelope");
         assert_eq!(decoded_env.payload, expected_payload);
         assert_eq!(decoded_env.sketch_type, SketchType::KLLSketch);
-        assert_eq!(decoded_env.encoding, Encoding::Msgpack);
         assert_eq!(decoded_env.agg_id, 7);
         assert_eq!(decoded_env.window_start_ms, 1_000);
         assert_eq!(decoded_env.window_end_ms, 2_000);
@@ -1896,7 +1775,6 @@ mod tests {
         use crate::sketches::CMSHeapWrapper;
         let mut env = one_envelope("topk_stream", 0.0, "region", "us-east");
         env.sketch_type = SketchType::CountMinSketchWithHeap;
-        env.encoding = Encoding::Msgpack;
         let mut sketch = CMSHeapWrapper::new(4, 64, 3);
         sketch.update(b"checkout", 5);
         env.payload = sketch.snapshot().expect("CMSHeap ASAPv1 envelope");
@@ -1912,29 +1790,53 @@ mod tests {
     }
 
     #[test]
+    fn summary_carrier_round_trips_every_sketch_type() {
+        use crate::sketches::{CMSWrapper, CountSketchWrapper, DDSketchWrapper, HLLWrapper};
+        let mut dd = DDSketchWrapper::new(0.01);
+        dd.update(3.0);
+        let mut hll = HLLWrapper::new();
+        hll.update(b"user-1");
+        let mut cs = CountSketchWrapper::new(4, 64);
+        cs.update(b"key", 2);
+        let mut cms = CMSWrapper::new(4, 64);
+        cms.update(b"key", 2);
+        let sketches: [(SketchType, &dyn Sketch); 4] = [
+            (SketchType::DDSketch, &dd),
+            (SketchType::HLLSketch, &hll),
+            (SketchType::CountSketch, &cs),
+            (SketchType::CountMinSketch, &cms),
+        ];
+        for (sketch_type, sketch) in sketches {
+            let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
+            env.sketch_type = sketch_type;
+            env.payload = sketch.snapshot().unwrap();
+            let pdata = encode_envelopes_to_pdata(std::slice::from_ref(&env)).expect("encode");
+            let outcome = decode_pdata_to_observations(pdata).expect("decode");
+            let decoded = outcome.observations[0].value.envelope.as_ref().unwrap();
+            assert_eq!(decoded.sketch_type, sketch_type);
+            assert_eq!(decoded.payload, env.payload);
+        }
+    }
+
+    #[test]
     fn asapv1_rejects_non_self_describing_envelope_bytes() {
         let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
         env.sketch_type = SketchType::KLLSketch;
-        env.encoding = Encoding::Msgpack;
         env.payload = vec![0xde, 0xad, 0xbe, 0xef];
 
         let error = encode_envelopes_to_pdata(&[env]).expect_err("invalid ASAPv1 must fail");
         assert!(error
             .to_string()
-            .contains("self-describing KLL sketch.envelope"));
+            .contains("invalid KLLSketch sketch.envelope"));
     }
 
     #[test]
-    fn summary_carrier_rejects_non_self_describing_encoding() {
+    fn sketch_payload_without_sketch_type_is_rejected() {
+        let mut sketch = KLLWrapper::new(200, Some(42));
+        sketch.update(1.0);
         let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
-        env.sketch_type = SketchType::KLLSketch;
-        env.encoding = Encoding::ProtoFull;
-        env.payload = vec![0x0a, 0x00];
-
-        let error = encode_envelopes_to_pdata(&[env]).expect_err("protobuf must fail");
-        assert!(error
-            .to_string()
-            .contains("requires the self-describing ASAPv1 MessagePack format"));
+        env.payload = sketch.snapshot().unwrap();
+        assert!(encode_envelopes_to_pdata(&[env]).is_err());
     }
 
     /// The bug this rewrite fixes: an estimate-mode envelope (empty
@@ -2013,7 +1915,7 @@ mod tests {
         let resource_attrs = arrow_records
             .get(ArrowPayloadType::ResourceAttrs)
             .expect("SCHEMA uses ResourceAttrs");
-        assert_eq!(resource_attrs.num_rows(), 4);
+        assert_eq!(resource_attrs.num_rows(), 3);
 
         let scope_attrs = arrow_records
             .get(ArrowPayloadType::ScopeAttrs)

@@ -105,9 +105,7 @@ KLL answers stayed within the backend's 5% tolerance in every window
 
 The Compose stack uses host networking so Prometheus, Grafana and the metrics
 endpoint listen only on `127.0.0.1` (ports 9090, 3000 and 9465;
-`PROMETHEUS_PORT` and `GRAFANA_PORT` change the first two). The finite
-`asap-otap-demo` export described in the [demo guide](./demo-guide.md) still
-pushes to the same Prometheus over OTLP.
+`PROMETHEUS_PORT` and `GRAFANA_PORT` change the first two).
 
 ## Configure an OTAP rolling estimator
 
@@ -118,7 +116,6 @@ ASAPv1 KLL panes of `window_slide` width:
 type: urn:asap:processor:asap_sketches
 config:
   sketch_type: kll
-  encoding: Msgpack
   window_size: 300s
   window_slide: 5s
   output_metric_name: request.duration.rolling_estimate
@@ -136,8 +133,8 @@ Omitting `window_slide` retains the original tumbling runtime behavior.
 
 Pane boundaries align to Unix time and are half-open `[start, end)`. The
 lookback must be an integer multiple of the pane width, and both durations
-must be whole milliseconds. Sliding is currently KLL-only with full Msgpack
-encoding, no delta transmission, and no late scalar updates to closed panes.
+must be whole milliseconds. Sliding is currently KLL-only, with no late
+scalar updates to closed panes.
 The first results use the observations available during warmup; a complete
 lookback becomes available after the process has run for that duration.
 
@@ -156,12 +153,11 @@ upstream panes, plus reusable aligned range queries:
 
 ```rust
 use std::time::Duration;
-use asap_precompute_rs::{Encoding, PrecomputeConfig, SketchType};
+use asap_precompute_rs::{PrecomputeConfig, SketchType};
 use asap_precompute_rs::kll_windows::KllWindowStore;
 
 let config = PrecomputeConfig {
     sketch_type: SketchType::KLLSketch,
-    encoding: Encoding::Msgpack,
     quantiles: vec![0.5, 0.99],
     ..Default::default()
 };

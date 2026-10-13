@@ -1,7 +1,4 @@
 .cache
 .git
 benchmark-results
-asap-precompute-rs/target/*
-!asap-precompute-rs/target/release/
-asap-precompute-rs/target/release/*
-!asap-precompute-rs/target/release/asap-otap-demo
+asap-precompute-rs/target
