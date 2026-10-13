@@ -14,6 +14,8 @@ trap 'rm -rf "$context"' EXIT
 cp "$target/release/asap-collector" "$context/"
 strip --strip-debug "$context/asap-collector"
 "${docker[@]}" build -q -f deploy/collector.Dockerfile -t asap-collector:local "$context"
+[ "${1:-}" = "--build-only" ] && exit 0
 export USE_CASE=${USE_CASE:-latency}
+export PIPELINES=${PIPELINES:-./$USE_CASE}
 "${docker[@]}" compose -f deploy/telemetry-functions/compose.yaml up -d
 echo "Grafana: http://localhost:${GRAFANA_PORT:-3000}/d/asap-$USE_CASE"

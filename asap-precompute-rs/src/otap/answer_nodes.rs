@@ -147,6 +147,33 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Adds `asap.answer.delay` (seconds from a window's end to its answers) once
+/// per window and method: the end-to-end latency of each answer path.
+fn with_delay(envs: &[SketchEnvelope], now_ms: u64) -> Vec<SketchEnvelope> {
+    let mut out = envs.to_vec();
+    let mut seen = std::collections::BTreeSet::new();
+    for e in envs {
+        let method = e
+            .labels
+            .iter()
+            .find(|kv| kv.key == "method")
+            .map(|kv| kv.value.clone());
+        if let Some(method) = method {
+            if seen.insert((e.window_end_ms, method.clone())) {
+                out.push(SketchEnvelope {
+                    labels: vec![KeyValue::new("method", method)],
+                    metric_name: "asap.answer.delay".into(),
+                    window_start_ms: e.window_start_ms,
+                    window_end_ms: e.window_end_ms,
+                    value: now_ms.saturating_sub(e.window_end_ms) as f64 / 1000.0,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Plain OTLP gauges with every label on the data point, so backends such
 /// as Prometheus keep them as series labels.
 fn gauges_pdata(envs: &[SketchEnvelope]) -> Result<OtapPdata, String> {
@@ -234,7 +261,8 @@ async fn emit(
     effects: &mut local::EffectHandler<OtapPdata>,
 ) -> Result<(), Error> {
     if !envs.is_empty() {
-        match gauges_pdata(envs) {
+        let envs = with_delay(envs, now_ms());
+        match gauges_pdata(&envs) {
             Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
             Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
         }
