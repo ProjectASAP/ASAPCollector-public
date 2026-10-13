@@ -51,6 +51,8 @@ pub enum SketchType {
     CountSketch,
     /// Count-Min Sketch frequency sketch.
     CountMinSketch,
+    /// Count-Min Sketch plus a top-k heavy-hitter heap (ASAPv1 kind `0x03 0x00`).
+    CountMinSketchWithHeap,
 }
 
 impl SketchType {
@@ -63,6 +65,7 @@ impl SketchType {
             Self::HLLSketch => "HLLSketch",
             Self::CountSketch => "CountSketch",
             Self::CountMinSketch => "CountMinSketch",
+            Self::CountMinSketchWithHeap => "CountMinSketchWithHeap",
             Self::Unspecified => "Unspecified",
         }
     }
@@ -225,6 +228,10 @@ mod tests {
         assert_eq!(SketchType::HLLSketch.name(), "HLLSketch");
         assert_eq!(SketchType::CountSketch.name(), "CountSketch");
         assert_eq!(SketchType::CountMinSketch.name(), "CountMinSketch");
+        assert_eq!(
+            SketchType::CountMinSketchWithHeap.name(),
+            "CountMinSketchWithHeap"
+        );
         assert_eq!(SketchType::Unspecified.name(), "Unspecified");
     }
 
