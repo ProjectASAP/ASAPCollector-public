@@ -232,7 +232,10 @@ fn events_pdata(events: &[Event]) -> Result<OtapPdata, String> {
                 .observed_time_unix_nano(e.window_end_ms * 1_000_000)
                 .severity_number(SeverityNumber::Info)
                 .severity_text("INFO")
-                .body(AnyValue::new_string(e.body.clone()))
+                // The method is part of the line: Loki drops a second entry with
+                // the same stream, timestamp and line, and sketch and exact events
+                // can otherwise read the same.
+                .body(AnyValue::new_string(format!("[{}] {}", e.method, e.body)))
                 .attributes(attributes)
                 .finish()
         })

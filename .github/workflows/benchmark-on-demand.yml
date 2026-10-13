@@ -1,0 +1,83 @@
+name: Benchmark on demand
+
+# Comment `/benchmark` on a pull request (write access required) to run a
+# reduced streaming sweep on main and on the PR head and post the comparison.
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: asap-sketch-nightly # share the benchmark runner with the nightly
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/benchmark') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 120
+    outputs:
+      comparison: ${{ steps.compare.outputs.comparison }}
+    env:
+      SWEEP: >-
+        --traffic-rates 25000 100000 --window-points 65536 --repetitions 1
+        ${{ !vars.BENCH_RUNNER && '--allow-shared-infrastructure' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.7.8
+        with:
+          workspaces: asap-precompute-rs
+      - name: Sweep main
+        run: |
+          ./benchmarks/run-nightly.sh $SWEEP
+          cp benchmark-results/streaming/summary.csv "$RUNNER_TEMP/base.csv"
+          cp benchmarks/compare-summaries.py "$RUNNER_TEMP/"
+          rm -rf benchmark-results
+      # PR code runs only in this job, which holds a read-only token.
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.issue.number }}/head
+          persist-credentials: false
+          clean: false # keep the cargo target directory
+      - name: Sweep PR head
+        run: ./benchmarks/run-nightly.sh $SWEEP
+      - name: Compare
+        id: compare
+        run: |
+          {
+            echo "### \`/benchmark\`: PR head (\`$(git rev-parse --short HEAD)\`) vs main"
+            echo
+            python3 "$RUNNER_TEMP/compare-summaries.py" "$RUNNER_TEMP/base.csv" \
+              benchmark-results/streaming/summary.csv --margin 0.10 || true
+            echo
+            echo "Reduced sweep, 1 repetition. Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > comparison.md
+          cat comparison.md >> "$GITHUB_STEP_SUMMARY"
+          { echo "comparison<<EOF_COMPARISON"; cat comparison.md; echo "EOF_COMPARISON"; } >> "$GITHUB_OUTPUT"
+
+  comment:
+    needs: benchmark
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post comparison
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BODY: ${{ needs.benchmark.outputs.comparison }}
+        run: >-
+          gh api "repos/$GITHUB_REPOSITORY/issues/${{ github.event.issue.number }}/comments"
+          -f body="$BODY"

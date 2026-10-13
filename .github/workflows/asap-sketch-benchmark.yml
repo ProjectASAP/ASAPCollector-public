@@ -2,6 +2,10 @@ name: ASAP sketch benchmark
 
 on:
   workflow_dispatch:
+    inputs:
+      regression_margin:
+        description: "Fail when median signals/s drops more than this fraction"
+        default: "0.10"
   pull_request:
     paths:
       - ".github/workflows/asap-sketch-benchmark.yml"
@@ -12,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # download the previous nightly's artifact
 
 concurrency:
   group: asap-sketch-nightly
@@ -19,7 +24,9 @@ concurrency:
 
 jobs:
   benchmark:
-    runs-on: ubuntu-24.04
+    # A registered self-hosted runner (repository variable BENCH_RUNNER, its
+    # label) gives exclusive cores; otherwise fall back to a shared runner.
+    runs-on: ${{ vars.BENCH_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +40,7 @@ jobs:
       - name: Test streaming window correctness
         run: cargo test --manifest-path asap-precompute-rs/Cargo.toml --release --features stream-benchmark --bin asap-stream-bench
       - name: Run persistent OTLP network benchmark
-        run: ./benchmarks/run-nightly.sh --allow-shared-infrastructure
+        run: ./benchmarks/run-nightly.sh ${{ !vars.BENCH_RUNNER && '--allow-shared-infrastructure' || '' }}
       - name: Verify streaming measurements
         run: |
           python3 - <<'PYCODE'
@@ -43,9 +50,9 @@ jobs:
           runs = json.loads((root / "runs.json").read_text())
           summary = json.loads((root / "summary.json").read_text())
           capacity = json.loads((root / "capacity.json").read_text())
-          assert len(runs) == 189
-          assert len(summary) == 63
-          assert len(json.loads((root / "resources.json").read_text())) == 441
+          assert len(runs) == 315
+          assert len(summary) == 105
+          assert len(json.loads((root / "resources.json").read_text())) == 735
           assert len(capacity) == 3
           assert all(row["repetitions"] == 3 for row in summary)
           assert all("sustainable" in row for row in summary)
@@ -69,6 +76,25 @@ jobs:
           assert (root / "throughput.svg").is_file()
           assert (root / "resources.svg").is_file()
           PYCODE
+      - name: Compare with previous nightly
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MARGIN: ${{ inputs.regression_margin || '0.10' }}
+        run: |
+          previous=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow asap-sketch-benchmark.yml \
+            --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -z "$previous" ]; then echo "No previous successful nightly; skipping."; exit 0; fi
+          gh run download "$previous" --repo "$GITHUB_REPOSITORY" --name "asap-sketch-benchmark-$previous" --dir "$RUNNER_TEMP/previous"
+          status=0
+          python3 benchmarks/compare-summaries.py "$RUNNER_TEMP/previous/streaming/summary.csv" \
+            benchmark-results/streaming/summary.csv --margin "$MARGIN" > comparison.md || status=$?
+          { echo "### Throughput vs nightly run $previous"; echo; cat comparison.md; } >> "$GITHUB_STEP_SUMMARY"
+          cat comparison.md
+          if [ "$status" -ne 0 ]; then
+            echo "::error title=Benchmark regression::median signals/s dropped more than $MARGIN vs run $previous (see job summary)"
+          fi
+          exit "$status"
       - name: Upload review artifacts
         if: always()
         uses: actions/upload-artifact@v4

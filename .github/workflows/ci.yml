@@ -1,0 +1,73 @@
+name: CI
+
+# Per-merge tier: lint, unit/integration tests, and an end-to-end acceptance
+# smoke on real collector containers. Capacity is measured by the nightly
+# (asap-sketch-benchmark.yml) and on-demand (benchmark-on-demand.yml) tiers.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: asap-precompute-rs
+    steps:
+      - uses: actions/checkout@v4
+      # Same toolchain setup as the nightly benchmark; ubuntu-24.04 already
+      # ships the cmake/clang the otel-arrow dependencies need.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2.7.8
+        with:
+          workspaces: asap-precompute-rs
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --features otap-engine,stream-benchmark -- -D warnings
+      - run: cargo test --features otap-engine,stream-benchmark
+
+  acceptance:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Correctness smoke, not a capacity measurement: every stage shares the
+    # runner's 4 vCPUs instead of getting its own core.
+    env:
+      DOCKER_COMMAND: docker
+      CPU_GENERATOR_A: "0-3"
+      CPU_GENERATOR_B: "0-3"
+      CPU_BRANCH_A: "0-3"
+      CPU_BRANCH_B: "0-3"
+      CPU_MERGE: "0-3"
+      CPU_DETECTOR: "0-3"
+      CPU_EXACT: "0-3"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.7.8
+        with:
+          workspaces: asap-precompute-rs
+      - name: Build collector image
+        run: deploy/telemetry-functions/run.sh --build-only
+      - name: Run acceptance use cases
+        run: python3 deploy/telemetry-functions/acceptance.py --report acceptance.json
+      - name: Upload acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-${{ github.run_id }}
+          path: acceptance.json
+          if-no-files-found: warn
