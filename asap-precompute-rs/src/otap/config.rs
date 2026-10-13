@@ -43,6 +43,12 @@ pub const SKETCH_TYPE_COUNTMINSKETCH: &str = "countminsketch";
 /// runtime config + sketch factory + observer triple.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// Sliding KLL pane/lookback configuration is invalid.
+    #[error("asap_sketches: invalid sliding window: {reason}")]
+    InvalidSlidingWindow {
+        /// Specific validation failure.
+        reason: String,
+    },
     /// User-facing `sketch_type` string didn't match any of the five
     /// supported sketches.
     #[error("asap_sketches: unsupported sketch_type {value:?} (want one of: {valid})")]
@@ -88,6 +94,8 @@ pub struct PluginConfig {
     pub sketch_type: String,
     /// Window rotation period. Mandatory.
     pub window_size: Duration,
+    /// Sliding KLL emission interval/pane size; zero selects tumbling windows.
+    pub window_slide: Duration,
     /// Output metric name stamped onto every emitted envelope.
     pub output_metric_name: String,
     /// Controller-plan join key.
@@ -130,6 +138,7 @@ impl Default for PluginConfig {
         Self {
             sketch_type: SKETCH_TYPE_KLL.to_string(),
             window_size: Duration::from_secs(10),
+            window_slide: Duration::ZERO,
             output_metric_name: "asap_sketch".to_string(),
             agg_id: 0,
             sketch_params: SketchParams::new(),
@@ -187,12 +196,18 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
             encoding: config.encoding.name(),
         });
     }
+    let sliding = !config.window_slide.is_zero();
     let pcfg = PrecomputeConfig {
         agg_id: config.agg_id,
         sketch_type: dispatch.sketch_type,
-        mode: crate::config::AggregationMode::Tumbling,
+        mode: if sliding {
+            crate::config::AggregationMode::Sliding
+        } else {
+            crate::config::AggregationMode::Tumbling
+        },
         window: WindowSpec {
             size: config.window_size,
+            slide: config.window_slide,
             ..Default::default()
         },
         matchers: Vec::new(),
@@ -211,6 +226,13 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         global_aggregation: config.global_aggregation,
         emit_window_stats: config.emit_window_stats,
     };
+    if sliding {
+        crate::kll_windows::KllRollingPrecompute::new(pcfg.clone()).map_err(|e| {
+            ConfigError::InvalidSlidingWindow {
+                reason: e.to_string(),
+            }
+        })?;
+    }
     Ok((pcfg, dispatch))
 }
 

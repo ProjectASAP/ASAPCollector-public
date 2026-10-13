@@ -1,0 +1,260 @@
+{
+  "uid": "asap-kll-stream",
+  "title": "ASAP KLL vs exact: multi-process streaming",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Backend-validated throughput",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_demo_validated_signals_per_second",
+          "legendFormat": "{{scenario}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "bargauge",
+      "title": "Processor CPU-seconds per million signals (branches + merge + estimate)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_demo_processor_cpu_seconds_per_million_signals",
+          "legendFormat": "{{scenario}}",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "CPU cores per pinned processor",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_demo_cpu_cores{component=~\"branch_a|branch_b|merge|estimate\"}",
+          "legendFormat": "{{scenario}} {{component}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Data-network egress per process",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_demo_data_tx_mbit_per_second{component=~\"branch_a|branch_b|merge|estimate\"}",
+          "legendFormat": "{{scenario}} {{component}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Mbits"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Tumbling p50/p99 vs exact reference",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_demo_estimate{window_kind=\"tumbling\"}",
+          "legendFormat": "{{scenario}} p{{quantile}}"
+        },
+        {
+          "refId": "B",
+          "expr": "asap_demo_reference{window_kind=\"tumbling\",scenario=\"kll\"}",
+          "legendFormat": "reference p{{quantile}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 4
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Rolling p50/p99 vs exact reference",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_demo_estimate{window_kind=\"rolling\"}",
+          "legendFormat": "{{scenario}} p{{quantile}}"
+        },
+        {
+          "refId": "B",
+          "expr": "asap_demo_reference{window_kind=\"rolling\",scenario=\"kll\"}",
+          "legendFormat": "reference p{{quantile}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 4
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Relative error vs exact",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_demo_relative_error",
+          "legendFormat": "{{scenario}} {{window_kind}} p{{quantile}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Resident memory per process",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_demo_rss_mib{component=~\"branch_a|branch_b|merge|estimate\"}",
+          "legendFormat": "{{scenario}} {{component}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

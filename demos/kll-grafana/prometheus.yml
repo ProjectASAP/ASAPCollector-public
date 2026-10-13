@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  # benchmarks/run-streaming.py --demo (default --metrics-port 9465).
+  - job_name: asap-demo
+    scrape_interval: 2s
+    static_configs:
+      - targets: ["127.0.0.1:9465"]
+# The finite demo's estimates arrive through the OTLP HTTP receiver instead.

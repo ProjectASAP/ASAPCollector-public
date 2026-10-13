@@ -66,6 +66,7 @@ struct Options {
     endpoint: String,
     generator_workers: usize,
     signals_per_second: usize,
+    rolling_windows: usize,
 }
 impl Options {
     fn read() -> Result<Self, String> {
@@ -86,6 +87,7 @@ impl Options {
             endpoint: get("ASAP_ENDPOINT", "http://merge:4318"),
             generator_workers: number("ASAP_GENERATOR_WORKERS", "1")?,
             signals_per_second: number("ASAP_SIGNALS_PER_SECOND", "100000")?,
+            rolling_windows: number("ASAP_ROLLING_WINDOWS", "1")?,
         };
         if !["raw", "exact", "kll"].contains(&o.scenario.as_str())
             || !["generator", "branch", "merge", "estimate", "backend"].contains(&o.role.as_str())
@@ -95,6 +97,7 @@ impl Options {
             || o.source > 1
             || o.generator_workers == 0
             || o.signals_per_second == 0
+            || o.rolling_windows == 0
         {
             return Err("invalid role/scenario/window/batch/source configuration".into());
         }
@@ -113,6 +116,7 @@ struct Stats {
     output_send_wall_ns: u64,
     output_messages: u64,
     window_latency_ms: BTreeMap<u64, u64>,
+    latest_results: Vec<model::ResultPoint>,
 }
 struct Shared {
     stats: Mutex<Stats>,
@@ -280,7 +284,13 @@ fn create_processor(
     let o = OPTIONS.get().unwrap();
     Ok(ProcessorWrapper::local(
         StreamProcessor {
-            processor: model::Processor::new(&o.scenario, &o.role, o.points, o.batch),
+            processor: model::Processor::new(
+                &o.scenario,
+                &o.role,
+                o.points,
+                o.batch,
+                o.rolling_windows,
+            ),
             normalizer: (o.role == "branch")
                 .then(|| model::InputNormalizer::new(o.source, o.points, o.batch)),
         },
@@ -317,6 +327,7 @@ impl exporter::Exporter<OtapPdata> for ValidatingBackend {
                         stats.received_signals += count;
                         if let Some((window, start)) = completed {
                             assert_eq!(window, stats.completed_windows, "backend window gap");
+                            stats.latest_results.clone_from(&self.0.latest);
                             stats.completed_windows += 1;
                             let elapsed_ms = now_ns().saturating_sub(start) / 1_000_000;
                             *stats.window_latency_ms.entry(elapsed_ms).or_default() += 1;
@@ -340,7 +351,11 @@ fn create_backend(
 ) -> Result<ExporterWrapper<OtapPdata>, otel_arrow_dfe_config::error::Error> {
     let o = OPTIONS.get().unwrap();
     Ok(ExporterWrapper::local(
-        ValidatingBackend(model::Backend::new(&o.scenario, o.points)),
+        ValidatingBackend(model::Backend::new(
+            &o.scenario,
+            o.points,
+            o.rolling_windows,
+        )),
         node,
         config,
         runtime,

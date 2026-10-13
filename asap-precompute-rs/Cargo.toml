@@ -10,6 +10,8 @@ license = "MIT"
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "010457de46ba9ec5574a53476bbe8b4bdb02b965" }
 serde = { version = "1", features = ["derive"] }
 prost = "0.13"
+# OTAP's generated protobuf types implement the 0.14 Message trait.
+prost-otap = { package = "prost", version = "0.14", optional = true }
 thiserror = "1"
 
 # Apache Arrow is only pulled in by the OTAP codec. Consumers on the
@@ -73,6 +75,7 @@ otap = ["dep:arrow-array", "dep:arrow-schema"]
 # folded into `otap`.
 otap-engine = [
     "otap",
+    "dep:prost-otap",
     "dep:otel-arrow-dfe-engine",
     "dep:otel-arrow-dfe-otap",
     "dep:otel-arrow-dfe-config",

@@ -156,6 +156,18 @@ networks it creates, including on failure; it saves logs before removal.
 - `snapshots.json`: raw before/interval/drained counters and latency histograms.
 - `result.json` and seven component logs per run.
 
+## Live demo mode
+
+`--demo` runs the selected scenarios side by side, each on its own CPU slice
+(generators, one CPU per processor, `--demo-backend-cores` for the backend),
+at `--demo-rate` signals/s per source until Ctrl+C or `--run-seconds`. It
+serves per-process throughput, CPU, egress, RSS and the backend's latest
+validated answers as Prometheus metrics on `--metrics-address`:`--metrics-port`
+(default `127.0.0.1:9465`). `--rolling-windows N` (`ASAP_ROLLING_WINDOWS`)
+makes estimate also answer over the last N completed windows; the default of
+1 disables rolling answers, so capacity runs are unaffected. See
+[the multi-process KLL demo](../docs/kll-windows.md).
+
 CI runs the full 189-run matrix, checks actual network traffic, completed windows,
 zero loss after drain, and resource artifacts. It uploads results even on failure.
 The old PR's 2.43× was measured with the file-backed batch harness and is not a
