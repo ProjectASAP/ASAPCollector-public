@@ -1,0 +1,46 @@
+name: New capability
+description: A new sketch function or use case.
+labels: ["capability"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A capability answers one question about telemetry with a sketch.
+        See RFC 0001 (docs/rfcs/0001-sketch-telemetry-functions.md) for the existing use cases.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question it answers
+      description: The question a user asks, in one or two sentences.
+      placeholder: Which attribute keys explode in cardinality?
+    validations:
+      required: true
+  - type: input
+    id: sketch
+    attributes:
+      label: Sketch
+      description: The asap_sketchlib sketch and what it is keyed by.
+      placeholder: HLL per (metric, attribute key)
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The fields a user sees (keys, counts, quantiles, labels) and where they go (metrics, logs, ASAPQuery).
+    validations:
+      required: true
+  - type: textarea
+    id: bound
+    attributes:
+      label: Accuracy bound
+      description: The error bound reported next to each answer, and the sketch parameters it depends on.
+    validations:
+      required: true
+  - type: textarea
+    id: ground-truth
+    attributes:
+      label: Ground truth
+      description: The exact answer it is measured against, and how the workload makes that answer known.
+    validations:
+      required: true
