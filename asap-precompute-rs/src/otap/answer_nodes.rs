@@ -26,12 +26,14 @@ use linkme::distributed_slice;
 use otel_arrow_dfe_config::node::NodeUserConfig;
 use otel_arrow_dfe_engine::config::ProcessorConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
+use otel_arrow_dfe_engine::control::AckMsg;
 use otel_arrow_dfe_engine::control::NodeControlMsg;
 use otel_arrow_dfe_engine::error::Error;
 use otel_arrow_dfe_engine::local::processor as local;
 use otel_arrow_dfe_engine::message::Message;
 use otel_arrow_dfe_engine::node::NodeId;
 use otel_arrow_dfe_engine::processor::ProcessorWrapper;
+use otel_arrow_dfe_engine::ConsumerEffectHandlerExtension;
 use otel_arrow_dfe_engine::{MessageSourceLocalEffectHandlerExtension, ProcessorFactory};
 use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
@@ -39,6 +41,9 @@ use serde::Deserialize;
 
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{
     AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
+};
+use otel_arrow_dfe_pdata::proto::opentelemetry::logs::v1::{
+    LogRecord, LogsData, ResourceLogs, ScopeLogs, SeverityNumber,
 };
 use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
     Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics,
@@ -48,7 +53,9 @@ use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
 use otel_arrow_dfe_pdata::OtapPayload;
 
 use super::codec::decode_pdata_to_observations;
-use crate::answers::{exact_answers, sketch_answers, ExactWindow};
+use crate::answers::{
+    exact_answers, sketch_answers, CardinalityClassifier, CardinalityRules, Event, ExactWindow,
+};
 use crate::envelope::SketchEnvelope;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
 
@@ -80,6 +87,9 @@ pub struct DetectorConfig {
     /// Heavy hitters answered from CMS + heap windows.
     #[serde(default = "default_k")]
     pub k: usize,
+    /// Thresholds for classifying per-attribute cardinality.
+    #[serde(default)]
+    pub cardinality: CardinalityRules,
 }
 
 /// `exact_answers` configuration.
@@ -104,6 +114,9 @@ pub struct ExactConfig {
     /// Heavy hitters per attribute key.
     #[serde(default = "default_k")]
     pub k: usize,
+    /// Thresholds for classifying per-attribute cardinality.
+    #[serde(default)]
+    pub cardinality: CardinalityRules,
 }
 
 fn now_ms() -> u64 {
@@ -154,16 +167,66 @@ fn gauges_pdata(envs: &[SketchEnvelope]) -> Result<OtapPdata, String> {
     Ok(OtapPdata::new_todo_context(payload))
 }
 
+/// Detection events as OTLP log records (for Loki or any log backend).
+fn events_pdata(events: &[Event]) -> Result<OtapPdata, String> {
+    let records = events
+        .iter()
+        .map(|e| {
+            let mut attributes = vec![
+                OtlpKeyValue::new("event.kind", AnyValue::new_string(e.kind.clone())),
+                OtlpKeyValue::new("method", AnyValue::new_string(e.method.clone())),
+            ];
+            attributes.extend(e.attributes.iter().map(|kv| {
+                OtlpKeyValue::new(kv.key.clone(), AnyValue::new_string(kv.value.clone()))
+            }));
+            LogRecord::build()
+                .time_unix_nano(e.window_end_ms * 1_000_000)
+                .observed_time_unix_nano(e.window_end_ms * 1_000_000)
+                .severity_number(SeverityNumber::Info)
+                .severity_text("INFO")
+                .body(AnyValue::new_string(e.body.clone()))
+                .attributes(attributes)
+                .finish()
+        })
+        .collect::<Vec<_>>();
+    let data = LogsData::new(vec![ResourceLogs::new(
+        Resource::build()
+            .attributes(vec![OtlpKeyValue::new(
+                "service.name",
+                AnyValue::new_string("asap-detector"),
+            )])
+            .finish(),
+        vec![ScopeLogs::new(
+            InstrumentationScope::build().name("asap.events").finish(),
+            records,
+        )],
+    )]);
+    let payload: OtapPayload = OtlpProtoMessage::Logs(data)
+        .try_into()
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(OtapPdata::new_todo_context(payload))
+}
+
 async fn emit(
     envs: &[SketchEnvelope],
+    events: &[Event],
     effects: &mut local::EffectHandler<OtapPdata>,
 ) -> Result<(), Error> {
-    if envs.is_empty() {
-        return Ok(());
+    if !envs.is_empty() {
+        match gauges_pdata(envs) {
+            Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
+            Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
+        }
     }
-    match gauges_pdata(envs) {
-        Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
-        Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
+    if !events.is_empty() {
+        match events_pdata(events) {
+            Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
+            Err(e) => {
+                effects
+                    .info(&format!("answers: event encode failed: {e}"))
+                    .await
+            }
+        }
     }
     Ok(())
 }
@@ -185,6 +248,20 @@ async fn observations(
 
 struct SketchDetector {
     config: DetectorConfig,
+    cardinality: CardinalityClassifier,
+}
+
+/// The `bound="estimate"` value of `metric` among `answers`.
+fn estimate_of(answers: &[SketchEnvelope], metric: &str) -> Option<f64> {
+    answers
+        .iter()
+        .find(|e| {
+            e.metric_name == metric
+                && e.labels
+                    .iter()
+                    .any(|kv| kv.key == "bound" && kv.value == "estimate")
+        })
+        .map(|e| e.value)
 }
 
 #[async_trait(?Send)]
@@ -197,17 +274,27 @@ impl local::Processor<OtapPdata> for SketchDetector {
         let Message::PData(pdata) = msg else {
             return Ok(());
         };
-        let mut out = Vec::new();
+        // Consumed into state here: ack so upstream (e.g. fanout) can move on.
+        effects.notify_ack(AckMsg::new(pdata.clone())).await?;
+        let (mut out, mut events) = (Vec::new(), Vec::new());
         for obs in observations(pdata, effects).await {
             let Some(env) = obs.value.envelope.filter(|e| !e.payload.is_empty()) else {
                 continue;
             };
             match sketch_answers(&env, &self.config.quantiles, self.config.k) {
-                Ok(answers) => out.extend(answers),
+                Ok(answers) => {
+                    if let Some(d) = estimate_of(&answers, "asap.distinct") {
+                        let (gauges, event) =
+                            self.cardinality.observe(&env, "sketch", d, env.count);
+                        out.extend(gauges);
+                        events.extend(event);
+                    }
+                    out.extend(answers);
+                }
                 Err(e) => effects.info(&format!("sketch_detector: {e}")).await,
             }
         }
-        emit(&out, effects).await
+        emit(&out, &events, effects).await
     }
 }
 
@@ -219,6 +306,7 @@ struct ExactState {
 
 struct ExactAnswers {
     config: ExactConfig,
+    cardinality: CardinalityClassifier,
     /// Open windows by window end.
     windows: BTreeMap<u64, ExactState>,
     emitted_until: u64,
@@ -270,7 +358,13 @@ impl ExactAnswers {
             w.values.push(obs.value.float);
             w.points += 1;
         }
-        for attr in &self.config.per_attribute {
+        let all = self.config.per_attribute.iter().any(|k| k == "*");
+        let keys: Vec<String> = if all {
+            obs.labels.iter().map(|kv| kv.key.clone()).collect()
+        } else {
+            self.config.per_attribute.clone()
+        };
+        for attr in &keys {
             let Some(value) = label(attr) else { continue };
             let key = format!("a|{}|{attr}", obs.metric);
             let (_, w) = state.series.entry(key).or_insert_with(|| {
@@ -286,15 +380,23 @@ impl ExactAnswers {
         }
     }
 
-    fn due(&mut self, now: u64) -> Vec<SketchEnvelope> {
+    fn due(&mut self, now: u64) -> (Vec<SketchEnvelope>, Vec<Event>) {
         let cutoff = now.saturating_sub(self.config.grace.as_millis() as u64);
         let open = self.windows.split_off(&(cutoff + 1));
         let ready = std::mem::replace(&mut self.windows, open);
-        let mut out = Vec::new();
+        let (mut out, mut events) = (Vec::new(), Vec::new());
         for (end, state) in ready {
             self.emitted_until = self.emitted_until.max(end);
             for (_, (mut template, mut w)) in state.series {
                 template.count = w.points;
+                if !w.distinct.is_empty() {
+                    let distinct = w.distinct.len() as f64;
+                    let (gauges, event) = self
+                        .cardinality
+                        .observe(&template, "exact", distinct, w.points);
+                    out.extend(gauges);
+                    events.extend(event);
+                }
                 out.extend(exact_answers(
                     &template,
                     &mut w,
@@ -303,7 +405,7 @@ impl ExactAnswers {
                 ));
             }
         }
-        out
+        (out, events)
     }
 }
 
@@ -322,18 +424,20 @@ impl local::Processor<OtapPdata> for ExactAnswers {
         }
         match msg {
             Message::PData(pdata) => {
+                // Consumed into state here: ack so upstream (e.g. fanout) can move on.
+                effects.notify_ack(AckMsg::new(pdata.clone())).await?;
                 for obs in observations(pdata, effects).await {
                     self.observe(&obs);
                 }
                 Ok(())
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
-                let out = self.due(now_ms());
-                emit(&out, effects).await
+                let (out, events) = self.due(now_ms());
+                emit(&out, &events, effects).await
             }
             Message::Control(NodeControlMsg::Shutdown { .. }) => {
-                let out = self.due(u64::MAX);
-                emit(&out, effects).await
+                let (out, events) = self.due(u64::MAX);
+                emit(&out, &events, effects).await
             }
             _ => Ok(()),
         }
@@ -358,7 +462,10 @@ static SKETCH_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         let config: DetectorConfig =
             serde_json::from_value(node_config.config.clone()).map_err(invalid)?;
         Ok(ProcessorWrapper::local(
-            SketchDetector { config },
+            SketchDetector {
+                cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                config,
+            },
             node,
             node_config,
             processor_config,
@@ -381,6 +488,7 @@ static EXACT_ANSWERS: ProcessorFactory<OtapPdata> = ProcessorFactory {
             serde_json::from_value(node_config.config.clone()).map_err(invalid)?;
         Ok(ProcessorWrapper::local(
             ExactAnswers {
+                cardinality: CardinalityClassifier::new(config.cardinality.clone()),
                 config,
                 windows: BTreeMap::new(),
                 emitted_until: 0,
@@ -415,11 +523,13 @@ mod tests {
 
     #[test]
     fn exact_windows_by_event_time_after_grace() {
+        let config: ExactConfig = serde_json::from_value(serde_json::json!({
+            "group_by": ["http.route"], "per_attribute": ["user.id"], "k": 2
+        }))
+        .unwrap();
         let mut exact = ExactAnswers {
-            config: serde_json::from_value(serde_json::json!({
-                "group_by": ["http.route"], "per_attribute": ["user.id"], "k": 2
-            }))
-            .unwrap(),
+            cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+            config,
             windows: BTreeMap::new(),
             emitted_until: 0,
             timer_started: false,
@@ -428,8 +538,8 @@ mod tests {
             exact.observe(&point(1_000 + i, "/a", &format!("u{}", i % 4), i as f64));
         }
         exact.observe(&point(61_000, "/a", "u0", 1.0));
-        assert!(exact.due(64_000).is_empty());
-        let out = exact.due(65_000);
+        assert!(exact.due(64_000).0.is_empty());
+        let (out, _) = exact.due(65_000);
         let get = |metric: &str, extra: (&str, &str)| {
             out.iter()
                 .find(|e| {
@@ -451,6 +561,7 @@ mod tests {
         exact.observe(&point(2_000, "/a", "u9", 1.0));
         assert!(exact
             .due(125_000)
+            .0
             .iter()
             .all(|e| e.window_end_ms == 120_000));
     }

@@ -74,6 +74,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use linkme::distributed_slice;
+use otel_arrow_dfe_engine::control::AckMsg;
+use otel_arrow_dfe_engine::ConsumerEffectHandlerExtension;
 use serde::{Deserialize, Serialize};
 
 use otel_arrow_dfe_config::error::Error as OtapConfigError;
@@ -93,6 +95,7 @@ use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 
 use crate::config::PrecomputeConfigSet;
 use crate::envelope::SketchEnvelope;
+use crate::matchers::per_attribute;
 use crate::observation::ObservationValueKind;
 use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::PluginConfig;
@@ -155,6 +158,10 @@ pub struct AsapSketchesUserConfig {
     /// Labels that identify a series; empty keys series by every label.
     #[serde(default)]
     pub aggregate_by: Vec<String>,
+    /// Sketch each listed attribute's values as its own series
+    /// (`attribute.key=<key>`); `"*"` = every attribute.
+    #[serde(default)]
+    pub per_attribute: Vec<String>,
 }
 
 impl AsapSketchesUserConfig {
@@ -193,6 +200,7 @@ impl AsapSketchesUserConfig {
             transmit_sketch: self.transmit_sketch,
             quantiles: self.quantiles,
             aggregate_by: self.aggregate_by,
+            per_attribute: self.per_attribute,
         };
         // Bounce the config through the resolver so config mistakes
         // (unsupported sketch_type, zero window) surface here rather
@@ -411,6 +419,10 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
 
         match msg {
             Message::PData(pdata) => {
+                // Consumed into state here: ack so upstream (e.g. fanout) can move on.
+                effect_handler
+                    .notify_ack(AckMsg::new(pdata.clone()))
+                    .await?;
                 let outcome = match decode_pdata_to_observations(pdata) {
                     Ok(outcome) => outcome,
                     Err(error) => {
@@ -442,7 +454,16 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                         self.emit_envelopes(&envs, effect_handler).await?;
                     }
                 }
-                for obs in &outcome.observations {
+                let observations = if self.plugin_config.per_attribute.is_empty() {
+                    outcome.observations
+                } else {
+                    outcome
+                        .observations
+                        .iter()
+                        .flat_map(|o| per_attribute(o, &self.plugin_config.per_attribute))
+                        .collect()
+                };
+                for obs in &observations {
                     // Note: `observe` here handles both "genuine OTLP
                     // metric" and "sketch shipped as binary inside an
                     // OTAP metric" (an upstream asap_sketches node's

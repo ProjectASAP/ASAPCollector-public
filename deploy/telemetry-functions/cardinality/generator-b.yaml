@@ -1,0 +1,37 @@
+# Source b: four attributes with known cardinality behaviour.
+version: otel_dataflow/v1
+engine:
+  http_admin:
+    bind_address: 0.0.0.0:8085
+policies:
+  resources:
+    core_allocation:
+      type: core_count
+      count: 1
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          generator:
+            type: urn:asap:receiver:scenario_generator
+            config:
+              seed: 2
+              signals_per_second: 20000
+              metric_name: http.server.request.duration
+              resource_attributes: {service.name: checkout, source: "b"}
+              attributes:
+                - {key: http.route, cardinality: 20, zipf: 1.1}      # stable
+                - {key: http.method, cardinality: 5}                  # stable
+                - {key: k8s.pod.name, cardinality: 50, growth_per_minute: 0.05}  # growing
+                - {key: user.id, unique: true}                        # identifier-like
+              value: {lognormal: {median: 50.0, sigma: 0.6}}
+          export:
+            type: exporter:otlp_http
+            config:
+              endpoint: http://branch-b:4318
+              client_pool_size: 1
+              max_in_flight: 1
+              http: {timeout: 30s, compression: none}
+        connections:
+          - {from: generator, to: export}
