@@ -1,0 +1,556 @@
+{
+  "uid": "asap-topk",
+  "title": "Heavy hitters and new keys: sketch vs exact (real collector containers)",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "Pipeline",
+      "description": "Three pipelines that share no processor, fed identical points by their own generators (same seed and scenario start). Each box is one collector container pinned to its own CPU; arrows are OTLP/HTTP between containers.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "html",
+        "content": "<table style=\"width:100%;border-collapse:separate;border-spacing:0 6px;border:none\"><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>generator-a/b</b><br><small>sources A and B</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>branch-a/b</b><br><small>Stage 1 per source: Count-Min 4&times;512 + top-10 heap per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>merge</b><br><small>Stage 2: merges both sources&#39; sketches per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>detector</b><br><small>top-10 with bounds; new heavy hitters</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus + Loki</b><br><small>method=&quot;sketch&quot;</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-branch-a/b</b><br><small>Stage 1 per source: route &rarr; count map per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-merge</b><br><small>Stage 2: adds both sources&#39; exact windows</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-detector</b><br><small>exact top-10; new heavy hitters</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus + Loki</b><br><small>method=&quot;exact&quot; (ground truth)</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.10)\"><b>raw-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.10)\"><b>raw-branch-a/b</b><br><small>Stage 1 per source: forwards every raw point</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.10)\"><b>raw-merge</b><br><small>Stage 2: forwards both sources&#39; raw points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.10)\"><b>raw-sink</b><br><small>writes every raw point; measures when the window&#39;s last point is stored</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>loki-raw</b><br><small>one log record per raw point</small></div></td></tr></table>"
+      },
+      "id": 1
+    },
+    {
+      "type": "bargauge",
+      "title": "Top-10 routes, latest window: CMS + heap (lower bound to estimate)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sort_desc(asap_topk{method=\"sketch\",bound=\"estimate\"})",
+          "legendFormat": "#{{rank}} {{key}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "id": 2
+    },
+    {
+      "type": "bargauge",
+      "title": "Top-10 routes, latest window: exact counts",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sort_desc(asap_topk{method=\"exact\",bound=\"estimate\"})",
+          "legendFormat": "#{{rank}} {{key}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "id": 3
+    },
+    {
+      "type": "timeseries",
+      "title": "Count of /new/hot-route per minute: sketch with Count-Min bound vs exact",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_topk{key=\"/new/hot-route\",method=\"sketch\",bound=\"estimate\"}",
+          "legendFormat": "sketch"
+        },
+        {
+          "refId": "B",
+          "expr": "asap_topk{key=\"/new/hot-route\",method=\"sketch\",bound=\"lower\"}",
+          "legendFormat": "sketch lower"
+        },
+        {
+          "refId": "C",
+          "expr": "asap_topk{key=\"/new/hot-route\",method=\"exact\"}",
+          "legendFormat": "exact"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "custom.fillBelowTo",
+                "value": "sketch lower"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 20
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch lower"
+            },
+            "properties": [
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "id": 4
+    },
+    {
+      "type": "logs",
+      "title": "New heavy hitters (Loki)",
+      "datasource": {
+        "type": "loki",
+        "uid": "asap-loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "{service_name=\"asap-detector\"} | event_kind=\"novelty\""
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      },
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "Window completion delay: seconds from a window's end until its result is complete",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (method) (asap_answer_delay)",
+          "legendFormat": "{{method}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "s"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "raw"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "description": "sketch and exact: the detector has emitted the window's answers. raw: loki-raw has acknowledged the window's last raw point.",
+      "id": 6
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU cores per pipeline (all stages but the generators)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pipeline) (label_replace(label_replace(rate(cpu_time_total{job=\"collectors\",stage!~\".*generator.*\",otel_scope_pipeline_id=\"main\"}[1m]), \"pipeline\", \"sketch\", \"stage\", \".*\"), \"pipeline\", \"$1\", \"stage\", \"(exact|raw)-.*\"))",
+          "legendFormat": "{{pipeline}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "raw"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "id": 7
+    },
+    {
+      "type": "timeseries",
+      "title": "Bytes received per pipeline (all stages but the generators), log scale",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pipeline) (label_replace(label_replace(rate(payload_size_bytes_total{job=\"collectors\",stage!~\".*generator.*\",otel_scope_node_type=\"receiver\"}[1m]), \"pipeline\", \"sketch\", \"stage\", \".*\"), \"pipeline\", \"$1\", \"stage\", \"(exact|raw)-.*\")) * 8",
+          "legendFormat": "{{pipeline}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true,
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          },
+          "unit": "bps"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "raw"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "id": 8
+    },
+    {
+      "type": "timeseries",
+      "title": "Resident memory per pipeline (all stages but the generators)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (pipeline) (label_replace(label_replace(max by (stage) (memory_rss{job=\"collectors\",stage!~\".*generator.*\"}), \"pipeline\", \"sketch\", \"stage\", \".*\"), \"pipeline\", \"$1\", \"stage\", \"(exact|raw)-.*\"))",
+          "legendFormat": "{{pipeline}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "bytes"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "raw"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "id": 9
+    }
+  ]
+}

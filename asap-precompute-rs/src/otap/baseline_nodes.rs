@@ -65,13 +65,13 @@ use otel_arrow_dfe_pdata::OtapPayload;
 use serde::Deserialize;
 
 use super::answer_nodes::{
-    default_grace, default_k, default_quantiles, default_window, emit, gauges_pdata, invalid,
-    now_ms, observations, series_key,
+    default_grace, default_k, default_novelty_windows, default_quantiles, default_window, emit,
+    gauges_pdata, invalid, now_ms, observations, series_key,
 };
 use super::codec::OtapSketchEncoder;
 use crate::answers::{
-    exact_answers, gauge, ks_distance, CardinalityClassifier, CardinalityRules, DriftRules,
-    DriftTracker, Event, ExactWindow,
+    exact_answers, gauge, ks_distance, topk_of, CardinalityClassifier, CardinalityRules,
+    DriftRules, DriftTracker, Event, ExactWindow, NoveltyTracker,
 };
 use crate::envelope::{SketchEnvelope, SketchType};
 use crate::matchers::ATTRIBUTE_KEY_LABEL;
@@ -135,6 +135,9 @@ pub struct ExactDetectorConfig {
     /// Thresholds for distribution drift of quantile series.
     #[serde(default)]
     pub drift: DriftRules,
+    /// Windows whose top keys form the novelty baseline.
+    #[serde(default = "default_novelty_windows")]
+    pub novelty_windows: usize,
 }
 
 /// `raw_sink` configuration.
@@ -362,6 +365,7 @@ impl local::Processor<OtapPdata> for ExactMerge {
 struct ExactDetector {
     config: ExactDetectorConfig,
     cardinality: CardinalityClassifier,
+    novelty: NoveltyTracker,
     drift: DriftTracker,
     /// Recent windows' sorted values per quantile series.
     baselines: HashMap<String, VecDeque<Vec<f64>>>,
@@ -385,12 +389,14 @@ impl ExactDetector {
             out.extend(gauges);
             events.extend(event);
         }
-        out.extend(exact_answers(
-            &template,
-            &mut w,
-            &self.config.quantiles,
-            self.config.k,
-        ));
+        let answers = exact_answers(&template, &mut w, &self.config.quantiles, self.config.k);
+        let top = topk_of(&answers);
+        if !top.is_empty() {
+            let (gauges, new) = self.novelty.observe(&template, "exact", &top);
+            out.extend(gauges);
+            events.extend(new);
+        }
+        out.extend(answers);
         if !w.values.is_empty() {
             // exact_answers left the values sorted.
             let (gauges, event) = self.drift(&template, std::mem::take(&mut w.values));
@@ -760,6 +766,7 @@ static EXACT_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         Ok(ProcessorWrapper::local(
             ExactDetector {
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                novelty: NoveltyTracker::new(config.novelty_windows),
                 drift: DriftTracker::new(config.drift.clone()),
                 baselines: HashMap::new(),
                 config,
@@ -894,6 +901,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({"k": 2})).unwrap();
         let mut detector = ExactDetector {
             cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+            novelty: NoveltyTracker::new(config.novelty_windows),
             drift: DriftTracker::new(config.drift.clone()),
             baselines: HashMap::new(),
             config,
