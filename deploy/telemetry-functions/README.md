@@ -41,6 +41,11 @@ that every heavy hitter is in the exact list (about 10 routes reach 1% here);
 a window whose exact top 20 is all above the threshold only gets
 `asap_hh_incomplete`.
 
+Each dashboard also shows every pipeline's throughput: the points per window
+that reached the end of the pipeline (`asap_points`; for raw, the points
+`loki-raw` acknowledged) divided by the window length, against the offered
+2 x 20,000 points/s.
+
 Every pipeline reports its window completion delay as `asap_answer_delay`
 (seconds from a window's end until its result is complete at the end of the
 pipeline): sketch and exact when their detector emits the window's answers,
