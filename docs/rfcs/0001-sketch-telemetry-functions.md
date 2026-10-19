@@ -3,10 +3,10 @@
 | Field | Value |
 | --- | --- |
 | Status | Accepted |
-| Date | 2026-10-12 |
+| Date | 2026-10-12, updated 2026-10-19 after review |
 | Owner | ProjectASAP maintainers |
 
-Lines marked "Update after approval" record facts that changed after the design was accepted. Struck-through text is the original wording they replace.
+Lines marked "Update after approval" record facts that changed after the design was accepted. Struck-through text is the original wording they replace. The section [Review feedback, 2026-10-19](#review-feedback-2026-10-19) adds the plan changes from the first demo review.
 
 ## Context and goals
 
@@ -71,7 +71,7 @@ The current benchmark replays one fixed corpus per window: durations for KLL, Zi
 | Change schedule | All | When each change starts and how fast it ramps |
 | Rate and number of sources | Cost | Signals/s per source, 2 to N sources |
 
-The telemetry shape (metric names, attribute keys, resource attributes) stays fixed while values change, which matches the proposal's drift case. ~~The generator writes the ground truth (exact distinct counts, quantiles and top-k per window) to a side file, so every figure can be scored without a second exact pipeline.~~ *Update after approval:* instead of a generator side file, three pipelines run side by side and share no processor: the sketch pipeline; an exact pipeline (exact window per source, exact merge, exact detector), whose answers are the ground truth; and a raw pipeline that forwards every point to a log store. Each has its own generators with the same config and scenario start, and the generated points depend only on scenario time, so all three get identical input. Every pipeline reports its window completion delay.
+The telemetry shape (metric names, attribute keys, resource attributes) stays fixed while values change, which matches the proposal's drift case. ~~The generator writes the ground truth (exact distinct counts, quantiles and top-k per window) to a side file, so every figure can be scored without a second exact pipeline.~~ *Update after approval:* instead of a generator side file, three pipelines run side by side and share no processor: the sketch pipeline; an exact pipeline (exact window per source, exact merge, exact detector), whose answers are the ground truth; and a raw pipeline that forwards every point to a log store. Each has its own generators with the same config and scenario start, and the generated points depend only on scenario time, so all three get identical input. Every pipeline reports its window completion delay. *Update after review:* the raw pipeline becomes the "store everything, query later" baseline: one receiver writes to the log store, and the answer comes from a periodic query against it (see [Review feedback](#review-feedback-2026-10-19)).
 
 Split of work: we extend the generator and the scoring; our collaborators supply the scenario definitions (which attributes, which shifts) and, later, traffic with real distribution properties.
 
@@ -81,7 +81,7 @@ The key question is whether inline measurement is cheap enough to leave on. We a
 
 | Metric | How it is measured | What counts as success |
 | --- | --- | --- |
-| Ingestion throughput per CPU core | Highest sustained signals/s at the capacity criteria (delivery, backlog, p99 window latency), per pinned core | Close to the \~1M points/s per core reference from Jake's benchmark framework, with and without the function |
+| Ingestion throughput per CPU core | Highest sustained signals/s at the capacity criteria (delivery, backlog, p99 window latency), per pinned core | Close to the \~1M points/s per core reference from the OTAP benchmark framework, with and without the function |
 | Added CPU | Process CPU of each stage, with minus without the function, at the same offered load | A small, stated fraction of the base pipeline |
 | Memory | Sampled and peak RSS per process | Bounded and independent of cardinality |
 | Accuracy | Error against ground truth per window: relative distinct-count error, quantile or CDF error, recall@k and count error | Within the configured error bound, shown as a confidence band |
@@ -96,6 +96,62 @@ Experiments, in order:
 4. **Merge at scale.** Merge 10, 100 and 1,000 sketches per window and time it. 1,000-way merges were flagged as possibly slow.
 5. **Distributed run.** Stages on separate machines over the network, ending in Prometheus, to check the single-host numbers.
 6. **Later: sampling plus sketches.** Only after experiments 1 to 4 show where the cost goes.
+
+*Update after review:* experiments 7 to 9 in [Review feedback](#review-feedback-2026-10-19) add whole-system cost, freshness against the store-and-query baseline, and a traffic-scaling sweep.
+
+## Review feedback, 2026-10-19
+
+*Update after approval.* The first review of the three-pipeline demo asked for one main change: show the trade-off, not only the sketch's cost. Computing in front of the database stores much less and drops the raw data. The alternative is storing every point and querying later. Each side pays something, and the blog has to show what. This section records the feedback as decisions, and the work each one adds.
+
+### What the blog has to answer
+
+How can the answer be computed most efficiently, and which approach wins on each axis? Three approaches answer the same question on identical input:
+
+| Approach | Computes | Stores | Answer arrives |
+| --- | --- | --- | --- |
+| Sketch | Inline sketches, one merge, a detector | Answers and sketches only | After the window closes plus the completion delay |
+| Exact | Exact window per source, exact merge, the same detector | Answers only | Same as sketch; the merge carries every key |
+| Store and query | Nothing inline | Every raw point in the log store | When the periodic query returns |
+
+The axes are CPU, memory, bytes on the wire, throughput, freshness and accuracy. The blog states the winner on each axis with a measured number, for example "the sketch pipeline uses X fewer cores and Y fewer bytes than exact, and answers Z seconds sooner than store and query".
+
+### Definitions
+
+- **Metric data points, not "signals".** All three use cases read OTLP metric data points. Earlier text says "signals/s"; it means metric data points per second, and new text says "points/s".
+- **Freshness.** Seconds from the end of a window (the time of its last generated point) until its answer can be queried. For sketch and exact this is the window completion delay already on every dashboard. Every summary answer is at least one window (1 minute) old when it appears; the delay is on top of that.
+- **Freshness of store and query.** Time until the log store acknowledges the window's last point, plus the latency of the query that computes the answer. Both are measured, so the log store's query latency is shown next to the sketch's completion delay.
+- **End-to-end detection latency.** Seconds from the injected change (for example `/new/hot-route` starting) until the detection event is in Loki, per approach.
+
+### Changes to the baselines and metrics
+
+1. **Store and query has one stage.** The raw pipeline has one receiver per source that writes to the log store, with no branch or merge forwarding stages. A query job runs the use case's query against the store once per window, for example top-k routes by count over the last minute, and reports its answer, its query latency and its accuracy against exact.
+2. **Whole-system cost.** CPU and memory per approach include everything needed to get the answer: the pipeline stages, the log store, and the query job for store and query, and the answer backend for sketch and exact. Cost is shown together with freshness, so the trade-off is visible on one panel.
+3. **Bytes per stage.** Bytes on the wire are broken down per hop (source to merge, merge to detector, detector to backend), not only per pipeline. The pipelines differ by orders of magnitude, so the panels use a log scale and say so.
+4. **Traffic that grows over time.** The scenario adds a rate ramp, so the dashboards show how each pipeline's bytes, CPU and memory grow with input. Sketch cost should stay nearly flat; exact and store-and-query grow with keys and points.
+5. **Exact merge made visible.** Exact merge has to combine every key's count before it can pick the top-N. Its CPU, memory and bytes get their own panel, since that stage is where the exact approach stops scaling.
+
+### New experiments
+
+7. **Whole-system cost per approach.** At a fixed rate, CPU and memory of every container each approach needs, including the log store and the query job.
+8. **Freshness against store and query.** Window completion delay for sketch and exact against ingest plus query latency for store and query, per rate.
+9. **Traffic scaling.** Input from 10,000 to 50,000 points/s per source and beyond, on one node and then on several. Per stage CPU, memory and bytes, to show which stage limits each approach. Where a test only needs the pipeline to keep up, sampling the input keeps the generators from backpressure; the sampled rate is stated next to every figure.
+
+### Benchmark playground
+
+A Kubernetes-deployed playground where readers pick the dimensions themselves: use case, approach, input rate, number of sources and sketch size. It shows the same panels as the demo, and readers can comment in the playground when they spot an error or want another view. The [OTel Arrow comparison page](https://open-telemetry.github.io/otel-arrow/compare/) is the model for the comparison view. The setup (cluster, data retention, who can comment) is still open.
+
+### Questions from the review, answered
+
+- **Metrics or signals?** Metric data points. See Definitions.
+- **How are sketches transmitted? Over the OTel Arrow protocol, in a self-describing format?** Inside a collector, records are OTAP Arrow batches. A sketch is an OTLP Summary data point whose `sketch.envelope` attribute holds ASAPv1 bytes. ASAPv1 is self-describing: the bytes carry the sketch kind and version, and the window bounds, labels and metric name travel as OTLP fields next to them. Between collectors the stages use the OTLP/HTTP exporter today, not the OTel Arrow gRPC protocol. Experiment 3 measures what an Arrow-native layout and protocol would save.
+- **Are the public repository's PRs reviewed?** Not yet. The stack is open for review, starting from the oldest PR.
+
+### Open questions from the review
+
+- [ ] Which few figures make the blog's point best? Candidates: cost against freshness per approach; bytes per stage on a log scale; cost as traffic grows.
+- [ ] Which query does store and query run per use case, and how often? Once per window matches the summaries; more often trades store CPU for freshness.
+- [ ] Where does the playground run, and who can comment in it?
+- [ ] Is sampling acceptable in published figures, or only in tests that need the pipeline to keep up?
 
 ## Open source, adoption and governance
 
