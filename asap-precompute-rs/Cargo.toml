@@ -110,3 +110,7 @@ required-features = ["collector"]
 name = "asap-stream-bench"
 path = "src/bin/asap_stream_bench.rs"
 required-features = ["stream-benchmark"]
+
+[[bin]]
+name = "asap-merge-bench"
+path = "src/bin/asap_merge_bench.rs"
