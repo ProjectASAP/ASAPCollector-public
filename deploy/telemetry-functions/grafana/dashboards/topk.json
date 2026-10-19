@@ -1,87 +1,53 @@
 {
   "uid": "asap-topk",
-  "title": "Heavy hitters and new keys: sketch vs exact (real collector containers)",
+  "title": "Heavy hitters: sketch vs exact vs store and query (real collector containers)",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "10s",
   "time": {
-    "from": "now-30m",
+    "from": "now-35m",
     "to": "now"
   },
   "panels": [
     {
       "type": "text",
-      "title": "Pipeline",
-      "description": "Three pipelines that share no processor, fed identical points by their own generators (same seed and scenario start). Each box is one collector container pinned to its own CPU; arrows are OTLP/HTTP between containers.",
+      "title": "Three approaches to the same question: which routes are heavy hitters, and which are new?",
+      "options": {
+        "mode": "html",
+        "content": "<table style=\"width:100%;border-collapse:separate;border-spacing:0 6px;border:none\"><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>generator-a/b</b><br><small>sources A and B</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>branch-a/b</b><br><small>Count-Min 4&times;512 + top-20 heap per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>merge</b><br><small>both sources&#39; sketches per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>detector</b><br><small>top-20 with bounds; new heavy hitters</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>query: method=&quot;sketch&quot;</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-branch-a/b</b><br><small>route &rarr; count map per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-merge</b><br><small>adds both sources&#39; maps: every key</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-detector</b><br><small>exact top-20; new heavy hitters</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>query: method=&quot;exact&quot;</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>raw-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>raw-sink-a/b</b><br><small>the only stage: every point into the log store</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>loki-raw</b><br><small>stores every raw point</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>query-job</b><br><small>LogQL top-20 once per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>answer: method=&quot;raw&quot;</small></div></td></tr></table><p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Traffic grows over 30 minutes: the rate per source doubles every 5 minutes (5k to 80k points/s), <code>/new/hot-route</code> takes 15% of traffic at minute 10, and the number of routes grows from 100,000 to 1,000,000 at minute 15. hh-accuracy compares the sketch with exact; query-job compares store and query with exact and times every approach's backend query.</small></p>"
+      },
       "gridPos": {
         "h": 10,
         "w": 24,
         "x": 0,
         "y": 0
       },
-      "options": {
-        "mode": "html",
-        "content": "<table style=\"width:100%;border-collapse:separate;border-spacing:0 6px;border:none\"><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>generator-a/b</b><br><small>sources A and B</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>branch-a/b</b><br><small>Stage 1 per source: Count-Min 4&times;512 + top-20 heap per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>merge</b><br><small>Stage 2: merges both sources&#39; sketches per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>detector</b><br><small>top-20 with bounds; new heavy hitters</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus + Loki</b><br><small>method=&quot;sketch&quot;</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-branch-a/b</b><br><small>Stage 1 per source: route &rarr; count map per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-merge</b><br><small>Stage 2: adds both sources&#39; exact windows</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-detector</b><br><small>exact top-20; new heavy hitters</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus + Loki</b><br><small>method=&quot;exact&quot; (ground truth)</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.10)\"><b>raw-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.10)\"><b>raw-branch-a/b</b><br><small>Stage 1 per source: forwards every raw point</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.10)\"><b>raw-merge</b><br><small>Stage 2: forwards both sources&#39; raw points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.10)\"><b>raw-sink</b><br><small>writes every raw point; measures when the window&#39;s last point is stored</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>loki-raw</b><br><small>one log record per raw point</small></div></td></tr></table><p style=\"margin:4px 0 0 0\"><small><b>hh-accuracy</b> (outside the pipelines) receives a copy of both detectors&#39; answers and, per window, compares the heavy hitters (routes with at least 1% of the window&#39;s points): precision, recall, F1 and average relative count error.</small></p>"
-      },
       "id": 1
     },
     {
-      "type": "bargauge",
-      "title": "Top-10 routes, latest window: CMS + heap (lower bound to estimate)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus"
-      },
+      "type": "row",
+      "title": "Answers",
+      "collapsed": false,
+      "panels": [],
       "gridPos": {
-        "h": 10,
-        "w": 12,
+        "h": 1,
+        "w": 24,
         "x": 0,
         "y": 10
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sort_desc(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})",
-          "legendFormat": "#{{rank}} {{key}}",
-          "instant": true
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0
-        },
-        "overrides": []
       },
       "id": 2
     },
     {
       "type": "bargauge",
-      "title": "Top-10 routes, latest window: exact counts",
+      "title": "Sketch (CMS + heap): top-10 routes, latest window",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "gridPos": {
-        "h": 10,
-        "w": 12,
-        "x": 12,
-        "y": 10
-      },
       "targets": [
         {
           "refId": "A",
-          "expr": "sort_desc(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})",
+          "expr": "sort_desc(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})))))",
           "legendFormat": "#{{rank}} {{key}}",
           "instant": true
         }
@@ -99,25 +65,118 @@
       },
       "fieldConfig": {
         "defaults": {
-          "decimals": 0
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#5794f2"
+          }
         },
         "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 11
       },
       "id": 3
     },
     {
-      "type": "timeseries",
-      "title": "Count of /new/hot-route per minute: sketch with Count-Min bound vs exact",
+      "type": "bargauge",
+      "title": "Exact: top-10 routes, latest window",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 20
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sort_desc(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})))))",
+          "legendFormat": "#{{rank}} {{key}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
       },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9830"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 11
+      },
+      "id": 4
+    },
+    {
+      "type": "bargauge",
+      "title": "Store and query (LogQL over loki-raw): top-10 routes, latest window",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sort_desc(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"})))))",
+          "legendFormat": "#{{rank}} {{key}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#8e8e8e"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 11
+      },
+      "id": 5
+    },
+    {
+      "type": "timeseries",
+      "title": "Count of /new/hot-route per window: sketch with Count-Min bound, exact, store and query",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "Count-Min overestimates; the lower bound is the estimate minus the error bound.",
       "targets": [
         {
           "refId": "A",
@@ -127,19 +186,25 @@
         {
           "refId": "B",
           "expr": "asap_topk{key=\"/new/hot-route\",method=\"sketch\",bound=\"lower\"}",
-          "legendFormat": "sketch lower"
+          "legendFormat": "sketch lower bound"
         },
         {
           "refId": "C",
           "expr": "asap_topk{key=\"/new/hot-route\",method=\"exact\"}",
           "legendFormat": "exact"
+        },
+        {
+          "refId": "D",
+          "expr": "asap_topk{key=\"/new/hot-route\",method=\"raw\"}",
+          "legendFormat": "store and query"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "custom": {
             "spanNulls": true
-          }
+          },
+          "min": 0
         },
         "overrides": [
           {
@@ -149,37 +214,10 @@
             },
             "properties": [
               {
-                "id": "custom.fillBelowTo",
-                "value": "sketch lower"
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 20
-              },
-              {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "blue"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch lower"
-            },
-            "properties": [
-              {
-                "id": "custom.lineWidth",
-                "value": 0
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "blue"
+                  "fixedColor": "#5794f2"
                 }
               }
             ]
@@ -194,37 +232,52 @@
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "orange"
+                  "fixedColor": "#ff9830"
                 }
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
               {
-                "id": "custom.lineStyle",
+                "id": "color",
                 "value": {
-                  "fill": "dash",
-                  "dash": [
-                    6,
-                    4
-                  ]
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
                 }
               }
             ]
           }
         ]
       },
-      "id": 4
-    },
-    {
-      "type": "logs",
-      "title": "New heavy hitters (Loki)",
-      "datasource": {
-        "type": "loki",
-        "uid": "asap-loki"
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
       },
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 20
+        "x": 0,
+        "y": 21
+      },
+      "id": 6
+    },
+    {
+      "type": "logs",
+      "title": "New heavy hitters (Loki events from both detectors)",
+      "datasource": {
+        "type": "loki",
+        "uid": "asap-loki"
       },
       "targets": [
         {
@@ -237,49 +290,73 @@
         "wrapLogMessage": true,
         "sortOrder": "Descending"
       },
-      "id": 5
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "id": 7
+    },
+    {
+      "type": "row",
+      "title": "Accuracy against exact",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 8
     },
     {
       "type": "timeseries",
-      "title": "Heavy hitters (routes with >= 1% of the window's points): sketch vs exact, per window",
+      "title": "Heavy hitters (routes with >= 1% of the window's points): precision, recall, F1",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 28
-      },
+      "description": "Truth: exact counts >= 1% of the window's points. Store and query loses accuracy only when points never reached the log store.",
       "targets": [
         {
           "refId": "A",
-          "expr": "asap_hh_precision",
-          "legendFormat": "precision"
+          "expr": "asap_hh_precision{method=\"sketch\"}",
+          "legendFormat": "sketch precision"
         },
         {
           "refId": "B",
-          "expr": "asap_hh_recall",
-          "legendFormat": "recall"
+          "expr": "asap_hh_recall{method=\"sketch\"}",
+          "legendFormat": "sketch recall"
         },
         {
           "refId": "C",
-          "expr": "asap_hh_f1",
-          "legendFormat": "F1"
+          "expr": "asap_hh_f1{method=\"sketch\"}",
+          "legendFormat": "sketch F1"
+        },
+        {
+          "refId": "D",
+          "expr": "asap_hh_precision{method=\"raw\"}",
+          "legendFormat": "store and query precision"
+        },
+        {
+          "refId": "E",
+          "expr": "asap_hh_recall{method=\"raw\"}",
+          "legendFormat": "store and query recall"
+        },
+        {
+          "refId": "F",
+          "expr": "asap_hh_f1{method=\"raw\"}",
+          "legendFormat": "store and query F1"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "min": 0,
-          "max": 1.05,
-          "decimals": 2,
           "custom": {
-            "spanNulls": true,
-            "drawStyle": "line",
-            "pointSize": 6,
-            "showPoints": "always"
-          }
+            "spanNulls": true
+          },
+          "unit": "percentunit"
         },
         "overrides": []
       },
@@ -287,10 +364,19 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
         }
       },
-      "id": 10,
-      "description": "Precision = reported heavy hitters that are real / all reported (low: Count-Min overestimates push small routes over the threshold). Recall = real heavy hitters the sketch reported / all real ones (low: the heap dropped one). A heavy hitter has at least 1% of the window's points by the exact counts; the sketch reports a route when its estimate reaches 1%."
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 30
+      },
+      "id": 9
     },
     {
       "type": "timeseries",
@@ -299,76 +385,54 @@
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 28
-      },
+      "description": "",
       "targets": [
         {
           "refId": "A",
-          "expr": "asap_hh_are",
-          "legendFormat": "ARE"
+          "expr": "asap_hh_are{method=\"sketch\"}",
+          "legendFormat": "sketch"
         },
         {
           "refId": "B",
-          "expr": "asap_hh_truth",
-          "legendFormat": "heavy hitters (exact)"
-        },
-        {
-          "refId": "C",
-          "expr": "asap_hh_reported",
-          "legendFormat": "reported (sketch)"
+          "expr": "asap_hh_are{method=\"raw\"}",
+          "legendFormat": "store and query"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "spanNulls": true,
-            "showPoints": "always",
-            "pointSize": 6
-          }
+            "spanNulls": true
+          },
+          "unit": "percentunit",
+          "min": 0
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "ARE"
+              "options": "sketch"
             },
             "properties": [
               {
-                "id": "unit",
-                "value": "percentunit"
-              },
-              {
-                "id": "decimals",
-                "value": 2
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
               }
             ]
           },
           {
             "matcher": {
-              "id": "byRegexp",
-              "options": "heavy hitters.*|reported.*"
+              "id": "byName",
+              "options": "store and query"
             },
             "properties": [
               {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "decimals",
-                "value": 0
-              },
-              {
-                "id": "custom.lineStyle",
+                "id": "color",
                 "value": {
-                  "fill": "dash",
-                  "dash": [
-                    6,
-                    4
-                  ]
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
                 }
               }
             ]
@@ -379,26 +443,41 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
         }
       },
-      "id": 11,
-      "description": "Mean of |sketch estimate - exact count| / exact count over the heavy hitters the sketch found. Right axis: how many heavy hitters exact has and how many the sketch reported."
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 30
+      },
+      "id": 10
+    },
+    {
+      "type": "row",
+      "title": "Traffic over time: volume and shape",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "id": 11
     },
     {
       "type": "timeseries",
-      "id": 12,
-      "title": "Throughput per pipeline: points per second each window delivered to the end of its pipeline",
-      "description": "Points in each 1-minute window that reached the end of the pipeline, divided by 60 s: for sketch and exact the points their detector answered for, for raw the points loki-raw acknowledged. Offered: 2 sources x 20,000 points/s. A pipeline below the offered line is dropping or falling behind.",
+      "title": "End-to-end throughput: points per second each window delivered to the end of its pipeline",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 36
-      },
+      "description": "Both sources together. The generators skip batches a pipeline cannot take, so a pipeline that falls behind delivers less.",
       "targets": [
         {
           "refId": "A",
@@ -407,53 +486,61 @@
         },
         {
           "refId": "B",
-          "expr": "sum by (method) (asap_points{method=\"raw\"}) / 60",
-          "legendFormat": "{{method}}"
-        },
-        {
-          "refId": "C",
-          "expr": "vector(40000)",
-          "legendFormat": "offered"
+          "expr": "sum(asap_points{method=\"raw\"}) / 60",
+          "legendFormat": "store and query"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
-          "decimals": 0,
-          "min": 0,
           "custom": {
-            "spanNulls": true,
-            "showPoints": "always",
-            "pointSize": 6
-          }
+            "spanNulls": true
+          },
+          "unit": "short",
+          "min": 0
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "offered"
+              "options": "sketch"
             },
             "properties": [
               {
-                "id": "custom.lineStyle",
+                "id": "color",
                 "value": {
-                  "fill": "dash",
-                  "dash": [
-                    6,
-                    4
-                  ]
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
                 }
-              },
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
                   "fixedColor": "#8e8e8e"
                 }
-              },
-              {
-                "id": "custom.showPoints",
-                "value": "never"
               }
             ]
           }
@@ -463,27 +550,33 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
         }
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "Window completion delay: seconds from a window's end until its result is complete",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus"
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 39
       },
+      "id": 12
+    },
+    {
+      "type": "timeseries",
+      "title": "Data shape: distinct routes per window (exact)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "",
       "targets": [
         {
           "refId": "A",
-          "expr": "avg by (method) (asap_answer_delay)",
-          "legendFormat": "{{method}}"
+          "expr": "asap_distinct{method=\"exact\",attribute_key=\"http.route\"}",
+          "legendFormat": "distinct routes"
         }
       ],
       "fieldConfig": {
@@ -491,77 +584,65 @@
           "custom": {
             "spanNulls": true
           },
-          "unit": "s"
+          "unit": "short",
+          "min": 0
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "raw"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
-      "description": "sketch and exact: the detector has emitted the window's answers. raw: loki-raw has acknowledged the window's last raw point.",
-      "id": 6
-    },
-    {
-      "type": "timeseries",
-      "title": "CPU cores per pipeline (all stages but the generators)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus"
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 39
       },
+      "id": 13
+    },
+    {
+      "type": "row",
+      "title": "Freshness: from a sample's generation to the queryable answer",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 47
+      },
+      "id": 14
+    },
+    {
+      "type": "timeseries",
+      "title": "Total freshness of a window's first sample",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "Window wait (up to 60 s for the first sample) + the pipeline until the answer is stored + the backend query that returns it.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (pipeline) (label_replace(label_replace(rate(cpu_time_total{job=\"collectors\",stage!~\".*generator.*\",otel_scope_pipeline_id=\"main\"}[1m]), \"pipeline\", \"sketch\", \"stage\", \".*\"), \"pipeline\", \"$1\", \"stage\", \"(exact|raw)-.*\"))",
-          "legendFormat": "{{pipeline}}"
+          "expr": "60 + max(asap_answer_delay{method=\"sketch\"}) + max(asap_query_seconds{method=\"sketch\"})",
+          "legendFormat": "sketch"
+        },
+        {
+          "refId": "B",
+          "expr": "60 + max(asap_answer_delay{method=\"exact\"}) + max(asap_query_seconds{method=\"exact\"})",
+          "legendFormat": "exact"
+        },
+        {
+          "refId": "C",
+          "expr": "60 + max(asap_answer_delay{method=\"raw\"}) + max(asap_query_seconds{method=\"raw\"})",
+          "legendFormat": "store and query"
         }
       ],
       "fieldConfig": {
@@ -569,7 +650,8 @@
           "custom": {
             "spanNulls": true
           },
-          "unit": "short"
+          "unit": "s",
+          "min": 0
         },
         "overrides": [
           {
@@ -605,7 +687,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "raw"
+              "options": "store and query"
             },
             "properties": [
               {
@@ -619,26 +701,579 @@
           }
         ]
       },
-      "id": 7
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 48
+      },
+      "id": 15
     },
     {
       "type": "timeseries",
-      "title": "Bytes received per pipeline (all stages but the generators), log scale",
+      "title": "Sketch: latency breakdown per window",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
+      },
+      "description": "Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting out the grace for late sources.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "0 * max(asap_answer_delay{method=\"sketch\"}) + 60",
+          "legendFormat": "window wait"
+        },
+        {
+          "refId": "B",
+          "expr": "max(asap_stage_received{method=\"sketch\",stage=\"merge\"})",
+          "legendFormat": "branch + to merge"
+        },
+        {
+          "refId": "C",
+          "expr": "max(asap_stage_emitted{method=\"sketch\",stage=\"merge\"}) - max(asap_stage_received{method=\"sketch\",stage=\"merge\"})",
+          "legendFormat": "merge (grace)"
+        },
+        {
+          "refId": "D",
+          "expr": "max(asap_stage_received{method=\"sketch\",stage=\"detector\"}) - max(asap_stage_emitted{method=\"sketch\",stage=\"merge\"})",
+          "legendFormat": "to detector"
+        },
+        {
+          "refId": "E",
+          "expr": "max(asap_stage_emitted{method=\"sketch\",stage=\"detector\"}) - max(asap_stage_received{method=\"sketch\",stage=\"detector\"})",
+          "legendFormat": "detector"
+        },
+        {
+          "refId": "F",
+          "expr": "max(asap_query_seconds{method=\"sketch\"})",
+          "legendFormat": "Prometheus query"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 60,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 55
+      },
+      "id": 16
+    },
+    {
+      "type": "timeseries",
+      "title": "Exact: latency breakdown per window",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting out the grace for late sources.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "0 * max(asap_answer_delay{method=\"exact\"}) + 60",
+          "legendFormat": "window wait"
+        },
+        {
+          "refId": "B",
+          "expr": "max(asap_stage_received{method=\"exact\",stage=\"merge\"})",
+          "legendFormat": "branch + to merge"
+        },
+        {
+          "refId": "C",
+          "expr": "max(asap_stage_emitted{method=\"exact\",stage=\"merge\"}) - max(asap_stage_received{method=\"exact\",stage=\"merge\"})",
+          "legendFormat": "merge (grace)"
+        },
+        {
+          "refId": "D",
+          "expr": "max(asap_stage_received{method=\"exact\",stage=\"detector\"}) - max(asap_stage_emitted{method=\"exact\",stage=\"merge\"})",
+          "legendFormat": "to detector"
+        },
+        {
+          "refId": "E",
+          "expr": "max(asap_stage_emitted{method=\"exact\",stage=\"detector\"}) - max(asap_stage_received{method=\"exact\",stage=\"detector\"})",
+          "legendFormat": "detector"
+        },
+        {
+          "refId": "F",
+          "expr": "max(asap_query_seconds{method=\"exact\"})",
+          "legendFormat": "Prometheus query"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 60,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 55
+      },
+      "id": 17
+    },
+    {
+      "type": "timeseries",
+      "title": "Store and query: latency breakdown per window",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "0 * max(asap_answer_delay{method=\"raw\"}) + 60",
+          "legendFormat": "window wait"
+        },
+        {
+          "refId": "B",
+          "expr": "max(asap_answer_delay{method=\"raw\"})",
+          "legendFormat": "into loki-raw (last point acknowledged)"
+        },
+        {
+          "refId": "C",
+          "expr": "max(asap_query_seconds{method=\"raw\"})",
+          "legendFormat": "LogQL top-k query"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal"
+            },
+            "fillOpacity": 60,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 55
+      },
+      "id": 18
+    },
+    {
+      "type": "row",
+      "title": "Resources: per component and whole system (generators excluded)",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 63
+      },
+      "id": 19
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU cores per component",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "Pipeline stages from the engine's CPU time; Prometheus, loki-raw and query-job from their process CPU time.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage!~\".*generator.*\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{job=~\"prometheus|loki-raw|query-job\"}[1m]))",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
       },
       "gridPos": {
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 52
+        "y": 64
       },
+      "id": 20
+    },
+    {
+      "type": "timeseries",
+      "title": "Whole-system CPU cores per approach",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "sketch: branch-a/b, merge, detector. exact: exact-branch-a/b, exact-merge, exact-detector. store and query: raw-sink-a/b, loki-raw, query-job. Prometheus holds the answers of all three and the monitoring data.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (pipeline) (label_replace(label_replace(rate(payload_size_bytes_total{job=\"collectors\",stage!~\".*generator.*\",otel_scope_node_type=\"receiver\"}[1m]), \"pipeline\", \"sketch\", \"stage\", \".*\"), \"pipeline\", \"$1\", \"stage\", \"(exact|raw)-.*\")) * 8",
-          "legendFormat": "{{pipeline}}"
+          "expr": "sum by (approach) (label_replace(label_replace(label_replace(sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage!~\".*generator.*|hh-accuracy\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{job=~\"loki-raw|query-job\"}[1m])), \"approach\", \"sketch\", \"stage\", \"branch-.|merge|detector\"), \"approach\", \"exact\", \"stage\", \"exact-.*\"), \"approach\", \"store and query\", \"stage\", \"raw-sink-.|loki-raw|query-job\"))",
+          "legendFormat": "{{approach}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(process_cpu_seconds_total{job=\"prometheus\"}[1m]))",
+          "legendFormat": "Prometheus (shared)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Prometheus (shared)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73bf69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 64
+      },
+      "id": 21
+    },
+    {
+      "type": "timeseries",
+      "title": "Resident memory per component",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (stage) (memory_rss{job=\"collectors\",stage!~\".*generator.*\"}) or max by (stage) (process_resident_memory_bytes{job=~\"prometheus|loki-raw|query-job\"})",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 72
+      },
+      "id": 22
+    },
+    {
+      "type": "timeseries",
+      "title": "Whole-system resident memory per approach",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (approach) (label_replace(label_replace(label_replace(max by (stage) (memory_rss{job=\"collectors\",stage!~\".*generator.*|hh-accuracy\"}) or max by (stage) (process_resident_memory_bytes{job=~\"loki-raw|query-job\"}), \"approach\", \"sketch\", \"stage\", \"branch-.|merge|detector\"), \"approach\", \"exact\", \"stage\", \"exact-.*\"), \"approach\", \"store and query\", \"stage\", \"raw-sink-.|loki-raw|query-job\"))",
+          "legendFormat": "{{approach}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max(process_resident_memory_bytes{job=\"prometheus\"})",
+          "legendFormat": "Prometheus (shared)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Prometheus (shared)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#73bf69"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 72
+      },
+      "id": 23
+    },
+    {
+      "type": "row",
+      "title": "Bytes between stages",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 80
+      },
+      "id": 24
+    },
+    {
+      "type": "timeseries",
+      "title": "Bits per second into each stage, log scale",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows. into loki-raw: raw log records.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(payload_size_bytes_total{job=\"collectors\",stage!~\".*generator.*|hh-accuracy\",otel_scope_node_type=\"receiver\"}[1m])) * 8",
+          "legendFormat": "into {{stage}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(loki_distributor_bytes_received_total[1m])) * 8",
+          "legendFormat": "into loki-raw"
         }
       ],
       "fieldConfig": {
@@ -652,132 +1287,25 @@
           },
           "unit": "bps"
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "raw"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
-      "id": 8
-    },
-    {
-      "type": "timeseries",
-      "title": "Resident memory per pipeline (all stages but the generators)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus"
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 52
+        "w": 24,
+        "x": 0,
+        "y": 81
       },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (pipeline) (label_replace(label_replace(max by (stage) (memory_rss{job=\"collectors\",stage!~\".*generator.*\"}), \"pipeline\", \"sketch\", \"stage\", \".*\"), \"pipeline\", \"$1\", \"stage\", \"(exact|raw)-.*\"))",
-          "legendFormat": "{{pipeline}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "unit": "bytes"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "raw"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "id": 9
+      "id": 25
     }
   ]
 }

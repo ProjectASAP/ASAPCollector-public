@@ -33,6 +33,7 @@ use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 use serde::Deserialize;
 
+use super::answer_nodes::{send_gauges, stage_timing};
 use super::codec::{decode_pdata_to_observations, OtapSketchEncoder};
 use crate::envelope::SketchEnvelope;
 use crate::observation::ObservationValueKind;
@@ -68,6 +69,8 @@ pub struct WindowMerger {
     emitted_until: u64,
     /// Envelopes that arrived after their window was emitted.
     pub late: u64,
+    /// When the last source's sketch of each open window arrived (ms).
+    arrived: BTreeMap<u64, u64>,
 }
 
 fn series_key(e: &SketchEnvelope) -> String {
@@ -97,6 +100,7 @@ impl WindowMerger {
             self.late += 1;
             return Ok(());
         }
+        let _ = self.arrived.insert(envelope.window_end_ms, now_ms());
         let window = self.windows.entry(envelope.window_end_ms).or_default();
         match window.entry(series_key(&envelope)) {
             std::collections::btree_map::Entry::Occupied(mut slot) => {
@@ -110,6 +114,11 @@ impl WindowMerger {
             }
         }
         Ok(())
+    }
+
+    /// Removes and returns when the last sketch of window `end` arrived.
+    pub fn take_arrival(&mut self, end: u64) -> Option<u64> {
+        self.arrived.remove(&end)
     }
 
     /// Merged envelopes of every window that ended `grace` or more before `now_ms`.
@@ -164,7 +173,22 @@ impl WindowMergeProcessor {
                     .await
             }
         }
-        Ok(())
+        // Merged windows (not passthrough) carry this stage's timing along to
+        // the detector.
+        let now = now_ms();
+        let windows: BTreeMap<u64, u64> = envs
+            .iter()
+            .filter(|e| !e.payload.is_empty())
+            .map(|e| (e.window_end_ms, e.window_start_ms))
+            .collect();
+        let timing: Vec<SketchEnvelope> = windows
+            .into_iter()
+            .flat_map(|(end, start)| {
+                let arrived = self.merger.take_arrival(end).unwrap_or(now);
+                stage_timing(start, end, "sketch", "merge", arrived, now)
+            })
+            .collect();
+        send_gauges(&timing, effects).await
     }
 }
 
@@ -291,5 +315,27 @@ mod tests {
         m.add(hll(0..5, 0)).unwrap();
         assert_eq!(m.late, 1);
         assert_eq!(m.due(125_000, grace).len(), 1);
+    }
+
+    #[test]
+    fn remembers_when_a_window_last_got_a_sketch() {
+        let mut m = WindowMerger::default();
+        let before = now_ms();
+        m.add(hll(0..10, 0)).unwrap();
+        let arrived = m.take_arrival(60_000).unwrap();
+        assert!(arrived >= before && arrived <= now_ms());
+        assert_eq!(m.take_arrival(60_000), None);
+    }
+
+    #[test]
+    fn stage_timing_is_seconds_after_the_window_end() {
+        let gauges =
+            super::super::answer_nodes::stage_timing(0, 60_000, "sketch", "merge", 61_500, 65_250);
+        let get = |name: &str| gauges.iter().find(|g| g.metric_name == name).unwrap();
+        assert_eq!(get("asap.stage.received").value, 1.5);
+        assert_eq!(get("asap.stage.emitted").value, 5.25);
+        assert!(get("asap.stage.emitted")
+            .labels
+            .contains(&KeyValue::new("stage", "merge")));
     }
 }

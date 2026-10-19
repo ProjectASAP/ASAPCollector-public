@@ -1,4 +1,7 @@
-# Source b: 100,000 routes (Zipf 1.1); a new route takes 15% of traffic after 10 minutes.
+# Source b: routes drawn Zipf(1.1). Traffic grows over 30 minutes so the
+# dashboard shows how each approach scales: the rate doubles every 5 minutes
+# (5k to 80k points/s), a new route takes 15% of traffic at minute 10, and the
+# number of routes grows from 100,000 to 1,000,000 at minute 15.
 version: otel_dataflow/v1
 engine:
   http_admin:
@@ -17,7 +20,7 @@ groups:
             type: urn:asap:receiver:scenario_generator
             config:
               seed: 2
-              signals_per_second: 20000
+              signals_per_second: 5000
               metric_name: http.server.request.duration
               resource_attributes: {service.name: checkout, source: "b"}
               attributes:
@@ -25,6 +28,11 @@ groups:
               value: {lognormal: {median: 50.0, sigma: 0.6}}
               changes:
                 - {after_seconds: 600, attribute: http.route, inject: /new/hot-route, share: 0.15}
+                - {after_seconds: 300, signals_per_second: 10000}
+                - {after_seconds: 600, signals_per_second: 20000}
+                - {after_seconds: 900, signals_per_second: 40000}
+                - {after_seconds: 1200, signals_per_second: 80000}
+                - {after_seconds: 900, attribute: http.route, cardinality: 1000000}
           export:
             type: exporter:otlp_http
             config:

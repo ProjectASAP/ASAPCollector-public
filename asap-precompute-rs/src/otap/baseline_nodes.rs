@@ -65,8 +65,9 @@ use otel_arrow_dfe_pdata::OtapPayload;
 use serde::Deserialize;
 
 use super::answer_nodes::{
-    default_grace, default_k, default_novelty_windows, default_quantiles, default_window, emit,
-    gauges_pdata, invalid, now_ms, observations, series_key,
+    default_grace, default_k, default_novelty_windows, default_quantiles, default_window,
+    detector_timing, emit, gauges_pdata, invalid, now_ms, observations, send_gauges, series_key,
+    stage_timing, upstream_timing,
 };
 use super::codec::{decode_each, OtapSketchEncoder};
 use crate::answers::{
@@ -150,6 +151,10 @@ pub struct RawSinkConfig {
     /// Wait after a window's end before reporting it.
     #[serde(default = "default_grace", with = "humantime_serde")]
     pub grace: Duration,
+    /// Labels added to every gauge, e.g. `{source: a}` when each source has
+    /// its own sink.
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 /// Open windows by window end, then series.
@@ -301,6 +306,8 @@ impl local::Processor<OtapPdata> for ExactBranch {
 struct ExactMerge {
     config: ExactMergeConfig,
     windows: Windows,
+    /// When the last source's window arrived, by window end (ms).
+    arrived: BTreeMap<u64, u64>,
     emitted_until: u64,
     encoder: OtapSketchEncoder,
     timer_started: bool,
@@ -313,6 +320,7 @@ impl ExactMerge {
             return Ok(());
         }
         let w = ExactWindow::decode(&env.payload)?;
+        let _ = self.arrived.insert(env.window_end_ms, now_ms());
         let key = format!("{}|{}", series_key(&env), env.window_start_ms);
         let window = self.windows.entry(env.window_end_ms).or_default();
         match window.get_mut(&key) {
@@ -364,7 +372,20 @@ impl local::Processor<OtapPdata> for ExactMerge {
             Message::Control(NodeControlMsg::Shutdown { .. }) => self.due(u64::MAX),
             _ => Vec::new(),
         };
-        send(&mut self.encoder, &out, effects).await
+        send(&mut self.encoder, &out, effects).await?;
+        let now = now_ms();
+        let windows: BTreeMap<u64, u64> = out
+            .iter()
+            .map(|e| (e.window_end_ms, e.window_start_ms))
+            .collect();
+        let timing: Vec<SketchEnvelope> = windows
+            .into_iter()
+            .flat_map(|(end, start)| {
+                let arrived = self.arrived.remove(&end).unwrap_or(now);
+                stage_timing(start, end, "exact", "merge", arrived, now)
+            })
+            .collect();
+        send_gauges(&timing, effects).await
     }
 }
 
@@ -457,15 +478,21 @@ impl local::Processor<OtapPdata> for ExactDetector {
             return Ok(());
         };
         effects.notify_ack(AckMsg::new(pdata.clone())).await?;
+        let received = now_ms();
         let (mut out, mut events) = (Vec::new(), Vec::new());
-        for obs in observations(pdata, effects).await {
+        let observations = observations(pdata, effects).await;
+        send_gauges(&upstream_timing(&observations), effects).await?;
+        let mut windows = std::collections::BTreeSet::new();
+        for obs in observations {
             let Some(env) = obs.value.envelope.filter(|e| !e.payload.is_empty()) else {
                 continue;
             };
+            let _ = windows.insert((env.window_start_ms, env.window_end_ms));
             let (gauges, new) = self.answer(*env);
             out.extend(gauges);
             events.extend(new);
         }
+        out.extend(detector_timing(&windows, "exact", received));
         emit(&out, &events, effects).await
     }
 }
@@ -603,6 +630,12 @@ impl RawSink {
                 let mut e = gauge(&template, name, "raw", extra, v);
                 // Window-level gauges: no source metric label.
                 e.labels.retain(|kv| kv.key != "metric");
+                e.labels.extend(
+                    self.config
+                        .labels
+                        .iter()
+                        .map(|(k, v)| KeyValue::new(k.clone(), v.clone())),
+                );
                 e
             };
             // Complete once the last point is stored, and not before the
@@ -746,6 +779,7 @@ static EXACT_MERGE: ProcessorFactory<OtapPdata> = ProcessorFactory {
             ExactMerge {
                 config: config(&node_config)?,
                 windows: Windows::new(),
+                arrived: BTreeMap::new(),
                 emitted_until: 0,
                 encoder: OtapSketchEncoder::default(),
                 timer_started: false,
@@ -894,6 +928,7 @@ mod tests {
                 grace: Duration::from_secs(5),
             },
             windows: Windows::new(),
+            arrived: BTreeMap::new(),
             emitted_until: 0,
             encoder: OtapSketchEncoder::default(),
             timer_started: false,
