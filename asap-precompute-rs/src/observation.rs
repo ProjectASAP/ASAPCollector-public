@@ -12,7 +12,7 @@ use crate::envelope::SketchEnvelope;
 ///
 /// Labels are `Vec<KeyValue>` rather than a host-specific attribute map
 /// because attribute maps are host-specific (e.g. `pcommon::Map` is
-/// OTel-only). Telegraf, Vector, and OTAP adapters carry the same
+/// OTel-only). Host adapters carry the same
 /// struct without pulling host crates in.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Observation {
@@ -24,7 +24,7 @@ pub struct Observation {
     pub metric: String,
     /// `(key, value)` pairs from the host's resource scope (e.g.
     /// `pmetric::ResourceMetrics::Resource()` attributes on OTel,
-    /// analogous fields on Telegraf / Vector / OTAP). Today's OTel
+    /// analogous fields on other hosts). Today's OTel
     /// processors include resource attrs in the series key, so the
     /// runtime must too — preserved here as a separate slice so
     /// adapters don't have to flatten.
@@ -185,7 +185,7 @@ impl ObservationValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope::{Encoding, SketchType};
+    use crate::envelope::SketchType;
 
     #[test]
     fn observation_constructs_with_all_four_value_kinds() {
@@ -224,7 +224,6 @@ mod tests {
         let env = SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::DDSketch,
-            encoding: Encoding::ProtoFull,
             ..Default::default()
         };
         let o_env = Observation::new(
@@ -236,13 +235,5 @@ mod tests {
         );
         assert_eq!(o_env.value.kind, ObservationValueKind::Envelope);
         assert!(o_env.value.envelope.is_some());
-    }
-
-    #[test]
-    fn kind_names_match_go_reference() {
-        assert_eq!(ObservationValueKind::Float.name(), "Float");
-        assert_eq!(ObservationValueKind::Hash.name(), "Hash");
-        assert_eq!(ObservationValueKind::Bytes.name(), "Bytes");
-        assert_eq!(ObservationValueKind::Envelope.name(), "Envelope");
     }
 }

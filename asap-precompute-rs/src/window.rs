@@ -4,10 +4,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::config::{OnOverflow, PrecomputeConfig};
-use crate::envelope::{Encoding, SketchEnvelope};
+use crate::envelope::SketchEnvelope;
 use crate::observation::{KeyValue, Observation};
 use crate::precompute::{BoxedObserver, PrecomputeError, Sketch, SketchFactory, StatsSnapshot};
-use crate::snapshot_cache::SnapshotCache;
 
 /// Per-series state held inside a window.
 ///
@@ -205,18 +204,14 @@ impl WindowState {
         Ok(())
     }
 
-    /// Applies an inbound envelope to the appropriate series via
-    /// the sketch's `apply_delta` or `merge` depending on encoding.
-    ///
-    /// Strategy A enforcement: inbound envelopes are merged
-    /// into the local sketch as sketches, never expanded to scalar
+    /// Merges an inbound envelope's ASAPv1 payload into the matching
+    /// series. Envelopes are merged as sketches, never expanded to scalar
     /// samples.
     pub fn observe_envelope(
         &mut self,
         env: &SketchEnvelope,
         cfg: &PrecomputeConfig,
         sketch_factory: &SketchFactory,
-        snapshot_cache: &SnapshotCache,
         stats: &mut StatsSnapshot,
     ) -> Result<(), PrecomputeError> {
         // Use the envelope's window-end as the reference timestamp;
@@ -257,33 +252,7 @@ impl WindowState {
             .get_mut(&key)
             .expect("series entry must exist after insert");
 
-        match env.encoding {
-            Encoding::ProtoDelta | Encoding::MsgpackDelta => {
-                // Delta apply path: feed the delta bytes directly
-                // into the sketch; `apply_delta_encoded` dispatches the
-                // proto vs msgpack delta decoder off the inbound tag.
-                entry
-                    .sketch
-                    .apply_delta_encoded(&env.payload, env.encoding)?;
-                // Reconstruct the new full snapshot for cached
-                // inbound use.
-                if let Ok(snap) = entry.sketch.snapshot() {
-                    snapshot_cache.cache_inbound(&key, &snap);
-                }
-            }
-            Encoding::ProtoFull | Encoding::Msgpack | Encoding::Unspecified => {
-                // Full-state path: deserialize into a temporary
-                // sketch and merge. The Layer-3 runtime doesn't hold
-                // a deserialize hook (those are sketch-specific); we
-                // go through the SketchFactory + ApplyDelta-as-merge
-                // convention. `apply_delta_encoded` dispatches the
-                // proto vs msgpack full decoder off the inbound tag.
-                let mut other = sketch_factory();
-                other.apply_delta_encoded(&env.payload, env.encoding)?;
-                entry.sketch.merge(other.as_ref())?;
-                snapshot_cache.cache_inbound(&key, &env.payload);
-            }
-        }
+        entry.sketch.merge_snapshot(&env.payload)?;
         // Carry the upstream envelope's observation count into our
         // running entry so the next emission reflects the merged
         // total. Envelopes with count==0 contribute zero.

@@ -1,39 +1,14 @@
-//! Runtime view of the [`asap_sketchlib`] `SketchEnvelope` proto.
-//!
-//! The runtime's `SketchEnvelope` struct wraps the proto-encoded
-//! payload bytes plus the surrounding runtime metadata that today's
-//! OTel modified-OTLP variants (Strategy A) and tomorrow's Strategy-B
-//! adapters (Telegraf / Vector / OTAP) both need (window bounds,
-//! agg_id, encoding tag, sketch_type tag, host-neutral labels, metric
-//! name, count, temporality).
-//!
-//! The actual prost-generated proto type is re-exported as
-//! [`ProtoSketchEnvelope`] for adapters that need proto-level access
-//! (e.g. for round-tripping the `payload` against `asap_sketchlib`'s
-//! sketch-state oneof).
+//! Runtime sketch envelope: an ASAPv1 sketch payload from
+//! [`asap_sketchlib`] plus the runtime metadata around it (window
+//! bounds, `agg_id`, sketch type, labels, metric name, count,
+//! temporality).
 
 use crate::config::AggId;
 use crate::observation::KeyValue;
 
-/// Re-export of the prost-generated proto `SketchEnvelope` type from
-/// `asap_sketchlib`.
-///
-/// This is the actual on-the-wire envelope (oneof'd over each sketch
-/// state). Adapters that need to materialize the full proto
-/// representation (e.g. to round-trip through `asap_sketchlib`'s
-/// per-sketch state messages) reach for this type. The Layer-3 runtime
-/// itself works only with the [`SketchEnvelope`] struct in this
-/// module, which carries proto-encoded bytes in its `payload` field.
-pub type ProtoSketchEnvelope = asap_sketchlib::proto::sketchlib::SketchEnvelope;
-
 /// Identifies which sketch algorithm produced the envelope's payload
-/// bytes.
-///
-/// The `asap_sketchlib` proto today
-/// carries the sketch type implicitly via its `sketch_state` oneof,
-/// but the Layer-3 runtime keeps it as an explicit tag because
-/// envelopes flow through code paths that don't always unmarshal the
-/// inner state.
+/// bytes. The ASAPv1 payload carries its own kind id; the runtime keeps
+/// this explicit tag so routing does not need to parse the payload.
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -56,8 +31,7 @@ pub enum SketchType {
 }
 
 impl SketchType {
-    /// Returns the canonical name for the sketch type, matching the
-    /// well-known string spellings used by Strategy-B adapters.
+    /// Returns the canonical name for the sketch type.
     pub fn name(&self) -> &'static str {
         match self {
             Self::DDSketch => "DDSketch",
@@ -69,73 +43,28 @@ impl SketchType {
             Self::Unspecified => "Unspecified",
         }
     }
-}
 
-/// Describes how the bytes in [`SketchEnvelope::payload`] are encoded.
-#[derive(
-    Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
-pub enum Encoding {
-    /// Encoding was not set; treated as `ProtoFull` for backwards-
-    /// compatibility but adapters should reject at strict-mode
-    /// boundaries.
-    #[default]
-    Unspecified,
-    /// `payload` is a proto-encoded full `SketchEnvelope` state.
-    ProtoFull,
-    /// `payload` is a proto-encoded sparse delta against the
-    /// receiver's cached snapshot of this series.
-    ProtoDelta,
-    /// `payload` is a msgpack-encoded full state (some sketches expose
-    /// msgpack as a faster wire format).
-    Msgpack,
-    /// `payload` is a msgpack-encoded sparse delta against the
-    /// receiver's cached snapshot of this series — the msgpack twin of
-    /// [`Self::ProtoDelta`]. Carried by the four delta-capable sketches
-    /// (DDSketch / HLL / CountSketch / CountMinSketch) as the
-    /// struct-of-parallel-arrays layout produced by `asap_sketchlib`'s
-    /// `compute_delta_msgpack`. KLL never emits this (full-only).
-    MsgpackDelta,
-}
-
-impl Encoding {
-    /// Returns the canonical encoding name.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::ProtoFull => "PROTO_FULL",
-            Self::ProtoDelta => "PROTO_DELTA",
-            Self::Msgpack => "MSGPACK",
-            Self::MsgpackDelta => "MSGPACK_DELTA",
-            Self::Unspecified => "UNSPECIFIED",
-        }
-    }
-
-    /// Whether this encoding serializes sketch state as MessagePack
-    /// (full or delta) rather than proto. Used by the sketch wrappers to
-    /// pick the wire codec.
-    pub fn is_msgpack(&self) -> bool {
-        matches!(self, Self::Msgpack | Self::MsgpackDelta)
+    /// Parses a canonical [`Self::name`]; an empty string is `Unspecified`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        [
+            Self::DDSketch,
+            Self::KLLSketch,
+            Self::HLLSketch,
+            Self::CountSketch,
+            Self::CountMinSketch,
+            Self::CountMinSketchWithHeap,
+            Self::Unspecified,
+        ]
+        .into_iter()
+        .find(|t| t.name() == name)
+        .or_else(|| name.is_empty().then_some(Self::Unspecified))
     }
 }
 
-/// Runtime view of the `asap_sketchlib` `SketchEnvelope` proto plus
-/// the surrounding metadata that today's OTel modified-OTLP variants
-/// and tomorrow's Strategy-B adapters both need (window bounds,
-/// `agg_id`, encoding tag, sketch-type tag, host-neutral labels).
+/// One emitted sketch (or scalar estimate) plus its runtime metadata.
 ///
-/// The `payload` bytes are byte-identical to today's `asap_sketchlib`
-/// proto encoding.
-///
-/// The on-the-wire representation depends on the platform's encoding
-/// strategy:
-///   - Strategy A (OTel today): `payload` rides a typed
-///     `pmetric::Metric.data` oneof variant (DDSketch / KLLSketch / …).
-///   - Strategy B (Telegraf / Vector / OTAP): the whole struct is
-///     decomposed into the well-known `_asap_envelope` /
-///     `_asap_sketch_type` / `_asap_agg_id` / etc. carrier keys.
-///
-/// Either way `payload` is byte-identical and is what
-/// [`crate::precompute::Precompute::observe_envelope`] deserializes.
+/// `payload` is the sketch's ASAPv1 envelope bytes and is what
+/// [`crate::precompute::Precompute::observe_envelope`] merges.
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SketchEnvelope {
     /// Wire schema version. Adapters
@@ -151,13 +80,6 @@ pub struct SketchEnvelope {
     /// OTel: `pmetric::ResourceMetrics::Resource()` attrs). Carried
     /// in-process so the adapter's encode path can faithfully
     /// reconstruct the host's resource hierarchy on emission.
-    ///
-    /// NOT on the proto wire today: proto's `repeated KeyValue labels`
-    /// carries only data-point labels; cross-host hops that need to
-    /// preserve resource scope can prefix-encode (e.g.
-    /// `resource.region=…`) into `labels` at encode time. Strategy-B
-    /// hosts (Telegraf / Vector / flat-attribute platforms) flatten
-    /// resource into `labels`.
     pub resource_labels: Vec<KeyValue>,
     /// Host-neutral string-string label pairs identifying the
     /// data-point-level (metric × attrs) series.
@@ -168,31 +90,16 @@ pub struct SketchEnvelope {
     /// Exclusive upper bound of the window the payload summarizes
     /// (Unix milliseconds).
     pub window_end_ms: u64,
-    /// How `payload` is laid out.
-    pub encoding: Encoding,
-    /// Proto-encoded sketch state or delta. The bandwidth-invariant
-    /// blob.
+    /// ASAPv1 sketch envelope bytes; empty on the estimate path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub payload: Vec<u8>,
-    /// Determinism contract for cross-language reconstruction. Comes
-    /// from `asap_sketchlib`'s proto `HashSpec`.
-    ///
-    /// Wrapped in `Option` because not every adapter populates it,
-    /// and the proto type has no `Default` impl chain we can rely on.
-    /// `serde(skip)` because the proto type does not derive serde —
-    /// shutdown/restore use cases serialize the rest of the envelope
-    /// and re-fetch the hash spec from configuration.
-    #[serde(skip)]
-    pub hash_spec: Option<asap_sketchlib::proto::sketchlib::HashSpec>,
     /// Metric name the envelope was emitted for.
     ///
     /// Today's per-processor `flushWindow` builds the output
     /// `pmetric::Metric` and sets its `Name()` from a config field;
     /// once the shims delegate to this runtime, the runtime needs to
     /// know the metric name per-emission so `Adapter::encode` can
-    /// stamp it onto the synthesized output Metric. This is an
-    /// in-process Rust field — NOT a proto wire field. The canonical
-    /// wire bytes remain `payload`.
+    /// stamp it onto the synthesized output Metric.
     pub metric_name: String,
     /// Total observation count this envelope represents (sum of
     /// `dp.Count()` for the producing window's input samples).
@@ -222,31 +129,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sketch_type_names_match_go() {
-        assert_eq!(SketchType::DDSketch.name(), "DDSketch");
-        assert_eq!(SketchType::KLLSketch.name(), "KLLSketch");
-        assert_eq!(SketchType::HLLSketch.name(), "HLLSketch");
-        assert_eq!(SketchType::CountSketch.name(), "CountSketch");
-        assert_eq!(SketchType::CountMinSketch.name(), "CountMinSketch");
-        assert_eq!(
-            SketchType::CountMinSketchWithHeap.name(),
-            "CountMinSketchWithHeap"
-        );
-        assert_eq!(SketchType::Unspecified.name(), "Unspecified");
-    }
-
-    #[test]
-    fn encoding_names_match_go() {
-        assert_eq!(Encoding::ProtoFull.name(), "PROTO_FULL");
-        assert_eq!(Encoding::ProtoDelta.name(), "PROTO_DELTA");
-        assert_eq!(Encoding::Msgpack.name(), "MSGPACK");
-        assert_eq!(Encoding::MsgpackDelta.name(), "MSGPACK_DELTA");
-        assert_eq!(Encoding::Unspecified.name(), "UNSPECIFIED");
-        assert!(Encoding::Msgpack.is_msgpack() && Encoding::MsgpackDelta.is_msgpack());
-        assert!(!Encoding::ProtoFull.is_msgpack() && !Encoding::ProtoDelta.is_msgpack());
-    }
-
-    #[test]
     fn sketch_envelope_serde_round_trip() {
         let env = SketchEnvelope {
             schema_version: 1,
@@ -256,9 +138,7 @@ mod tests {
             labels: vec![KeyValue::new("path", "/api")],
             window_start_ms: 1_000,
             window_end_ms: 2_000,
-            encoding: Encoding::ProtoFull,
             payload: vec![1, 2, 3, 4],
-            hash_spec: None,
             metric_name: "http_request_duration".into(),
             count: 100,
             aggregation_temporality: 1,

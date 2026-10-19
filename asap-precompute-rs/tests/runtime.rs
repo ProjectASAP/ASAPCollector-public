@@ -5,114 +5,42 @@
 //!
 //! Coverage:
 //!   - `series_key` byte-equivalence (golden literal strings).
-//!   - `SnapshotCache::compute_delta` always-refresh policy.
 //!   - End-to-end observe → tick cycle.
 //!   - `Drain` rotates partial-window state.
 
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asap_precompute_rs::config::WindowSpec;
 use asap_precompute_rs::matchers::{attributes_key, series_key};
 use asap_precompute_rs::precompute::{
-    DeltaResult, Precompute, PrecomputeError, PrecomputeImpl, Sketch, SketchObserver,
+    Precompute, PrecomputeError, PrecomputeImpl, Sketch, SketchObserver,
 };
-use asap_precompute_rs::snapshot_cache::SnapshotCache;
 use asap_precompute_rs::{
-    AggregationMode, Encoding, KeyValue, Observation, ObservationValue, PrecomputeConfig,
+    AggregationMode, KeyValue, Observation, ObservationValue, PrecomputeConfig,
     PrecomputeConfigSet, SketchType,
 };
 
 // ----------------------------------------------------------------
-// Fake Sketch + SketchObserver test doubles. The byte-level test
-// fixtures (delta:"<state>" prefix) are pinned so they stay identical.
+// Fake Sketch + SketchObserver test doubles: the "snapshot" is the raw
+// state bytes and merging concatenates them.
 
-#[derive(Clone, Default)]
-struct FakeSketchInner {
-    state: Vec<u8>,
-    delta_force: bool,
-}
-
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct FakeSketch {
-    inner: Arc<Mutex<FakeSketchInner>>,
-}
-
-impl FakeSketch {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    fn with_state(state: &[u8]) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(FakeSketchInner {
-                state: state.to_vec(),
-                delta_force: false,
-            })),
-        }
-    }
-
-    fn set_state(&self, state: &[u8]) {
-        self.inner.lock().unwrap().state = state.to_vec();
-    }
-
-    fn force_full_next(&self) {
-        self.inner.lock().unwrap().delta_force = true;
-    }
+    state: Vec<u8>,
 }
 
 impl Sketch for FakeSketch {
     fn snapshot(&self) -> Result<Vec<u8>, PrecomputeError> {
-        Ok(self.inner.lock().unwrap().state.clone())
+        Ok(self.state.clone())
     }
 
-    fn compute_delta_against(
-        &self,
-        prev: &[u8],
-        threshold: u64,
-    ) -> Result<DeltaResult, PrecomputeError> {
-        let inner = self.inner.lock().unwrap();
-        if inner.delta_force {
-            return Ok(DeltaResult {
-                payload: inner.state.clone(),
-                is_full: true,
-            });
-        }
-        // delta = "delta:" + state (ignoring prev for the fake).
-        let _ = prev;
-        let mut delta = Vec::with_capacity(inner.state.len() + 6);
-        delta.extend_from_slice(b"delta:");
-        delta.extend_from_slice(&inner.state);
-        if delta.len() as u64 > threshold {
-            return Ok(DeltaResult {
-                payload: inner.state.clone(),
-                is_full: true,
-            });
-        }
-        Ok(DeltaResult {
-            payload: delta,
-            is_full: false,
-        })
-    }
-
-    fn apply_delta(&mut self, delta: &[u8]) -> Result<(), PrecomputeError> {
-        self.inner.lock().unwrap().state.extend_from_slice(delta);
-        Ok(())
-    }
-
-    fn merge(&mut self, other: &dyn Sketch) -> Result<(), PrecomputeError> {
-        // Snapshot the other sketch and concatenate.
-        let other_state = other.snapshot()?;
-        self.inner
-            .lock()
-            .unwrap()
-            .state
-            .extend_from_slice(&other_state);
+    fn merge_snapshot(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError> {
+        self.state.extend_from_slice(bytes);
         Ok(())
     }
 
     fn reset(&mut self) {
-        self.inner.lock().unwrap().state.clear();
+        self.state.clear();
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -131,12 +59,12 @@ impl SketchObserver for FakeObserver {
             asap_precompute_rs::ObservationValueKind::Bytes => &obs.value.bytes,
             asap_precompute_rs::ObservationValueKind::Envelope => b"",
         };
-        sketch.apply_delta(tag)
+        sketch.merge_snapshot(tag)
     }
 }
 
 fn make_factory() -> Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> {
-    Box::new(|| Box::new(FakeSketch::new()) as Box<dyn Sketch>)
+    Box::new(|| Box::new(FakeSketch::default()) as Box<dyn Sketch>)
 }
 
 // ----------------------------------------------------------------
@@ -235,65 +163,7 @@ fn attributes_key_sorts_by_key() {
 }
 
 // ----------------------------------------------------------------
-// 2. SnapshotCache always-refresh policy.
-
-#[test]
-fn snapshot_cache_first_call_returns_full() {
-    let c = SnapshotCache::new();
-    let s = FakeSketch::with_state(b"v1");
-    let r = c.compute_delta("k1", &s, 1024).expect("compute");
-    assert!(r.is_full);
-    assert_eq!(r.payload, b"v1");
-    // Cache populated.
-    assert_eq!(c.get_outbound("k1").as_deref(), Some(b"v1".as_ref()));
-}
-
-#[test]
-fn snapshot_cache_subsequent_returns_delta_and_refreshes() {
-    let c = SnapshotCache::new();
-    let s = FakeSketch::with_state(b"v1");
-    c.compute_delta("k1", &s, 1024).expect("first");
-    s.set_state(b"v1v2");
-    let r = c.compute_delta("k1", &s, 1024).expect("second");
-    assert!(!r.is_full);
-    assert_eq!(r.payload, b"delta:v1v2");
-    // Always-refresh: cache advances to the latest full state.
-    assert_eq!(c.get_outbound("k1").as_deref(), Some(b"v1v2".as_ref()));
-}
-
-#[test]
-fn snapshot_cache_always_refresh_chain() {
-    // Each delta is computed against the immediately preceding
-    // window's state — not the original baseline.
-    let c = SnapshotCache::new();
-    let s = FakeSketch::with_state(b"a");
-    c.compute_delta("k", &s, 1024).expect("w0");
-    assert_eq!(c.get_outbound("k").as_deref(), Some(b"a".as_ref()));
-
-    s.set_state(b"ab");
-    c.compute_delta("k", &s, 1024).expect("w1");
-    assert_eq!(c.get_outbound("k").as_deref(), Some(b"ab".as_ref()));
-
-    s.set_state(b"abc");
-    c.compute_delta("k", &s, 1024).expect("w2");
-    assert_eq!(c.get_outbound("k").as_deref(), Some(b"abc".as_ref()));
-}
-
-#[test]
-fn snapshot_cache_above_threshold_refreshes() {
-    let c = SnapshotCache::new();
-    let s = FakeSketch::with_state(b"v1");
-    c.compute_delta("k1", &s, 1024).expect("first");
-    s.set_state(b"BIG");
-    s.force_full_next();
-    let r = c.compute_delta("k1", &s, 1024).expect("forced");
-    assert!(r.is_full);
-    assert_eq!(r.payload, b"BIG");
-    assert_eq!(c.get_outbound("k1").as_deref(), Some(b"BIG".as_ref()));
-}
-
-// ----------------------------------------------------------------
-// 3. Observe → tick cycle produces expected envelope count + shape.
+// 2. Observe → tick cycle produces expected envelope count + shape.
 
 #[test]
 fn observe_then_tick_emits_one_envelope_per_series() {
@@ -385,49 +255,8 @@ fn stats_account_observations() {
     assert_eq!(s.active_series, 1);
 }
 
-#[test]
-fn delta_transmission_first_full_then_delta() {
-    let cfg = PrecomputeConfig {
-        agg_id: 1,
-        sketch_type: SketchType::DDSketch,
-        mode: AggregationMode::Tumbling,
-        window: WindowSpec {
-            size: Duration::from_secs(10),
-            ..Default::default()
-        },
-        delta_transmission: true,
-        delta_threshold: 1024,
-        ..Default::default()
-    };
-    let p = PrecomputeImpl::new(
-        Some(cfg),
-        Some(make_factory()),
-        Some(Box::new(FakeObserver)),
-    );
-
-    let obs = |ts: u64| Observation {
-        timestamp_ms: ts,
-        metric: "m".into(),
-        labels: vec![KeyValue::new("k", "a")],
-        value: ObservationValue::float(1.0),
-        ..Default::default()
-    };
-
-    // Window 0 — first emission is full.
-    p.observe(&obs(1_000)).expect("o1");
-    let envs = p.tick(10_000);
-    assert_eq!(envs.len(), 1);
-    assert_eq!(envs[0].encoding, Encoding::ProtoFull);
-
-    // Window 1 — small delta.
-    p.observe(&obs(11_000)).expect("o2");
-    let envs = p.tick(20_000);
-    assert_eq!(envs.len(), 1);
-    assert_eq!(envs[0].encoding, Encoding::ProtoDelta);
-}
-
 // ----------------------------------------------------------------
-// 4. Drain rotates partial-window state.
+// 3. Drain rotates partial-window state.
 
 #[test]
 fn drain_flushes_mid_window_observations() {
@@ -576,7 +405,6 @@ fn observe_envelope_merges_into_active_window() {
         labels: vec![KeyValue::new("k", "a")],
         window_start_ms: 0,
         window_end_ms: 10_000,
-        encoding: Encoding::ProtoFull,
         payload: b"upstream-state".to_vec(),
         count: 17,
         ..Default::default()
@@ -617,7 +445,6 @@ fn observe_envelope_rejects_agg_id_mismatch() {
         schema_version: 1,
         sketch_type: SketchType::DDSketch,
         agg_id: 99,
-        encoding: Encoding::ProtoFull,
         payload: b"x".to_vec(),
         ..Default::default()
     };
@@ -800,12 +627,13 @@ fn update_config_swaps_active() {
 }
 
 // ----------------------------------------------------------------
-// 8. Real-sketch wrappers (asap_sketchlib-backed) drive the runtime
+// 4. Real-sketch wrappers (asap_sketchlib-backed) drive the runtime
 // end-to-end. One test per wrapper exercising
 // observe → tick → envelope output.
 
 mod real_sketch {
     use super::*;
+    use asap_precompute_rs::precompute::{FrequencySketch, QuantileSketch};
     use asap_precompute_rs::sketches::{
         CMSObserver, CMSWrapper, CountSketchObserver, CountSketchWrapper, DDSketchObserver,
         DDSketchWrapper, HLLObserver, HLLWrapper, KLLObserver, KLLWrapper,
@@ -821,9 +649,7 @@ mod real_sketch {
     }
 
     fn hll_factory() -> Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> {
-        Box::new(|| {
-            Box::new(HLLWrapper::new(asap_sketchlib::HllVariant::Regular, 12)) as Box<dyn Sketch>
-        })
+        Box::new(|| Box::new(HLLWrapper::new()) as Box<dyn Sketch>)
     }
 
     fn count_sketch_factory() -> Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> {
@@ -879,63 +705,8 @@ mod real_sketch {
         assert_eq!(envs.len(), 1);
         let env = &envs[0];
         assert_eq!(env.sketch_type, SketchType::DDSketch);
-        assert_eq!(env.encoding, Encoding::ProtoFull);
-        assert!(!env.payload.is_empty());
-    }
-
-    #[test]
-    fn ddsketch_msgpack_delta_first_full_then_delta() {
-        // End-to-end Stage-3 wiring: a msgpack-configured DDSketch emits a
-        // full `Msgpack` frame on the first window and a sparse
-        // `MsgpackDelta` frame on the next, each reconstructable via
-        // sketchlib's msgpack codec.
-        use asap_sketchlib::MessagePackCodec;
-
-        let cfg = PrecomputeConfig {
-            agg_id: 1,
-            sketch_type: SketchType::DDSketch,
-            mode: AggregationMode::Tumbling,
-            window: WindowSpec {
-                size: Duration::from_secs(10),
-                ..Default::default()
-            },
-            delta_transmission: true,
-            delta_threshold: 1,
-            encoding: Encoding::MsgpackDelta,
-            ..Default::default()
-        };
-        let factory: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
-            Box::new(DDSketchWrapper::new(0.01).with_wire_encoding(Encoding::MsgpackDelta))
-                as Box<dyn Sketch>
-        });
-        let p = PrecomputeImpl::new(Some(cfg), Some(factory), Some(Box::new(DDSketchObserver)));
-
-        // Window 0 — first emission is a full msgpack frame.
-        for i in 1..=50 {
-            p.observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
-                .expect("observe");
-        }
-        let envs = p.tick(10_000);
-        assert_eq!(envs.len(), 1);
-        assert_eq!(envs[0].encoding, Encoding::Msgpack);
-        let full = asap_sketchlib::DdSketch::from_msgpack(&envs[0].payload).expect("decode full");
-        assert_eq!(full.total_count(), 50);
-
-        // Window 1 — a sparse msgpack delta frame; applying it to an empty
-        // base reconstructs this window's own count (no cross-window leak).
-        for i in 1..=50 {
-            p.observe(&float_obs("latency_ms", 11_000, "GET", i as f64))
-                .expect("observe");
-        }
-        let envs = p.tick(20_000);
-        assert_eq!(envs.len(), 1);
-        assert_eq!(envs[0].encoding, Encoding::MsgpackDelta);
-        assert!(!envs[0].payload.is_empty());
-        let mut recon = asap_sketchlib::DdSketch::new(0.01);
-        recon
-            .apply_delta_msgpack_bytes(&envs[0].payload)
-            .expect("apply msgpack delta");
-        assert_eq!(recon.total_count(), 50);
+        let decoded = DDSketchWrapper::from_snapshot(&env.payload).expect("ASAPv1 DDSketch");
+        assert_eq!(decoded.inner().get_count(), 20);
     }
 
     #[test]
@@ -975,7 +746,6 @@ mod real_sketch {
                 .unwrap_or_else(|| panic!("missing quantile {q}"))
         };
         for env in &envs {
-            assert_eq!(env.encoding, Encoding::Unspecified);
             assert!(
                 env.payload.is_empty(),
                 "estimate rows carry no sketch bytes"
@@ -1007,7 +777,6 @@ mod real_sketch {
         }
         let envs = p.tick(10_000);
         assert_eq!(envs.len(), 1, "one cardinality gauge");
-        assert_eq!(envs[0].encoding, Encoding::Unspecified);
         assert!(envs[0].payload.is_empty());
         assert!(
             (envs[0].value - 1000.0).abs() / 1000.0 < 0.1,
@@ -1016,13 +785,10 @@ mod real_sketch {
         );
     }
 
+    /// A sketch emitted by one node is re-ingested by a second
+    /// (envelope-input) node via `observe_envelope` and re-emitted.
     #[test]
-    fn cms_msgpack_full_roundtrips_through_ingest() {
-        // A msgpack full frame emitted by one node is re-ingested by a
-        // second (envelope-input) node via observe_envelope → the
-        // encoding-aware full-merge path, and the merged estimate matches.
-        use asap_sketchlib::MessagePackCodec;
-
+    fn cms_asapv1_roundtrips_through_ingest() {
         let cfg = PrecomputeConfig {
             agg_id: 1,
             sketch_type: SketchType::CountMinSketch,
@@ -1031,16 +797,11 @@ mod real_sketch {
                 size: Duration::from_secs(10),
                 ..Default::default()
             },
-            encoding: Encoding::Msgpack,
             ..Default::default()
         };
-        let factory: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
-            Box::new(CMSWrapper::new(4, 32).with_wire_encoding(Encoding::Msgpack))
-                as Box<dyn Sketch>
-        });
         let producer = PrecomputeImpl::new(
             Some(cfg.clone()),
-            Some(factory),
+            Some(cms_factory()),
             Some(Box::new(CMSObserver)),
         );
         for _ in 0..100 {
@@ -1050,25 +811,19 @@ mod real_sketch {
         }
         let envs = producer.tick(10_000);
         assert_eq!(envs.len(), 1);
-        assert_eq!(envs[0].encoding, Encoding::Msgpack);
 
-        // Second node ingests the emitted msgpack envelope and re-emits.
-        let factory2: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
-            Box::new(CMSWrapper::new(4, 32).with_wire_encoding(Encoding::Msgpack))
-                as Box<dyn Sketch>
-        });
-        let merger = PrecomputeImpl::new(Some(cfg), Some(factory2), Some(Box::new(CMSObserver)));
+        let merger =
+            PrecomputeImpl::new(Some(cfg), Some(cms_factory()), Some(Box::new(CMSObserver)));
+        merger.observe_envelope(&envs[0]).expect("observe_envelope");
         merger.observe_envelope(&envs[0]).expect("observe_envelope");
         let out = merger.tick(20_000);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].encoding, Encoding::Msgpack);
-        let merged =
-            asap_sketchlib::CountMinSketch::from_msgpack(&out[0].payload).expect("decode merged");
-        assert!(merged.estimate("hot") >= 90.0);
+        let merged = CMSWrapper::from_snapshot(&out[0].payload).expect("decode merged");
+        assert_eq!(merged.estimate_count(b"hot"), 200.0);
     }
 
     #[test]
-    fn kll_msgpack_full_roundtrips_through_ingest() {
+    fn kll_asapv1_roundtrips_through_ingest() {
         let cfg = PrecomputeConfig {
             agg_id: 1,
             sketch_type: SketchType::KLLSketch,
@@ -1077,16 +832,11 @@ mod real_sketch {
                 size: Duration::from_secs(10),
                 ..Default::default()
             },
-            encoding: Encoding::Msgpack,
             ..Default::default()
         };
-        let factory: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
-            Box::new(KLLWrapper::new(200, None).with_wire_encoding(Encoding::Msgpack))
-                as Box<dyn Sketch>
-        });
         let producer = PrecomputeImpl::new(
             Some(cfg.clone()),
-            Some(factory),
+            Some(kll_factory()),
             Some(Box::new(KLLObserver)),
         );
         for i in 1..=1000 {
@@ -1096,34 +846,16 @@ mod real_sketch {
         }
         let envs = producer.tick(10_000);
         assert_eq!(envs.len(), 1);
-        assert_eq!(envs[0].encoding, Encoding::Msgpack);
-        assert!(!envs[0].payload.is_empty());
-        let psk = asap_sketchlib::KLL::<f64>::deserialize_from_bytes(&envs[0].payload)
-            .expect("decode producer ASAPv1 envelope");
-        assert!(
-            (psk.quantile(0.5) - 500.0).abs() < 60.0,
-            "producer p50={}",
-            psk.quantile(0.5)
-        );
+        assert!(envs[0].payload.starts_with(b"ASAPv1"));
 
-        // Second node ingests the msgpack full frame and re-emits a valid
-        // msgpack frame (smoke). NOTE: cross-host KLL *merge* accuracy is a
-        // known, pre-existing limitation shared by the proto path — KLL's
-        // retained items carry level weights that item-replay drops — so we
-        // assert only that ingest + re-emit round-trips structurally, not
-        // that the merged median is preserved.
-        let factory2: Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync> = Box::new(|| {
-            Box::new(KLLWrapper::new(200, None).with_wire_encoding(Encoding::Msgpack))
-                as Box<dyn Sketch>
-        });
-        let merger = PrecomputeImpl::new(Some(cfg), Some(factory2), Some(Box::new(KLLObserver)));
+        let merger =
+            PrecomputeImpl::new(Some(cfg), Some(kll_factory()), Some(Box::new(KLLObserver)));
         merger.observe_envelope(&envs[0]).expect("observe_envelope");
         let out = merger.tick(20_000);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].encoding, Encoding::Msgpack);
-        let sk = asap_sketchlib::KLL::<f64>::deserialize_from_bytes(&out[0].payload)
-            .expect("decode merged ASAPv1 envelope");
-        assert!(sk.count() > 0, "re-emitted merged sketch must be non-empty");
+        let merged = KLLWrapper::from_snapshot(&out[0].payload).expect("decode merged");
+        let p50 = merged.quantile(0.5);
+        assert!((p50 - 500.0).abs() < 60.0, "merged p50={p50}");
     }
 
     #[test]
@@ -1146,7 +878,6 @@ mod real_sketch {
         let envs = p.tick(10_000);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].sketch_type, SketchType::KLLSketch);
-        assert_eq!(envs[0].encoding, Encoding::ProtoFull);
         assert!(!envs[0].payload.is_empty());
     }
 

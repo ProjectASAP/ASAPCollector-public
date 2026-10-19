@@ -1,11 +1,13 @@
 # Sketch Envelope Data Model
 
 This document describes the information carried when sketch state
-(DDSketch, KLL, HLL, Count Sketch, Count-Min Sketch) crosses a node or
+(DDSketch, KLL, HLL, Count Sketch, Count-Min Sketch, Count-Min Sketch with
+heap) crosses a node or
 network boundary between `asap_sketches` processor instances.
 
 A `RECORD` carries one of two things for a given series and window: sketch
-state (an `envelope` — a full snapshot or a delta) or an estimate (a
+state (an `envelope` — the full ASAPv1 snapshot from `asap_sketchlib`) or an
+estimate (a
 quantile or cardinality `value`), never both.
 
 ## The OTAP analogy: Schema / Dictionary / Record
@@ -40,7 +42,7 @@ series" as the separating question, at each of three distinct timescales:
 
 | Timescale | Common across... | Fields | OTAP-equivalent tier |
 |---|---|---|---|
-| **Config-time** (changes only on redeploy/reconfig) | every sketch instance, and every summarized series | `sketch_type`; sketch configuration/parameters (sketch size, hash seed, hash function); `encoding`; `schema_version` | **Schema** — this is the contract for decoding *any* envelope byte, not data about one. |
+| **Config-time** (changes only on redeploy/reconfig) | every sketch instance, and every summarized series | `sketch_type`; sketch configuration/parameters (sketch size); `schema_version` | **Schema** — this is the contract for decoding *any* envelope byte, not data about one. |
 | **Series-lifetime** (fixed for one series, differs series to series) | every instance of *one* summarized series, but not across different series | `metric` name + `labels` (the aggregated attributes identifying the series) | **Dictionary** — a bounded, slowly-growing set of distinct (name, label-set) identities, each reused across every window that series produces. |
 | **Sketch-instance-lifetime** (unique per sketch instance — the OTAP analogy to a row) | nothing — genuinely one-off | `window_start_ms` / `window_end_ms`; `envelope` bytes; `value` (estimate scalar) | **Record** — the only tier whose cost should scale with row count. |
 
@@ -84,9 +86,6 @@ erDiagram
         agg_id u32
         sketch_type string
         sketch_size u32 "optional"
-        hash_seed u64 "optional"
-        hash_function string "optional"
-        encoding string
         schema_version u32
     }
     DICTIONARY{
@@ -221,7 +220,7 @@ fully independent stream that each repeats `attrs`:
   `(attrs, timestamp)` pair. The waste is re-sending that identical pair
   once per sibling metric.
 - **Schema/Dictionary/Record's axis is temporal, at two different rates**:
-  sketch configuration (`sketch_type`, size/hash params, `encoding`) recurs
+  sketch configuration (`sketch_type`, size params) recurs
   across *every series and every window* an `agg_id` ever produces —
   config-time reuse, deduplicated once into `SCHEMA`; series identity
   (`metric` name + label combination) recurs across *every window that one
@@ -256,19 +255,18 @@ bearing on that design; the two axes are orthogonal.
 | `agg_id` | u32 | Primary key. Identifies this recipe — the aggregation plan/config. |
 | `sketch_type` | string | Which algorithm: DDSketch / KLL / HLL / Count Sketch / Count-Min Sketch. |
 | `sketch_size` | u32, optional | The algorithm's size/accuracy parameter (relative accuracy, buffer size, width × depth — whichever applies). |
-| `hash_seed` | u64, optional | Determinism contract for hash-based sketches (HLL, Count Sketch, Count-Min Sketch), so independently-produced sketches for the same series can merge correctly. |
-| `hash_function` | string, optional | Which hash function, for algorithms that need one. |
-| `encoding` | string | Wire layout of every `RECORD.envelope` under this schema: proto or msgpack, full or delta. |
 | `schema_version` | u32 | Wire-schema version, for forward/backward compatibility across deploys. |
 
-`sketch_type` decides what `sketch_size` (and whether `hash_seed` /
-`hash_function` apply) actually means:
+`sketch_type` decides what `sketch_size` actually means. Hashing (seed and
+function) is not a SCHEMA field: each ASAPv1 envelope's metadata records how
+its sketch was hashed, and sketchlib refuses to decode bytes whose hashing
+does not match.
 
-| `sketch_type` | What `sketch_size` holds | Example | `hash_seed` / `hash_function` |
+| `sketch_type` | What `sketch_size` holds | Example | Hashing |
 |---|---|---|---|
 | DDSketch | Relative accuracy (α) | `0.01` | not used — bucket boundaries are computed directly from the value, no hashing involved |
 | KLL | Buffer size (`k`) | `200` | not used — KLL stores/compacts items directly; it has no hashing step (a separate, optional compaction seed exists to make its internal randomized compaction reproducible, but that's not this field) |
-| HLL | Precision — register-count exponent, 4–18 | `12` | used — every value must hash to the same register on every host, or merging two sketches (max-per-register) overcounts the true union |
+| HLL | Precision — fixed at 14 (sketchlib's HyperLogLog) | `14` | used — every value must hash to the same register on every host, or merging two sketches (max-per-register) overcounts the true union |
 | Count Sketch | Width × depth | `2048 × 4` | used — sketch is hash-based, so both sides need the same seed/function to merge correctly |
 | Count-Min Sketch | Width × depth | `2048 × 4` | used — same reason as Count Sketch |
 
@@ -319,7 +317,7 @@ keys (`path`, `region`):
 |---|---|---|
 | `series_id` | u32 | Which `DICTIONARY` entry (and, transitively, which `SCHEMA`) this record belongs to. |
 | `window_start_ms` / `window_end_ms` | u64 | The time window this record summarizes. |
-| `envelope` | bytes, optional | The serialized sketch or sketch-delta. Opaque without the series' `SCHEMA` to interpret it. |
+| `envelope` | bytes, optional | The sketch's full state as the self-describing ASAPv1 envelope from `asap_sketchlib`. |
 | `value` | f64, optional | An estimate-mode result (a quantile or cardinality estimate), carried instead of `envelope` when the series emits estimates rather than sketch state. |
 
 Continuing the `agg_id = 7` example above, across two successive 10s
@@ -346,7 +344,7 @@ lookup key, never re-derived from `metric`/`labels`.
 Everything above describes SCHEMA/DICTIONARY/RECORD as if they ride the
 same stream. In practice SCHEMA is not negotiated on the data path at
 all — the aggregation plan behind an `agg_id` (which `sketch_type`,
-`sketch_size`, `encoding`) is decided out of band by whatever configures
+`sketch_size`) is decided out of band by whatever configures
 the sketch processor. That's a control-plane concern, not a data-plane
 one.
 
@@ -384,9 +382,9 @@ canonical sketchlib ASAPv1 bytes. The `b"ASAPv1"` magic number, envelope
 version, kind ID, and length-prefixed metadata and payload make the binary
 self-describing; the surrounding `sketch.*` Resource/Scope attributes provide
 OTAP routing and indexing rather than being required to interpret the sketch.
-Native OTAP sketch RECORDs require this full MessagePack envelope. Protobuf,
-legacy unframed MessagePack, and bare delta frames are rejected at the carrier
-boundary.
+Native OTAP sketch RECORDs require this full envelope, and the codec rejects
+bytes that do not decode as the declared `sketch.type`. There are no delta
+frames.
 
 OTAP's `resource_id`, `scope_id`, metric `id`, and attribute `parent_id`
 columns express the joins instead of repeating SCHEMA and series facts on

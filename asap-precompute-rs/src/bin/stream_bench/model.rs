@@ -1,7 +1,7 @@
 //! Count-aligned windows for a fair streaming comparison. No wall-clock flush races.
 use super::profile::{self, Category};
 use asap_precompute_rs::{
-    envelope::{Encoding, SketchEnvelope, SketchType},
+    envelope::{SketchEnvelope, SketchType},
     observation::{KeyValue, Observation},
     otap::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata},
     precompute::{QuantileSketch, Sketch},
@@ -70,9 +70,7 @@ impl Meta {
             ],
             window_start_ms: 1000,
             window_end_ms: 2000,
-            encoding: Encoding::Unspecified,
             payload: vec![],
-            hash_spec: None,
             metric_name: "http.server.request.duration".into(),
             count: 0,
             aggregation_temporality: 0,
@@ -86,13 +84,12 @@ pub fn values_pdata(values: &[f64], meta: Meta) -> Result<OtapPdata, String> {
         .map_err(|e| e.to_string())
 }
 fn new_sketch(seed: u64) -> KLLWrapper {
-    KLLWrapper::new(400, Some(seed)).with_wire_encoding(Encoding::Msgpack)
+    KLLWrapper::new(400, Some(seed))
 }
 fn sketch_pdata(sketch: &KLLWrapper, count: usize, meta: Meta) -> Result<OtapPdata, String> {
     let _cpu = profile::scope(Category::PdataCodec);
     let mut env = meta.envelope(0.0);
     env.sketch_type = SketchType::KLLSketch;
-    env.encoding = Encoding::Msgpack;
     env.payload = {
         let _cpu = profile::scope(Category::SketchCodec);
         sketch.snapshot().map_err(|e| e.to_string())?
@@ -106,11 +103,7 @@ fn decode_sketch(o: &Observation, count: usize) -> Result<KLLWrapper, String> {
     if env.count != count as u64 {
         return Err("sketch count mismatch".into());
     }
-    let mut sketch = new_sketch(99);
-    sketch
-        .apply_delta_encoded(&env.payload, env.encoding)
-        .map_err(|e| e.to_string())?;
-    Ok(sketch)
+    KLLWrapper::from_snapshot(&env.payload).map_err(|e| e.to_string())
 }
 const QUANTILES: [&str; 2] = ["0.5", "0.99"];
 /// Tumbling quantiles, plus rolling quantiles when the estimate retains windows.

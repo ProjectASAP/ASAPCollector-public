@@ -92,7 +92,7 @@ use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 
 use crate::config::PrecomputeConfigSet;
-use crate::envelope::{Encoding, SketchEnvelope};
+use crate::envelope::SketchEnvelope;
 use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::PluginConfig;
 use crate::precompute::{Precompute, PrecomputeError, PrecomputeImpl};
@@ -114,7 +114,8 @@ pub const ASAP_SKETCHES_PROCESSOR_URN: &str = "urn:asap:processor:asap_sketches"
 #[serde(deny_unknown_fields)]
 pub struct AsapSketchesUserConfig {
     /// One of `"ddsketch"` / `"kll"` / `"hll"` / `"countsketch"` /
-    /// `"countminsketch"` (case-insensitive). See `sample.toml`.
+    /// `"countminsketch"` / `"countminsketch_heap"` (case-insensitive).
+    /// See `sample.toml`.
     pub sketch_type: String,
     /// Window rotation period — humantime format (e.g. `"10s"`).
     #[serde(with = "humantime_serde")]
@@ -144,24 +145,12 @@ pub struct AsapSketchesUserConfig {
     /// Add sample-count and window-duration labels to emitted rows.
     #[serde(default)]
     pub emit_window_stats: bool,
-    /// Sketch payload encoding. Defaults to self-describing ASAPv1 MessagePack.
-    #[serde(default)]
-    pub encoding: Option<Encoding>,
-    /// Emit deltas after the first full snapshot.
-    #[serde(default)]
-    pub delta_transmission: bool,
     /// Emit sketch envelopes when true; emit scalar estimates when false.
     #[serde(default = "default_transmit_sketch")]
     pub transmit_sketch: bool,
     /// Quantiles emitted by DDSketch/KLL in estimate mode.
     #[serde(default)]
     pub quantiles: Vec<f64>,
-    /// Bootstrap controller URL. Optional.
-    #[serde(default)]
-    pub controller_url: Option<String>,
-    /// Bootstrap agent identifier reported to the controller.
-    #[serde(default)]
-    pub agent_id: Option<String>,
 }
 
 impl AsapSketchesUserConfig {
@@ -197,8 +186,6 @@ impl AsapSketchesUserConfig {
             omit_resource_attrs: self.omit_resource_attrs,
             global_aggregation: self.global_aggregation,
             emit_window_stats: self.emit_window_stats,
-            encoding: self.encoding.unwrap_or(Encoding::Msgpack),
-            delta_transmission: self.delta_transmission,
             transmit_sketch: self.transmit_sketch,
             quantiles: self.quantiles,
         };
@@ -247,7 +234,6 @@ fn requires_precompute_rebuild(current: &PluginConfig, next: &PluginConfig) -> b
         || ((!current.window_slide.is_zero() || !next.window_slide.is_zero())
             && current.window_size != next.window_size)
         || current.sketch_params != next.sketch_params
-        || current.encoding != next.encoding
         || current.default_key != next.default_key
         || current.agg_id != next.agg_id
         || current.omit_resource_attrs != next.omit_resource_attrs
@@ -556,7 +542,7 @@ mod tests {
     #[test]
     fn sliding_config_selects_pane_timer_and_validates_alignment() {
         let parse = |size: &str, slide: &str, transmit: bool| {
-            serde_json::from_value::<super::AsapSketchesUserConfig>(serde_json::json!({"sketch_type":"kll","window_size":size,"window_slide":slide,"output_metric_name":"rolling","encoding":"Msgpack","transmit_sketch":transmit,"quantiles":[0.5,0.99]})).unwrap().into_plugin_config()
+            serde_json::from_value::<super::AsapSketchesUserConfig>(serde_json::json!({"sketch_type":"kll","window_size":size,"window_slide":slide,"output_metric_name":"rolling","transmit_sketch":transmit,"quantiles":[0.5,0.99]})).unwrap().into_plugin_config()
         };
         let config = parse("60s", "5s", false).unwrap();
         assert_eq!(
@@ -591,8 +577,6 @@ mod tests {
         assert_eq!(cfg.agg_id, 0);
         assert!(cfg.transmit_sketch);
         assert!(cfg.quantiles.is_empty());
-        assert!(cfg.encoding.is_none());
-        assert!(cfg.controller_url.is_none());
     }
 
     #[test]
@@ -670,8 +654,6 @@ mod tests {
             "sketch_type": "ddsketch",
             "window_size": "5s",
             "output_metric_name": "request.duration.p99",
-            "encoding": "Msgpack",
-            "delta_transmission": true,
             "transmit_sketch": false,
             "quantiles": [0.5, 0.99],
             "omit_resource_attrs": true,
@@ -680,8 +662,6 @@ mod tests {
         }))
         .expect("extended control-plane shape parses");
         let plugin = user.into_plugin_config().expect("extended config resolves");
-        assert_eq!(plugin.encoding, Encoding::Msgpack);
-        assert!(plugin.delta_transmission);
         assert!(!plugin.transmit_sketch);
         assert_eq!(plugin.quantiles, vec![0.5, 0.99]);
         assert!(plugin.omit_resource_attrs);
@@ -721,10 +701,6 @@ mod tests {
         runtime_only_change.output_metric_name = "renamed".to_string();
         runtime_only_change.window_size = Duration::from_secs(60);
         assert!(!requires_precompute_rebuild(&current, &runtime_only_change));
-
-        let mut encoding_change = current.clone();
-        encoding_change.encoding = Encoding::ProtoFull;
-        assert!(requires_precompute_rebuild(&current, &encoding_change));
 
         let mut series_identity_change = current.clone();
         series_identity_change.global_aggregation = true;
