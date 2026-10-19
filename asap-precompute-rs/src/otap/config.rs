@@ -116,6 +116,8 @@ pub struct PluginConfig {
     pub quantiles: Vec<f64>,
     /// Labels that identify a series; empty keys series by every label.
     pub aggregate_by: Vec<String>,
+    /// Attribute keys sketched as their own series; `"*"` = every attribute.
+    pub per_attribute: Vec<String>,
 }
 
 impl Default for PluginConfig {
@@ -134,6 +136,7 @@ impl Default for PluginConfig {
             transmit_sketch: true,
             quantiles: Vec::new(),
             aggregate_by: Vec::new(),
+            per_attribute: Vec::new(),
         }
     }
 }

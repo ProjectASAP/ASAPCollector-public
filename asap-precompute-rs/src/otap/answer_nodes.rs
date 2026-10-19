@@ -1,6 +1,7 @@
 //! `urn:asap:processor:sketch_detector` reads merged sketch windows (the
-//! output of `window_merge`) and emits each window's answers with bounds. The
-//! exact and raw baselines are in [`super::baseline_nodes`].
+//! output of `window_merge`) and emits each window's answers with bounds and
+//! its detection events. The exact and raw baselines are in
+//! [`super::baseline_nodes`].
 //!
 //! ```yaml
 //! detector:
@@ -16,11 +17,13 @@ use linkme::distributed_slice;
 use otel_arrow_dfe_config::node::NodeUserConfig;
 use otel_arrow_dfe_engine::config::ProcessorConfig;
 use otel_arrow_dfe_engine::context::PipelineContext;
+use otel_arrow_dfe_engine::control::AckMsg;
 use otel_arrow_dfe_engine::error::Error;
 use otel_arrow_dfe_engine::local::processor as local;
 use otel_arrow_dfe_engine::message::Message;
 use otel_arrow_dfe_engine::node::NodeId;
 use otel_arrow_dfe_engine::processor::ProcessorWrapper;
+use otel_arrow_dfe_engine::ConsumerEffectHandlerExtension;
 use otel_arrow_dfe_engine::{MessageSourceLocalEffectHandlerExtension, ProcessorFactory};
 use otel_arrow_dfe_otap::pdata::OtapPdata;
 use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
@@ -28,6 +31,9 @@ use serde::Deserialize;
 
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{
     AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
+};
+use otel_arrow_dfe_pdata::proto::opentelemetry::logs::v1::{
+    LogRecord, LogsData, ResourceLogs, ScopeLogs, SeverityNumber,
 };
 use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
     Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics,
@@ -37,7 +43,7 @@ use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
 use otel_arrow_dfe_pdata::OtapPayload;
 
 use super::codec::decode_pdata_to_observations;
-use crate::answers::sketch_answers;
+use crate::answers::{sketch_answers, CardinalityClassifier, CardinalityRules, Event};
 use crate::envelope::SketchEnvelope;
 use crate::observation::{KeyValue, Observation};
 
@@ -67,6 +73,9 @@ pub struct DetectorConfig {
     /// Heavy hitters answered from CMS + heap windows.
     #[serde(default = "default_k")]
     pub k: usize,
+    /// Thresholds for classifying per-attribute cardinality.
+    #[serde(default)]
+    pub cardinality: CardinalityRules,
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -144,17 +153,67 @@ pub(super) fn gauges_pdata(envs: &[SketchEnvelope]) -> Result<OtapPdata, String>
     Ok(OtapPdata::new_todo_context(payload))
 }
 
+/// Detection events as OTLP log records (for Loki or any log backend).
+fn events_pdata(events: &[Event]) -> Result<OtapPdata, String> {
+    let records = events
+        .iter()
+        .map(|e| {
+            let mut attributes = vec![
+                OtlpKeyValue::new("event.kind", AnyValue::new_string(e.kind.clone())),
+                OtlpKeyValue::new("method", AnyValue::new_string(e.method.clone())),
+            ];
+            attributes.extend(e.attributes.iter().map(|kv| {
+                OtlpKeyValue::new(kv.key.clone(), AnyValue::new_string(kv.value.clone()))
+            }));
+            LogRecord::build()
+                .time_unix_nano(e.window_end_ms * 1_000_000)
+                .observed_time_unix_nano(e.window_end_ms * 1_000_000)
+                .severity_number(SeverityNumber::Info)
+                .severity_text("INFO")
+                .body(AnyValue::new_string(e.body.clone()))
+                .attributes(attributes)
+                .finish()
+        })
+        .collect::<Vec<_>>();
+    let data = LogsData::new(vec![ResourceLogs::new(
+        Resource::build()
+            .attributes(vec![OtlpKeyValue::new(
+                "service.name",
+                AnyValue::new_string("asap-detector"),
+            )])
+            .finish(),
+        vec![ScopeLogs::new(
+            InstrumentationScope::build().name("asap.events").finish(),
+            records,
+        )],
+    )]);
+    let payload: OtapPayload = OtlpProtoMessage::Logs(data)
+        .try_into()
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(OtapPdata::new_todo_context(payload))
+}
+
 pub(super) async fn emit(
     envs: &[SketchEnvelope],
+    events: &[Event],
     effects: &mut local::EffectHandler<OtapPdata>,
 ) -> Result<(), Error> {
-    if envs.is_empty() {
-        return Ok(());
+    if !envs.is_empty() {
+        let envs = with_delay(envs, now_ms());
+        match gauges_pdata(&envs) {
+            Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
+            Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
+        }
     }
-    let envs = with_delay(envs, now_ms());
-    match gauges_pdata(&envs) {
-        Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
-        Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
+    if !events.is_empty() {
+        match events_pdata(events) {
+            Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
+            Err(e) => {
+                effects
+                    .info(&format!("answers: event encode failed: {e}"))
+                    .await
+            }
+        }
     }
     Ok(())
 }
@@ -181,6 +240,20 @@ pub(super) async fn observations(
 
 struct SketchDetector {
     config: DetectorConfig,
+    cardinality: CardinalityClassifier,
+}
+
+/// The `bound="estimate"` value of `metric` among `answers`.
+fn estimate_of(answers: &[SketchEnvelope], metric: &str) -> Option<f64> {
+    answers
+        .iter()
+        .find(|e| {
+            e.metric_name == metric
+                && e.labels
+                    .iter()
+                    .any(|kv| kv.key == "bound" && kv.value == "estimate")
+        })
+        .map(|e| e.value)
 }
 
 #[async_trait(?Send)]
@@ -193,17 +266,27 @@ impl local::Processor<OtapPdata> for SketchDetector {
         let Message::PData(pdata) = msg else {
             return Ok(());
         };
-        let mut out = Vec::new();
+        // Consumed into state here: ack so upstream (e.g. fanout) can move on.
+        effects.notify_ack(AckMsg::new(pdata.clone())).await?;
+        let (mut out, mut events) = (Vec::new(), Vec::new());
         for obs in observations(pdata, effects).await {
             let Some(env) = obs.value.envelope.filter(|e| !e.payload.is_empty()) else {
                 continue;
             };
             match sketch_answers(&env, &self.config.quantiles, self.config.k) {
-                Ok(answers) => out.extend(answers),
+                Ok(answers) => {
+                    if let Some(d) = estimate_of(&answers, "asap.distinct") {
+                        let (gauges, event) =
+                            self.cardinality.observe(&env, "sketch", d, env.count);
+                        out.extend(gauges);
+                        events.extend(event);
+                    }
+                    out.extend(answers);
+                }
                 Err(e) => effects.info(&format!("sketch_detector: {e}")).await,
             }
         }
-        emit(&out, effects).await
+        emit(&out, &events, effects).await
     }
 }
 
@@ -225,7 +308,10 @@ static SKETCH_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         let config: DetectorConfig =
             serde_json::from_value(node_config.config.clone()).map_err(invalid)?;
         Ok(ProcessorWrapper::local(
-            SketchDetector { config },
+            SketchDetector {
+                cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                config,
+            },
             node,
             node_config,
             processor_config,
