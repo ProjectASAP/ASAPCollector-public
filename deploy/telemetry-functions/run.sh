@@ -13,5 +13,8 @@ trap 'rm -rf "$context"' EXIT
 cp "$target/release/asap-collector" "$context/"
 strip --strip-debug "$context/asap-collector"
 "${docker[@]}" build -q -f deploy/collector.Dockerfile -t asap-collector:local "$context"
+# Every generator counts scenario time from this second, so the three
+# pipelines get identical points.
+export SCENARIO_START=${SCENARIO_START:-$(($(date +%s) + 10))}
 "${docker[@]}" compose -f deploy/telemetry-functions/compose.yaml up -d
 echo "Grafana: http://localhost:${GRAFANA_PORT:-3000}/d/asap-latency"

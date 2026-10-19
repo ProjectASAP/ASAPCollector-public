@@ -20,7 +20,7 @@
 //!   q ± error.
 //! * Count-Min: counts never underestimate; with width w and N points the
 //!   overestimate is at most e/w * N with probability 1 - e^-depth.
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::envelope::{SketchEnvelope, SketchType};
 use crate::observation::KeyValue;
@@ -126,17 +126,90 @@ pub fn sketch_answers(
     Ok(out)
 }
 
-/// Exact data for one series and window.
-#[derive(Default)]
+/// Exact data for one series and window: what an exact branch builds and an
+/// exact merge adds up.
+#[derive(Debug, Default, PartialEq)]
 pub struct ExactWindow {
     /// Every value, for quantiles.
     pub values: Vec<f64>,
-    /// Distinct attribute values.
-    pub distinct: HashSet<String>,
-    /// Occurrences per attribute value.
+    /// Occurrences per attribute value; its size is the distinct count.
     pub counts: HashMap<String, u64>,
     /// Data points.
     pub points: u64,
+}
+
+const EXACT_MAGIC: &[u8; 4] = b"EXv1";
+
+impl ExactWindow {
+    /// Adds another source's window.
+    pub fn merge(&mut self, other: ExactWindow) {
+        self.values.extend(other.values);
+        for (k, c) in other.counts {
+            *self.counts.entry(k).or_default() += c;
+        }
+        self.points += other.points;
+    }
+
+    /// `EXv1`, points, values, then (key, count) pairs; little-endian.
+    pub fn encode(&self) -> Vec<u8> {
+        let keys: usize = self.counts.keys().map(|k| 12 + k.len()).sum();
+        let mut out = Vec::with_capacity(28 + 8 * self.values.len() + keys);
+        out.extend_from_slice(EXACT_MAGIC);
+        out.extend_from_slice(&self.points.to_le_bytes());
+        out.extend_from_slice(&(self.values.len() as u64).to_le_bytes());
+        for v in &self.values {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&(self.counts.len() as u64).to_le_bytes());
+        for (k, c) in &self.counts {
+            out.extend_from_slice(&(k.len() as u32).to_le_bytes());
+            out.extend_from_slice(k.as_bytes());
+            out.extend_from_slice(&c.to_le_bytes());
+        }
+        out
+    }
+
+    /// Inverse of [`Self::encode`].
+    pub fn decode(bytes: &[u8]) -> Result<Self, PrecomputeError> {
+        struct Cursor<'a>(&'a [u8]);
+        impl<'a> Cursor<'a> {
+            fn take(&mut self, n: usize) -> Result<&'a [u8], PrecomputeError> {
+                if self.0.len() < n {
+                    return Err(PrecomputeError::Other(
+                        "truncated exact window payload".into(),
+                    ));
+                }
+                let (head, tail) = self.0.split_at(n);
+                self.0 = tail;
+                Ok(head)
+            }
+            fn u64(&mut self) -> Result<u64, PrecomputeError> {
+                Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+            }
+        }
+        let rest = bytes
+            .strip_prefix(EXACT_MAGIC)
+            .ok_or_else(|| PrecomputeError::Other("not an exact window payload".into()))?;
+        let mut c = Cursor(rest);
+        let points = c.u64()?;
+        let n = c.u64()? as usize;
+        let values = (0..n)
+            .map(|_| c.u64().map(f64::from_bits))
+            .collect::<Result<Vec<_>, _>>()?;
+        let n = c.u64()? as usize;
+        let mut counts = HashMap::with_capacity(n.min(1 << 24));
+        for _ in 0..n {
+            let len = u32::from_le_bytes(c.take(4)?.try_into().unwrap()) as usize;
+            let key = std::str::from_utf8(c.take(len)?)
+                .map_err(|_| PrecomputeError::Other("exact window key is not UTF-8".into()))?;
+            counts.insert(key.to_owned(), c.u64()?);
+        }
+        Ok(Self {
+            values,
+            counts,
+            points,
+        })
+    }
 }
 
 /// Exact answers in the same shape as [`sketch_answers`].
@@ -169,8 +242,8 @@ pub fn exact_answers(
             ));
         }
     }
-    if !window.distinct.is_empty() {
-        out.push(e("asap.distinct", &[], window.distinct.len() as f64));
+    if !window.counts.is_empty() {
+        out.push(e("asap.distinct", &[], window.counts.len() as f64));
     }
     let mut top: Vec<_> = window.counts.iter().collect();
     top.sort_unstable_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));

@@ -1,0 +1,29 @@
+# Raw pipeline, stage 2: forward both sources' raw points to one place.
+version: otel_dataflow/v1
+engine:
+  http_admin:
+    bind_address: 0.0.0.0:8085
+policies:
+  resources:
+    core_allocation:
+      type: core_count
+      count: 1
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: receiver:otlp
+            config:
+              protocols:
+                http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
+          to_sink:
+            type: exporter:otlp_http
+            config:
+              endpoint: http://raw-sink:4318
+              client_pool_size: 1
+              max_in_flight: 1
+              http: {timeout: 30s, compression: none}
+        connections:
+          - {from: receiver, to: to_sink}
