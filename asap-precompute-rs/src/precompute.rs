@@ -2,7 +2,7 @@
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -316,11 +316,12 @@ pub type SketchFactory = Box<dyn Fn() -> Box<dyn Sketch> + Send + Sync>;
 /// can construct one directly. Fields are private; construction
 /// goes through [`PrecomputeImpl::new`].
 pub struct PrecomputeImpl {
-    cfg: Mutex<Option<PrecomputeConfig>>,
+    /// Shared so `observe` takes a reference count, not a deep copy.
+    cfg: Mutex<Option<Arc<PrecomputeConfig>>>,
     sketch_factory: Option<SketchFactory>,
     observer: Option<BoxedObserver>,
-    window: Mutex<WindowState>,
-    stats: Mutex<StatsSnapshot>,
+    /// Window and counters under one lock: every observation touches both.
+    state: Mutex<State>,
     sketch_type: SketchType,
     closed: AtomicBool,
 }
@@ -345,11 +346,10 @@ impl PrecomputeImpl {
             .map(|c| c.sketch_type)
             .unwrap_or(SketchType::Unspecified);
         Self {
-            cfg: Mutex::new(initial_cfg),
+            cfg: Mutex::new(initial_cfg.map(Arc::new)),
             sketch_factory,
             observer,
-            window: Mutex::new(WindowState::new()),
-            stats: Mutex::new(StatsSnapshot::default()),
+            state: Mutex::new(State::default()),
             sketch_type,
             closed: AtomicBool::new(false),
         }
@@ -366,10 +366,21 @@ impl PrecomputeImpl {
     }
 }
 
+/// The mutable state of a [`PrecomputeImpl`].
+#[derive(Default)]
+struct State {
+    window: WindowState,
+    stats: StatsSnapshot,
+}
+
 impl PrecomputeImpl {
-    /// Returns a clone of the active config or `None`.
-    fn active_config(&self) -> Option<PrecomputeConfig> {
+    /// Returns the active config or `None`.
+    fn shared_config(&self) -> Option<Arc<PrecomputeConfig>> {
         self.cfg.lock().expect("config lock poisoned").clone()
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().expect("state lock poisoned")
     }
 
     /// Walks the closed series, serializes each into a
@@ -384,7 +395,7 @@ impl PrecomputeImpl {
         if closed.is_empty() {
             return Vec::new();
         }
-        let cfg = match self.active_config() {
+        let cfg = match self.shared_config() {
             Some(c) => c,
             None => return Vec::new(),
         };
@@ -398,7 +409,7 @@ impl PrecomputeImpl {
                 envelopes.extend(envs);
             }
         }
-        let mut stats = self.stats.lock().expect("stats lock poisoned");
+        let stats = &mut self.lock_state().stats;
         stats.output_envelopes = stats
             .output_envelopes
             .saturating_add(envelopes.len() as u64);
@@ -493,7 +504,7 @@ impl Precompute for PrecomputeImpl {
         if self.closed.load(Ordering::Acquire) {
             return Err(PrecomputeError::Other("instance is closed".into()));
         }
-        let cfg = match self.active_config() {
+        let cfg = match self.shared_config() {
             Some(c) => c,
             None => return Err(PrecomputeError::NoConfig),
         };
@@ -502,16 +513,19 @@ impl Precompute for PrecomputeImpl {
         // pre-aggregated path so we never explode them to scalars.
         // The input_observations counter is bumped before
         // routing so envelope-valued observations also count.
-        {
-            let mut stats = self.stats.lock().expect("stats lock poisoned");
-            stats.input_observations = stats.input_observations.saturating_add(1);
-        }
-
         if obs.value.kind == ObservationValueKind::Envelope {
             if let Some(env) = obs.value.envelope.as_ref() {
+                {
+                    let stats = &mut self.lock_state().stats;
+                    stats.input_observations = stats.input_observations.saturating_add(1);
+                }
                 return self.observe_envelope(env);
             }
         }
+
+        let mut state = self.lock_state();
+        let State { window, stats } = &mut *state;
+        stats.input_observations = stats.input_observations.saturating_add(1);
 
         if !cfg.matches(obs) {
             return Ok(());
@@ -526,9 +540,7 @@ impl Precompute for PrecomputeImpl {
             .as_ref()
             .ok_or_else(|| PrecomputeError::Other("sketch observer not configured".into()))?;
 
-        let mut window = self.window.lock().expect("window lock poisoned");
-        let mut stats = self.stats.lock().expect("stats lock poisoned");
-        let result = window.observe(obs, &cfg, sketch_factory, observer, &mut stats);
+        let result = window.observe(obs, &cfg, sketch_factory, observer, stats);
         if let Err(err) = &result {
             match err {
                 PrecomputeError::SeriesCapExceeded => {
@@ -547,7 +559,7 @@ impl Precompute for PrecomputeImpl {
         if self.closed.load(Ordering::Acquire) {
             return Err(PrecomputeError::Other("instance is closed".into()));
         }
-        let cfg = match self.active_config() {
+        let cfg = match self.shared_config() {
             Some(c) => c,
             None => return Err(PrecomputeError::NoConfig),
         };
@@ -574,10 +586,10 @@ impl Precompute for PrecomputeImpl {
             .as_ref()
             .ok_or_else(|| PrecomputeError::Other("sketch factory not configured".into()))?;
 
-        let mut window = self.window.lock().expect("window lock poisoned");
-        let mut stats = self.stats.lock().expect("stats lock poisoned");
+        let mut state = self.lock_state();
+        let State { window, stats } = &mut *state;
         stats.input_envelopes = stats.input_envelopes.saturating_add(1);
-        let result = window.observe_envelope(env, &cfg, sketch_factory, &mut stats);
+        let result = window.observe_envelope(env, &cfg, sketch_factory, stats);
         if let Err(err) = &result {
             if matches!(err, PrecomputeError::SeriesCapExceeded) {
                 stats.dropped_overflow = stats.dropped_overflow.saturating_add(1);
@@ -587,39 +599,25 @@ impl Precompute for PrecomputeImpl {
     }
 
     fn tick(&self, now_ms: u64) -> Vec<SketchEnvelope> {
-        let cfg = match self.active_config() {
+        let cfg = match self.shared_config() {
             Some(c) => c,
             None => return Vec::new(),
         };
-        let (closed, rng) = {
-            let mut window = self.window.lock().expect("window lock poisoned");
-            window.rotate(now_ms, &cfg)
-        };
+        let (closed, rng) = self.lock_state().window.rotate(now_ms, &cfg);
         self.finish_rotate(closed, rng, now_ms)
     }
 
     fn drain(&self) -> Vec<SketchEnvelope> {
-        let cfg = match self.active_config() {
+        let cfg = match self.shared_config() {
             Some(c) => c,
             None => return Vec::new(),
         };
-        let (closed, rng) = {
-            let mut window = self.window.lock().expect("window lock poisoned");
-            window.drain(&cfg)
-        };
+        let (closed, rng) = self.lock_state().window.drain(&cfg);
         self.finish_rotate(closed, rng, rng[1])
     }
 
     fn active_config(&self) -> Option<PrecomputeConfig> {
-        // Duplicated (rather than delegating to the inherent
-        // `PrecomputeImpl::active_config` above) so the trait method's
-        // body doesn't read as a same-name recursive call — inherent
-        // methods win method resolution over trait methods for the
-        // same receiver, so `self.active_config()` here would in fact
-        // call the inherent one and not recurse, but spelling out the
-        // two-line lock+clone directly is clearer than relying on that
-        // priority rule.
-        self.cfg.lock().expect("config lock poisoned").clone()
+        self.shared_config().map(|c| (*c).clone())
     }
 
     fn update_config(&self, cs: &PrecomputeConfigSet) {
@@ -637,12 +635,12 @@ impl Precompute for PrecomputeImpl {
             None => cs.configs.first(),
         };
         if let Some(c) = chosen {
-            *guard = Some(c.clone());
+            *guard = Some(Arc::new(c.clone()));
         }
     }
 
     fn stats(&self) -> StatsSnapshot {
-        *self.stats.lock().expect("stats lock poisoned")
+        self.lock_state().stats
     }
 
     fn shutdown(&self) -> Result<(), PrecomputeError> {

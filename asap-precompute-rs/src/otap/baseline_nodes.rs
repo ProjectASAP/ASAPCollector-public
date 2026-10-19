@@ -68,7 +68,7 @@ use super::answer_nodes::{
     default_grace, default_k, default_novelty_windows, default_quantiles, default_window, emit,
     gauges_pdata, invalid, now_ms, observations, series_key,
 };
-use super::codec::OtapSketchEncoder;
+use super::codec::{decode_each, OtapSketchEncoder};
 use crate::answers::{
     exact_answers, gauge, ks_distance, topk_of, CardinalityClassifier, CardinalityRules,
     DriftRules, DriftTracker, Event, ExactWindow, NoveltyTracker,
@@ -273,14 +273,20 @@ impl local::Processor<OtapPdata> for ExactBranch {
             Message::PData(pdata) => {
                 // Consumed into state here: ack so upstream can move on.
                 effects.notify_ack(AckMsg::new(pdata.clone())).await?;
-                let points = observations(pdata, effects).await;
-                // A window closes as soon as a point's event time passes its end.
-                let out = match points.first() {
-                    Some(first) => self.close(first.timestamp_ms),
-                    None => Vec::new(),
-                };
-                points.iter().for_each(|obs| self.observe(obs));
-                out
+                let mut out = None;
+                let decoded = decode_each(pdata, |obs| {
+                    // A window closes as soon as a point's event time passes its end.
+                    if out.is_none() {
+                        out = Some(self.close(obs.timestamp_ms));
+                    }
+                    self.observe(obs);
+                });
+                if let Err(e) = decoded {
+                    effects
+                        .info(&format!("exact: undecodable input: {e}"))
+                        .await;
+                }
+                out.unwrap_or_default()
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
                 self.close(now_ms().saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64))

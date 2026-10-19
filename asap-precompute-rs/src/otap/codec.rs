@@ -1310,19 +1310,35 @@ fn pretty_arrow_type(data_type: &arrow_schema::DataType) -> String {
 /// match arm already owns it and has no further use for the original
 /// context once this conversion runs.
 pub fn decode_pdata_to_observations(pdata: OtapPdata) -> Result<DecodeOutcome, CodecError> {
+    let mut observations = Vec::new();
+    let skipped_non_scalar = decode_each(pdata, |obs| observations.push(obs.clone()))?;
+    Ok(DecodeOutcome {
+        observations,
+        skipped_non_scalar,
+    })
+}
+
+/// Walks `pdata` like [`decode_pdata_to_observations`], passing each data
+/// point to `f` instead of collecting them. The observation is one buffer
+/// rewritten per point, so a hot path decodes without allocating per point.
+/// Returns the number of non-scalar data points skipped.
+pub fn decode_each(pdata: OtapPdata, f: impl FnMut(&Observation)) -> Result<usize, CodecError> {
     let (_context, payload) = pdata.into_parts();
     let arrow_records: OtapArrowRecords = payload
         .try_into_with_default()
         .map_err(|e| CodecError::Decode(format!("{e}")))?;
 
     let OtapArrowRecords::Metrics(_) = &arrow_records else {
-        return Ok(DecodeOutcome::default());
+        return Ok(0);
     };
 
     let view = OtapMetricsView::try_from(&arrow_records)
         .map_err(|e| CodecError::Decode(format!("{e}")))?;
 
-    let mut acc = DecodeAccumulator::default();
+    let mut acc = DecodeAccumulator {
+        scratch: Observation::default(),
+        sink: f,
+    };
     let mut skipped_non_scalar = 0usize;
 
     for resource in view.resources() {
@@ -1418,13 +1434,23 @@ pub fn decode_pdata_to_observations(pdata: OtapPdata) -> Result<DecodeOutcome, C
         }
     }
 
-    Ok(DecodeOutcome {
-        observations: acc.observations,
-        skipped_non_scalar,
-    })
+    Ok(skipped_non_scalar)
 }
 
-/// Accumulates one `Observation` per data point while walking the real
+/// Overwrites `labels[index]` (appending if needed) with `key=value`,
+/// reusing the label's string buffers.
+fn set_label(labels: &mut Vec<KeyValue>, index: usize, key: &[u8], value: &[u8]) {
+    if index == labels.len() {
+        labels.push(KeyValue::default());
+    }
+    let label = &mut labels[index];
+    label.key.clear();
+    label.key.push_str(&String::from_utf8_lossy(key));
+    label.value.clear();
+    label.value.push_str(&String::from_utf8_lossy(value));
+}
+
+/// Passes one `Observation` per data point to `sink` while walking the real
 /// `OtapMetricsView` — factored out of [`decode_pdata_to_observations`]
 /// so the Gauge and Sum branches (whose `NumberDataPointView`
 /// implementations are different concrete types, both borrowing from
@@ -1433,9 +1459,10 @@ pub fn decode_pdata_to_observations(pdata: OtapPdata) -> Result<DecodeOutcome, C
 /// point body twice, or trying to unify their different concrete
 /// iterator types into one `Vec` first (which doesn't compile —
 /// `gauge`/`sum` would need to outlive the branch that produced them).
-#[derive(Default)]
-struct DecodeAccumulator {
-    observations: Vec<Observation>,
+struct DecodeAccumulator<F> {
+    /// Rewritten for each data point.
+    scratch: Observation,
+    sink: F,
 }
 
 /// Parses an optional `sketch.type` value; absent means `Unspecified`.
@@ -1454,7 +1481,7 @@ struct DecodeSchema {
     schema_version: Option<u32>,
 }
 
-impl DecodeAccumulator {
+impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
     fn push_summary_data_point<D: SummaryDataPointView>(
         &mut self,
         dp: D,
@@ -1512,7 +1539,7 @@ impl DecodeAccumulator {
             aggregation_temporality: 0,
             value: dp.sum(),
         };
-        self.observations.push(Observation::new(
+        (self.sink)(&Observation::new(
             timestamp_ms,
             metric_name.to_string(),
             resource_labels.to_vec(),
@@ -1549,12 +1576,21 @@ impl DecodeAccumulator {
         let mut schema_version = inherited_schema.schema_version;
         let mut window_start_ms: Option<u64> = None;
         let mut window_end_ms: Option<u64> = None;
-        let mut labels: Vec<KeyValue> = series_labels.to_vec();
+        let obs = &mut self.scratch;
+        for (index, label) in series_labels.iter().enumerate() {
+            set_label(
+                &mut obs.labels,
+                index,
+                label.key.as_bytes(),
+                label.value.as_bytes(),
+            );
+        }
+        let mut label_count = series_labels.len();
 
         for attr in dp.attributes() {
             let Some(val) = attr.value() else { continue };
-            let key = String::from_utf8_lossy(attr.key()).into_owned();
-            match key.as_str() {
+            let key = attr.key();
+            match std::str::from_utf8(key).unwrap_or_default() {
                 ATTR_ENVELOPE => envelope_bytes = val.as_bytes().map(<[u8]>::to_vec),
                 ATTR_SKETCH_TYPE => {
                     sketch_type_raw = val
@@ -1576,15 +1612,17 @@ impl DecodeAccumulator {
                     // string-typed values are representable as a label;
                     // a non-string, non-reserved attribute is dropped.
                     if let Some(s) = val.as_string() {
-                        labels.push(KeyValue::new(key, String::from_utf8_lossy(s).into_owned()));
+                        set_label(&mut obs.labels, label_count, key, s);
+                        label_count += 1;
                     }
                 }
             }
         }
+        obs.labels.truncate(label_count);
 
         // An empty `sketch.envelope` from some other producer routes to
         // the scalar path rather than an empty-payload envelope.
-        let observation_value = match envelope_bytes.filter(|b| !b.is_empty()) {
+        obs.value = match envelope_bytes.filter(|b| !b.is_empty()) {
             Some(payload) => {
                 let sketch_type = parse_sketch_type(sketch_type_raw.as_deref())?;
                 validate_self_describing_payload(sketch_type, &payload)
@@ -1594,7 +1632,7 @@ impl DecodeAccumulator {
                     sketch_type,
                     agg_id: agg_id.unwrap_or(0),
                     resource_labels: Vec::new(),
-                    labels: labels.clone(),
+                    labels: obs.labels.clone(),
                     window_start_ms: window_start_ms.unwrap_or(0),
                     window_end_ms: window_end_ms.unwrap_or(0),
                     payload,
@@ -1606,14 +1644,16 @@ impl DecodeAccumulator {
             }
             None => ObservationValue::float(value),
         };
-
-        self.observations.push(Observation::new(
-            timestamp_ms,
-            metric_name.to_string(),
-            resource_labels.to_vec(),
-            labels,
-            observation_value,
-        ));
+        obs.timestamp_ms = timestamp_ms;
+        if obs.metric != metric_name {
+            obs.metric.clear();
+            obs.metric.push_str(metric_name);
+        }
+        if obs.resource_labels.as_slice() != resource_labels {
+            obs.resource_labels.clear();
+            obs.resource_labels.extend_from_slice(resource_labels);
+        }
+        (self.sink)(obs);
         Ok(())
     }
 }
