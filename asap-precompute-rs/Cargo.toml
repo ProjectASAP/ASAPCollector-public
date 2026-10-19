@@ -7,7 +7,7 @@ license = "MIT"
 
 # asap_sketchlib is a public dependency.
 [dependencies]
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "010457de46ba9ec5574a53476bbe8b4bdb02b965" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "3fc3442c3275d374f79ba522f473de83912c6345" }
 serde = { version = "1", features = ["derive"] }
 prost = "0.13"
 # OTAP's generated protobuf types implement the 0.14 Message trait.

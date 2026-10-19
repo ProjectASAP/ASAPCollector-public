@@ -185,7 +185,7 @@ impl OtapSketchEncoder {
     /// Encodes one flush while retaining series identity across later flushes.
     pub fn encode(&mut self, envelopes: &[SketchEnvelope]) -> Result<OtapPdata, CodecError> {
         for env in envelopes {
-            validate_self_describing_payload(env.encoding, &env.payload)
+            validate_self_describing_payload(env.sketch_type, env.encoding, &env.payload)
                 .map_err(CodecError::Encode)?;
         }
         let series_ids = envelopes
@@ -223,7 +223,11 @@ impl OtapSketchEncoder {
 ///
 /// `sketch.envelope` contains the canonical sketchlib ASAPv1 envelope:
 /// magic, version, kind ID, length-prefixed metadata, and payload.
-fn validate_self_describing_payload(encoding: Encoding, payload: &[u8]) -> Result<(), String> {
+fn validate_self_describing_payload(
+    sketch_type: crate::envelope::SketchType,
+    encoding: Encoding,
+    payload: &[u8],
+) -> Result<(), String> {
     if payload.is_empty() {
         return Ok(());
     }
@@ -232,6 +236,11 @@ fn validate_self_describing_payload(encoding: Encoding, payload: &[u8]) -> Resul
             "sketch.envelope requires the self-describing ASAPv1 MessagePack format, got {}",
             encoding.name()
         ));
+    }
+    if sketch_type == crate::envelope::SketchType::CountMinSketchWithHeap {
+        return crate::sketches::CMSHeapWrapper::from_snapshot(payload)
+            .map(|_| ())
+            .map_err(|error| format!("invalid self-describing CMSHeap sketch.envelope: {error}"));
     }
     asap_sketchlib::sketches::KLL::<f64>::deserialize_from_bytes(payload)
         .map(|_| ())
@@ -1579,7 +1588,8 @@ impl DecodeAccumulator {
             .transpose()
             .map_err(|error| CodecError::Decode(error.to_string()))?
             .unwrap_or(crate::envelope::Encoding::Unspecified);
-        validate_self_describing_payload(encoding, &payload).map_err(CodecError::Decode)?;
+        validate_self_describing_payload(sketch_type, encoding, &payload)
+            .map_err(CodecError::Decode)?;
         let timestamp_ms = dp.time_unix_nano() / 1_000_000;
         let envelope = SketchEnvelope {
             schema_version: inherited_schema.schema_version.unwrap_or(0),
@@ -1879,6 +1889,26 @@ mod tests {
         assert_eq!(decoded_env.agg_id, 7);
         assert_eq!(decoded_env.window_start_ms, 1_000);
         assert_eq!(decoded_env.window_end_ms, 2_000);
+    }
+
+    #[test]
+    fn summary_carrier_round_trips_a_cms_heap_envelope() {
+        use crate::sketches::CMSHeapWrapper;
+        let mut env = one_envelope("topk_stream", 0.0, "region", "us-east");
+        env.sketch_type = SketchType::CountMinSketchWithHeap;
+        env.encoding = Encoding::Msgpack;
+        let mut sketch = CMSHeapWrapper::new(4, 64, 3);
+        sketch.update(b"checkout", 5);
+        env.payload = sketch.snapshot().expect("CMSHeap ASAPv1 envelope");
+        let pdata = encode_envelopes_to_pdata(std::slice::from_ref(&env)).expect("encode");
+        let outcome = decode_pdata_to_observations(pdata).expect("decode");
+        let decoded = outcome.observations[0].value.envelope.as_ref().unwrap();
+        assert_eq!(decoded.sketch_type, SketchType::CountMinSketchWithHeap);
+        assert_eq!(decoded.payload, env.payload);
+
+        // A CMSHeap payload labelled as KLL is still rejected.
+        env.sketch_type = SketchType::KLLSketch;
+        assert!(encode_envelopes_to_pdata(std::slice::from_ref(&env)).is_err());
     }
 
     #[test]

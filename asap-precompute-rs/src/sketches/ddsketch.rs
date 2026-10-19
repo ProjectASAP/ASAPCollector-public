@@ -63,18 +63,9 @@ impl DDSketchWrapper {
     }
 
     fn build_state(&self) -> DdSketchState {
-        DdSketchState {
-            // Use the gamma-roundtripped alpha so the on-the-wire bytes
-            // match the portable serialization exactly.
-            //
-            // The DataPoint-level METRIC scalars (count/sum/min/max) were
-            // dropped from `DdSketchState`: the count is recoverable by
-            // summing `store_counts` and the others are bucket-estimated,
-            // so the wire format now carries only alpha + the bucket store.
-            alpha: self.sk.wire_alpha(),
-            store_counts: self.sk.store_counts.clone(),
-            store_offset: self.sk.store_offset,
-        }
+        // asap_sketchlib owns the proto mapping, including the negative-value
+        // and zero stores and the gamma-roundtripped alpha.
+        self.sk.to_proto()
     }
 
     fn encode_envelope(&self) -> Vec<u8> {
@@ -107,17 +98,10 @@ impl DDSketchWrapper {
                 state.alpha
             )));
         }
-        // `DdSketchState` no longer carries the count/sum/min/max scalars.
-        // The total count is recovered by summing `store_counts` (see
-        // `DdSketch::total_count`); min/max are estimated from the extreme
-        // non-empty buckets inside `DdSketch::quantile`, within DDSketch's
-        // alpha relative-accuracy bound. So we reconstruct purely from the
-        // bucket store + alpha.
-        Ok(DdSketch::from_raw(
-            state.alpha,
-            state.store_counts,
-            state.store_offset,
-        ))
+        // `DdSketchState` carries no count/sum/min/max scalars: the count is
+        // the sum of all stores and min/max are bucket-estimated, within
+        // DDSketch's alpha relative-accuracy bound.
+        Ok(DdSketch::from_proto(state))
     }
 }
 
