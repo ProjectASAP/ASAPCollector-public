@@ -1,4 +1,5 @@
-# Exact baseline and ground truth: every raw point, exact answers per window.
+# Exact pipeline, end: exact answers of each merged window, the
+# ground truth (method="exact").
 version: otel_dataflow/v1
 engine:
   http_admin:
@@ -17,10 +18,10 @@ groups:
             type: receiver:otlp
             config:
               protocols:
-                http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
-          exact:
-            type: urn:asap:processor:exact_answers
-            config: {window: 60s, group_by: [http.route], quantiles: [0.5, 0.99]}
+                http: {listening_addr: "0.0.0.0:4318", wait_for_result: false, max_request_body_size: 1GiB}
+          detector:
+            type: urn:asap:processor:exact_detector
+            config: {quantiles: [0.5, 0.99]}
           to_prometheus:
             type: exporter:otlp_http
             config:
@@ -30,5 +31,5 @@ groups:
               max_in_flight: 1
               http: {timeout: 30s, compression: none}
         connections:
-          - {from: receiver, to: exact}
-          - {from: exact, to: to_prometheus}
+          - {from: receiver, to: detector}
+          - {from: detector, to: to_prometheus}

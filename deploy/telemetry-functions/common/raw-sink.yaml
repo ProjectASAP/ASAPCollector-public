@@ -1,0 +1,46 @@
+# Raw pipeline, end: write every raw point as a log record to loki-raw, and
+# report per window when loki-raw acknowledged its last point
+# (asap.answer.delay, method="raw") and each point's time to acknowledgement.
+version: otel_dataflow/v1
+engine:
+  http_admin:
+    bind_address: 0.0.0.0:8085
+policies:
+  resources:
+    core_allocation:
+      type: core_count
+      count: 1
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: receiver:otlp
+            config:
+              protocols:
+                http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
+          sink:
+            type: urn:asap:processor:raw_sink
+            outputs: [logs, latency]
+            config: {window: 60s, grace: 5s}
+          to_loki_raw:
+            type: exporter:otlp_http
+            config:
+              endpoint: http://loki-raw:3100
+              logs_endpoint: http://loki-raw:3100/otlp/v1/logs
+              client_pool_size: 1
+              max_in_flight: 1
+              http: {timeout: 30s, compression: none}
+          to_prometheus:
+            type: exporter:otlp_http
+            config:
+              endpoint: http://prometheus:9090
+              metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+              client_pool_size: 1
+              max_in_flight: 1
+              http: {timeout: 30s, compression: none}
+        connections:
+          - {from: receiver, to: sink}
+          - {from: 'sink["logs"]', to: to_loki_raw}
+          - {from: 'sink["latency"]', to: to_prometheus}

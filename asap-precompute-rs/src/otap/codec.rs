@@ -183,6 +183,10 @@ fn validate_self_describing_payload(sketch_type: SketchType, payload: &[u8]) -> 
     if sketch_type == SketchType::Unspecified {
         return Err("sketch.envelope requires a sketch.type".into());
     }
+    if sketch_type == SketchType::Exact {
+        // Exact windows can be large; their consumer decodes them once.
+        return Ok(());
+    }
     let decoded = crate::sketches::decode_snapshot(sketch_type, payload).map(drop);
     decoded.map_err(|error| format!("invalid {} sketch.envelope: {error}", sketch_type.name()))
 }

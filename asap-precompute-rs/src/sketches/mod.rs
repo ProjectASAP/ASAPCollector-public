@@ -40,5 +40,10 @@ pub fn decode_snapshot(
                 "sketch.envelope requires a sketch.type".into(),
             ))
         }
+        SketchType::Exact => {
+            return Err(PrecomputeError::Other(
+                "an exact window is not a sketch".into(),
+            ))
+        }
     })
 }

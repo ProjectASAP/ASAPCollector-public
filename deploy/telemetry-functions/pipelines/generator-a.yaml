@@ -26,7 +26,7 @@ groups:
           export:
             type: exporter:otlp_http
             config:
-              endpoint: http://branch-a:4318
+              endpoint: http://downstream:4318
               client_pool_size: 1
               max_in_flight: 1
               http: {timeout: 30s, compression: none}

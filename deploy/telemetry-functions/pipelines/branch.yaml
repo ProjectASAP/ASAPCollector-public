@@ -1,5 +1,5 @@
-# Stage 1 at each source: one KLL per route per 1-minute window goes to
-# merge; the raw points are copied to the exact baseline.
+# Sketch pipeline, stage 1 at each source: one KLL per route per 1-minute
+# window goes to merge.
 version: otel_dataflow/v1
 engine:
   http_admin:
@@ -19,13 +19,6 @@ groups:
             config:
               protocols:
                 http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
-          fanout:
-            type: processor:fanout
-            outputs: [sketch, raw]
-            config:
-              destinations:
-                - {port: sketch}
-                - {port: raw}
           sketch:
             type: urn:asap:processor:asap_sketches
             config:
@@ -42,15 +35,6 @@ groups:
               client_pool_size: 1
               max_in_flight: 1
               http: {timeout: 30s, compression: none}
-          to_exact:
-            type: exporter:otlp_http
-            config:
-              endpoint: http://exact:4318
-              client_pool_size: 1
-              max_in_flight: 1
-              http: {timeout: 30s, compression: none}
         connections:
-          - {from: receiver, to: fanout}
-          - {from: 'fanout["sketch"]', to: sketch}
+          - {from: receiver, to: sketch}
           - {from: sketch, to: to_merge}
-          - {from: 'fanout["raw"]', to: to_exact}

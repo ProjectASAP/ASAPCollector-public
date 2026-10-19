@@ -28,6 +28,8 @@ pub enum SketchType {
     CountMinSketch,
     /// Count-Min Sketch plus a top-k heavy-hitter heap (ASAPv1 kind `0x03 0x00`).
     CountMinSketchWithHeap,
+    /// Not a sketch: an exact baseline window ([`crate::answers::ExactWindow`]).
+    Exact,
 }
 
 impl SketchType {
@@ -40,6 +42,7 @@ impl SketchType {
             Self::CountSketch => "CountSketch",
             Self::CountMinSketch => "CountMinSketch",
             Self::CountMinSketchWithHeap => "CountMinSketchWithHeap",
+            Self::Exact => "Exact",
             Self::Unspecified => "Unspecified",
         }
     }
@@ -53,6 +56,7 @@ impl SketchType {
             Self::CountSketch,
             Self::CountMinSketch,
             Self::CountMinSketchWithHeap,
+            Self::Exact,
             Self::Unspecified,
         ]
         .into_iter()
