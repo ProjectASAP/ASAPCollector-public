@@ -4,6 +4,8 @@
 #           exact-merge -> exact-detector
 #   raw:    raw-generator-a/b -> raw-branch-a/b -> raw-merge -> raw-sink
 #           (every raw point into loki-raw)
+# hh-accuracy sits outside the pipelines: in the top-k use case both detectors
+# send it a copy of their answers, and it reports heavy-hitter accuracy.
 # Each stage is the official OTAP engine (asap-collector) in its own container,
 # pinned to one CPU, talking OTLP/HTTP over the compose network. The generators
 # of a source share one config (`downstream` is their pipeline's first stage)
@@ -58,7 +60,7 @@ services:
     command: ["--config", "/pipelines/detector.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_DETECTOR:-5}"
-    depends_on: [prometheus]
+    depends_on: [prometheus, hh-accuracy]
   # exact pipeline
   exact-generator-a:
     <<: *generator
@@ -97,7 +99,7 @@ services:
     command: ["--config", "/pipelines/exact-detector.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_EXACT_DETECTOR:-11}"
-    depends_on: [prometheus]
+    depends_on: [prometheus, hh-accuracy]
   # raw pipeline
   raw-generator-a:
     <<: *generator
@@ -137,6 +139,13 @@ services:
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_RAW_SINK:-17}"
     depends_on: [prometheus, loki-raw]
+  # Outside the pipelines: compares the sketch and exact top-k answers.
+  hh-accuracy:
+    <<: *collector
+    command: ["--config", "/common/hh-accuracy.yaml"]
+    volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
+    cpuset: "${CPU_HH_ACCURACY:-18}"
+    depends_on: [prometheus]
 
   prometheus:
     image: prom/prometheus:v3.5.0

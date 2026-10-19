@@ -113,11 +113,16 @@ def latency_error(stack):
 
 def topk_error(stack):
     t = acc.latest_window(stack, 'attribute_key="http.route"')
-    get = lambda m: {r["key"]: v for r, v in stack.vector(f'asap_topk{{method="{m}",bound=~"estimate|"}} @ {t}')}
+    top10 = 'rank=~"[1-9]|10"'
+    get = lambda m: {r["key"]: v for r, v in
+                     stack.vector(f'asap_topk{{method="{m}",bound=~"estimate|",{top10}}} @ {t}')}
     sketch, exact = get("sketch"), get("exact")
     errs = [abs(sketch[k] - exact[k]) / exact[k] for k in exact if k in sketch]
+    hh = {m["__name__"].removeprefix("asap_hh_"): v
+          for m, v in stack.vector(f'{{__name__=~"asap_hh_(precision|recall|f1|are)"}} @ {t}')}
     return {"recall_at_10": len(set(sketch) & set(exact)) / max(1, len(exact)),
-            "count_rel_error_mean": statistics.mean(errs) if errs else float("nan"), **merge_bytes(stack)}
+            "count_rel_error_mean": statistics.mean(errs) if errs else float("nan"),
+            **{f"hh_{k}": v for k, v in sorted(hh.items())}, **merge_bytes(stack)}
 
 
 def pipelines(args):

@@ -1,0 +1,36 @@
+# Outside the pipelines: compares the sketch and exact detectors' top-k per
+# window and reports heavy-hitter precision, recall, F1 and average relative
+# error (keys with at least 1% of the window's points) to Prometheus.
+version: otel_dataflow/v1
+engine:
+  http_admin:
+    bind_address: 0.0.0.0:8085
+policies:
+  resources:
+    core_allocation:
+      type: core_count
+      count: 1
+groups:
+  default:
+    pipelines:
+      main:
+        nodes:
+          receiver:
+            type: receiver:otlp
+            config:
+              protocols:
+                http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
+          accuracy:
+            type: urn:asap:processor:heavy_hitter_accuracy
+            config: {phi: 0.01, k: 20}
+          to_prometheus:
+            type: exporter:otlp_http
+            config:
+              endpoint: http://prometheus:9090
+              metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
+              client_pool_size: 1
+              max_in_flight: 1
+              http: {timeout: 30s, compression: none}
+        connections:
+          - {from: receiver, to: accuracy}
+          - {from: accuracy, to: to_prometheus}
