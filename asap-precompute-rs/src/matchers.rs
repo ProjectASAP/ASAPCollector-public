@@ -137,12 +137,26 @@ pub fn series_key(
     aggregate_by: &[String],
 ) -> String {
     let mut buf = String::new();
-    buf.push_str(&agg_id.to_string());
-    buf.push('|');
-    write_attributes_key(&mut buf, resource_labels, &[]);
-    buf.push('|');
-    write_attributes_key(&mut buf, labels, aggregate_by);
+    write_series_key(&mut buf, agg_id, resource_labels, labels, aggregate_by);
     buf
+}
+
+/// Writes [`series_key`] into `buf`, replacing its contents, so a hot path
+/// can reuse one buffer.
+pub fn write_series_key(
+    buf: &mut String,
+    agg_id: AggId,
+    resource_labels: &[KeyValue],
+    labels: &[KeyValue],
+    aggregate_by: &[String],
+) {
+    use std::fmt::Write;
+    buf.clear();
+    let _ = write!(buf, "{agg_id}");
+    buf.push('|');
+    write_attributes_key(buf, resource_labels, &[]);
+    buf.push('|');
+    write_attributes_key(buf, labels, aggregate_by);
 }
 
 /// Returns just the per-label-set portion of [`series_key`].
@@ -160,6 +174,17 @@ pub fn attributes_key(labels: &[KeyValue], aggregate_by: &[String]) -> String {
 
 fn write_attributes_key(buf: &mut String, labels: &[KeyValue], aggregate_by: &[String]) {
     if aggregate_by.is_empty() {
+        // Already sorted with unique keys (e.g. one label): same output as
+        // the sorted walk below, without collecting the keys.
+        if labels.windows(2).all(|w| w[0].key < w[1].key) {
+            for kv in labels {
+                buf.push_str(&kv.key);
+                buf.push('=');
+                buf.push_str(&kv.value);
+                buf.push(';');
+            }
+            return;
+        }
         // Sort by key for stable output.
         let mut keys: Vec<&str> = labels.iter().map(|kv| kv.key.as_str()).collect();
         keys.sort();
@@ -213,19 +238,35 @@ pub const ATTRIBUTE_KEY_LABEL: &str = "attribute.key";
 /// the attribute's value as bytes. A cardinality or frequency sketch over
 /// these series answers "how many distinct values" and "which values
 /// dominate" per attribute key.
-pub fn per_attribute(obs: &Observation, keys: &[String]) -> Vec<Observation> {
+///
+/// Each split is written into `scratch` and passed to `f`, so a stream of
+/// points reuses one observation's buffers instead of allocating per point.
+pub fn per_attribute<E>(
+    obs: &Observation,
+    keys: &[String],
+    scratch: &mut Observation,
+    mut f: impl FnMut(&Observation) -> Result<(), E>,
+) -> Result<(), E> {
     let all = keys.iter().any(|k| k == "*");
-    obs.labels
-        .iter()
-        .filter(|kv| all || keys.contains(&kv.key))
-        .map(|kv| Observation {
-            timestamp_ms: obs.timestamp_ms,
-            metric: obs.metric.clone(),
-            resource_labels: obs.resource_labels.clone(),
-            labels: vec![KeyValue::new(ATTRIBUTE_KEY_LABEL, kv.key.clone())],
-            value: crate::observation::ObservationValue::bytes(kv.value.as_bytes().to_vec()),
-        })
-        .collect()
+    for kv in &obs.labels {
+        if !all && !keys.contains(&kv.key) {
+            continue;
+        }
+        scratch.timestamp_ms = obs.timestamp_ms;
+        scratch.metric.clone_from(&obs.metric);
+        scratch.resource_labels.clone_from(&obs.resource_labels);
+        scratch.labels.resize_with(1, KeyValue::default);
+        scratch.labels[0].key.clear();
+        scratch.labels[0].key.push_str(ATTRIBUTE_KEY_LABEL);
+        scratch.labels[0].value.clone_from(&kv.key);
+        let value = &mut scratch.value;
+        value.kind = crate::observation::ObservationValueKind::Bytes;
+        value.envelope = None;
+        value.bytes.clear();
+        value.bytes.extend_from_slice(kv.value.as_bytes());
+        f(scratch)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -263,5 +304,44 @@ mod tests {
         );
         let matchers = vec![LabelMatcher::equal("region", "us-east")];
         assert!(LabelMatcher::matches_all(&matchers, &obs));
+    }
+
+    #[test]
+    fn sorted_fast_path_writes_the_same_key_as_the_sorted_walk() {
+        let sorted = vec![KeyValue::new("a", "1"), KeyValue::new("b", "2")];
+        let unsorted = vec![KeyValue::new("b", "2"), KeyValue::new("a", "1")];
+        assert_eq!(attributes_key(&sorted, &[]), "a=1;b=2;");
+        assert_eq!(attributes_key(&unsorted, &[]), "a=1;b=2;");
+        let mut buf = "stale".to_string();
+        write_series_key(&mut buf, 7, &sorted, &unsorted, &[]);
+        assert_eq!(buf, series_key(7, &sorted, &unsorted, &[]));
+    }
+
+    #[test]
+    fn per_attribute_reuses_the_scratch_for_each_selected_key() {
+        let obs = Observation::new(
+            5,
+            "m",
+            vec![KeyValue::new("service", "s")],
+            vec![KeyValue::new("route", "/a"), KeyValue::new("user", "u1")],
+            ObservationValue::float(1.0),
+        );
+        let mut scratch = Observation::default();
+        let mut seen = Vec::new();
+        per_attribute::<()>(&obs, &["*".into()], &mut scratch, |o| {
+            seen.push(o.clone());
+            Ok(())
+        })
+        .unwrap();
+        let attr = |key: &str, value: &str| {
+            Observation::new(
+                5,
+                "m",
+                vec![KeyValue::new("service", "s")],
+                vec![KeyValue::new(ATTRIBUTE_KEY_LABEL, key)],
+                ObservationValue::bytes(value.as_bytes().to_vec()),
+            )
+        };
+        assert_eq!(seen, vec![attr("route", "/a"), attr("user", "u1")]);
     }
 }

@@ -60,6 +60,8 @@ pub struct WindowState {
     /// initialized for the active config. Lazy-init avoids needing
     /// the constructor to know the config up front.
     pub(crate) initialized: bool,
+    /// Reused buffer for the series key of the observation being routed.
+    key: String,
 }
 
 impl Default for WindowState {
@@ -85,6 +87,7 @@ impl WindowState {
             active_start_ms: 0,
             active_end_ms: 0,
             initialized: false,
+            key: String::new(),
         }
     }
 
@@ -139,61 +142,64 @@ impl WindowState {
             }
         }
 
-        let key = cfg.series_key_for(obs);
-
-        if !self.series.contains_key(&key) {
-            // New series — check cap.
-            if cfg.max_series > 0 && self.series.len() as u64 >= cfg.max_series {
-                match cfg.on_overflow {
-                    OnOverflow::Drop | OnOverflow::Block => {
-                        // Block degrades to Drop: latency-hostile
-                        // semantics belong to integration tests, not
-                        // the runtime hot path.
-                        return Err(PrecomputeError::SeriesCapExceeded);
-                    }
-                    OnOverflow::EvictOldest => {
-                        // Find and evict the oldest series.
-                        let mut oldest_key: Option<String> = None;
-                        let mut oldest_ms: u64 = u64::MAX;
-                        for (k, e) in self.series.iter() {
-                            if e.last_seen_ms < oldest_ms {
-                                oldest_ms = e.last_seen_ms;
-                                oldest_key = Some(k.clone());
-                            }
-                        }
-                        if let Some(k) = oldest_key {
-                            self.series.remove(&k);
-                            stats.active_series -= 1;
-                        }
-                    }
-                }
-            }
-            let sketch = sketch_factory();
-            // Honor parity-mode flags by stripping the labels we
-            // promised not to surface. GlobalAggregation collapses
-            // everything; OmitResourceAttrs zeroes only the resource
-            // segment.
-            let (resource_copy, labels_copy) = if cfg.global_aggregation {
-                (Vec::new(), Vec::new())
-            } else if cfg.omit_resource_attrs {
-                (Vec::new(), obs.labels.clone())
-            } else {
-                (obs.resource_labels.clone(), obs.labels.clone())
-            };
-            let entry = SeriesEntry {
-                sketch,
-                resource_labels: resource_copy,
-                labels: labels_copy,
-                last_seen_ms: obs.timestamp_ms,
-                count: 0,
-            };
-            self.series.insert(key.clone(), entry);
-            stats.active_series += 1;
-        } else if let Some(entry) = self.series.get_mut(&key) {
+        cfg.write_series_key_for(&mut self.key, obs);
+        if let Some(entry) = self.series.get_mut(self.key.as_str()) {
             if obs.timestamp_ms > entry.last_seen_ms {
                 entry.last_seen_ms = obs.timestamp_ms;
             }
+            observer.observe(entry.sketch.as_mut(), obs)?;
+            entry.count += 1;
+            return Ok(());
         }
+        let key = self.key.clone();
+
+        // New series — check cap.
+        if cfg.max_series > 0 && self.series.len() as u64 >= cfg.max_series {
+            match cfg.on_overflow {
+                OnOverflow::Drop | OnOverflow::Block => {
+                    // Block degrades to Drop: latency-hostile
+                    // semantics belong to integration tests, not
+                    // the runtime hot path.
+                    return Err(PrecomputeError::SeriesCapExceeded);
+                }
+                OnOverflow::EvictOldest => {
+                    // Find and evict the oldest series.
+                    let mut oldest_key: Option<String> = None;
+                    let mut oldest_ms: u64 = u64::MAX;
+                    for (k, e) in self.series.iter() {
+                        if e.last_seen_ms < oldest_ms {
+                            oldest_ms = e.last_seen_ms;
+                            oldest_key = Some(k.clone());
+                        }
+                    }
+                    if let Some(k) = oldest_key {
+                        self.series.remove(&k);
+                        stats.active_series -= 1;
+                    }
+                }
+            }
+        }
+        let sketch = sketch_factory();
+        // Honor parity-mode flags by stripping the labels we
+        // promised not to surface. GlobalAggregation collapses
+        // everything; OmitResourceAttrs zeroes only the resource
+        // segment.
+        let (resource_copy, labels_copy) = if cfg.global_aggregation {
+            (Vec::new(), Vec::new())
+        } else if cfg.omit_resource_attrs {
+            (Vec::new(), obs.labels.clone())
+        } else {
+            (obs.resource_labels.clone(), obs.labels.clone())
+        };
+        let entry = SeriesEntry {
+            sketch,
+            resource_labels: resource_copy,
+            labels: labels_copy,
+            last_seen_ms: obs.timestamp_ms,
+            count: 0,
+        };
+        self.series.insert(key.clone(), entry);
+        stats.active_series += 1;
 
         let entry = self
             .series

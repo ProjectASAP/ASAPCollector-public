@@ -347,18 +347,27 @@ impl PrecomputeConfig {
     /// Thin wrapper over [`crate::matchers::series_key`], which owns
     /// the full canonical-byte formatting.
     pub fn series_key_for(&self, obs: &Observation) -> String {
+        let mut buf = String::new();
+        self.write_series_key_for(&mut buf, obs);
+        buf
+    }
+
+    /// Writes [`Self::series_key_for`] into `buf`, replacing its contents.
+    pub fn write_series_key_for(&self, buf: &mut String, obs: &Observation) {
+        use crate::matchers::write_series_key;
         if self.global_aggregation {
-            return crate::matchers::series_key(self.agg_id, &[], &[], &[]);
+            write_series_key(buf, self.agg_id, &[], &[], &[]);
+        } else if self.omit_resource_attrs {
+            write_series_key(buf, self.agg_id, &[], &obs.labels, &self.aggregate_by);
+        } else {
+            write_series_key(
+                buf,
+                self.agg_id,
+                &obs.resource_labels,
+                &obs.labels,
+                &self.aggregate_by,
+            );
         }
-        if self.omit_resource_attrs {
-            return crate::matchers::series_key(self.agg_id, &[], &obs.labels, &self.aggregate_by);
-        }
-        crate::matchers::series_key(
-            self.agg_id,
-            &obs.resource_labels,
-            &obs.labels,
-            &self.aggregate_by,
-        )
     }
 
     /// Rebuilds the same key from a series entry's stored labels.
