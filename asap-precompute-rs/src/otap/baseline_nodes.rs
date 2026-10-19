@@ -32,7 +32,7 @@
 //!   outputs: [logs, latency]
 //!   config: {window: 60s, grace: 5s}
 //! ```
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -70,7 +70,8 @@ use super::answer_nodes::{
 };
 use super::codec::OtapSketchEncoder;
 use crate::answers::{
-    exact_answers, gauge, CardinalityClassifier, CardinalityRules, Event, ExactWindow,
+    exact_answers, gauge, ks_distance, CardinalityClassifier, CardinalityRules, DriftRules,
+    DriftTracker, Event, ExactWindow,
 };
 use crate::envelope::{SketchEnvelope, SketchType};
 use crate::matchers::ATTRIBUTE_KEY_LABEL;
@@ -131,6 +132,9 @@ pub struct ExactDetectorConfig {
     /// Thresholds for classifying per-attribute cardinality.
     #[serde(default)]
     pub cardinality: CardinalityRules,
+    /// Thresholds for distribution drift of quantile series.
+    #[serde(default)]
+    pub drift: DriftRules,
 }
 
 /// `raw_sink` configuration.
@@ -358,6 +362,9 @@ impl local::Processor<OtapPdata> for ExactMerge {
 struct ExactDetector {
     config: ExactDetectorConfig,
     cardinality: CardinalityClassifier,
+    drift: DriftTracker,
+    /// Recent windows' sorted values per quantile series.
+    baselines: HashMap<String, VecDeque<Vec<f64>>>,
 }
 
 impl ExactDetector {
@@ -384,7 +391,46 @@ impl ExactDetector {
             &self.config.quantiles,
             self.config.k,
         ));
+        if !w.values.is_empty() {
+            // exact_answers left the values sorted.
+            let (gauges, event) = self.drift(&template, std::mem::take(&mut w.values));
+            out.extend(gauges);
+            events.extend(event);
+        }
         (out, events)
+    }
+
+    /// Exact KS distance of a window's sorted values from the previous windows.
+    fn drift(
+        &mut self,
+        template: &SketchEnvelope,
+        sorted: Vec<f64>,
+    ) -> (Vec<SketchEnvelope>, Option<Event>) {
+        let window = self.baselines.entry(series_key(template)).or_default();
+        let mut result = (Vec::new(), None);
+        if window.len() >= 3 && sorted.len() as u64 >= self.drift.rules.min_points {
+            let mut baseline: Vec<f64> = window.iter().flatten().copied().collect();
+            baseline.sort_unstable_by(f64::total_cmp);
+            let cdf = |v: &[f64], x: f64| v.partition_point(|&y| y <= x) as f64 / v.len() as f64;
+            let at = |v: &[f64], q: f64| v[((v.len() - 1) as f64 * q).round() as usize];
+            let xs: Vec<f64> = (1..100)
+                .flat_map(|i| {
+                    [
+                        at(&sorted, i as f64 / 100.0),
+                        at(&baseline, i as f64 / 100.0),
+                    ]
+                })
+                .collect();
+            let ks = ks_distance(|x| cdf(&sorted, x), |x| cdf(&baseline, x), &xs);
+            result =
+                self.drift
+                    .observe(template, "exact", ks, at(&baseline, 0.5), at(&sorted, 0.5));
+        }
+        window.push_back(sorted);
+        if window.len() > self.drift.rules.baseline_windows {
+            window.pop_front();
+        }
+        result
     }
 }
 
@@ -714,6 +760,8 @@ static EXACT_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         Ok(ProcessorWrapper::local(
             ExactDetector {
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                drift: DriftTracker::new(config.drift.clone()),
+                baselines: HashMap::new(),
                 config,
             },
             node,
@@ -846,6 +894,8 @@ mod tests {
             serde_json::from_value(serde_json::json!({"k": 2})).unwrap();
         let mut detector = ExactDetector {
             cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+            drift: DriftTracker::new(config.drift.clone()),
+            baselines: HashMap::new(),
             config,
         };
         let out: Vec<_> = merged

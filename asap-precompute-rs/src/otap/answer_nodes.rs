@@ -43,9 +43,16 @@ use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
 use otel_arrow_dfe_pdata::OtapPayload;
 
 use super::codec::decode_pdata_to_observations;
-use crate::answers::{sketch_answers, CardinalityClassifier, CardinalityRules, Event};
+use crate::answers::{
+    ks_distance, sketch_answers, CardinalityClassifier, CardinalityRules, DriftRules, DriftTracker,
+    Event,
+};
 use crate::envelope::SketchEnvelope;
+use crate::envelope::SketchType;
 use crate::observation::{KeyValue, Observation};
+use crate::precompute::QuantileSketch;
+use crate::sketches::KLLWrapper;
+use std::collections::{HashMap, VecDeque};
 
 /// Registered URN of the sketch detector.
 pub const SKETCH_DETECTOR_URN: &str = "urn:asap:processor:sketch_detector";
@@ -76,6 +83,9 @@ pub struct DetectorConfig {
     /// Thresholds for classifying per-attribute cardinality.
     #[serde(default)]
     pub cardinality: CardinalityRules,
+    /// Thresholds for distribution drift of quantile series.
+    #[serde(default)]
+    pub drift: DriftRules,
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -218,11 +228,6 @@ pub(super) async fn emit(
     Ok(())
 }
 
-/// Identity of a series across windows: metric and labels.
-pub(super) fn series_key(env: &SketchEnvelope) -> String {
-    format!("{}|{:?}", env.metric_name, env.labels)
-}
-
 pub(super) async fn observations(
     pdata: OtapPdata,
     effects: &mut local::EffectHandler<OtapPdata>,
@@ -241,6 +246,54 @@ pub(super) async fn observations(
 struct SketchDetector {
     config: DetectorConfig,
     cardinality: CardinalityClassifier,
+    drift: DriftTracker,
+    /// Recent KLL windows per series, the drift baseline.
+    baselines: HashMap<String, VecDeque<KLLWrapper>>,
+}
+
+pub(super) fn series_key(env: &SketchEnvelope) -> String {
+    format!("{}|{:?}", env.metric_name, env.labels)
+}
+
+/// Percentile grid of both distributions: where their CDFs are compared.
+fn grid(a: &dyn QuantileSketch, b: &dyn QuantileSketch) -> Vec<f64> {
+    (1..100)
+        .flat_map(|i| [a.quantile(i as f64 / 100.0), b.quantile(i as f64 / 100.0)])
+        .collect()
+}
+
+impl SketchDetector {
+    /// KS distance of this KLL window from the merge of the previous ones.
+    fn drift(&mut self, env: &SketchEnvelope) -> (Vec<SketchEnvelope>, Option<Event>) {
+        let Ok(current) = KLLWrapper::from_snapshot(&env.payload) else {
+            return (Vec::new(), None);
+        };
+        let window = self.baselines.entry(series_key(env)).or_default();
+        let mut result = (Vec::new(), None);
+        if window.len() >= 3 && env.count >= self.drift.rules.min_points {
+            let mut baseline = KLLWrapper::new(current.inner().k() as i32, None);
+            for w in window.iter() {
+                let _ = crate::precompute::Sketch::merge(&mut baseline, w);
+            }
+            fn cdf(s: &KLLWrapper) -> impl Fn(f64) -> f64 + '_ {
+                let n = s.inner().count().max(1) as f64;
+                move |x| s.inner().rank(x) as f64 / n
+            }
+            let ks = ks_distance(cdf(&current), cdf(&baseline), &grid(&current, &baseline));
+            result = self.drift.observe(
+                env,
+                "sketch",
+                ks,
+                baseline.quantile(0.5),
+                current.quantile(0.5),
+            );
+        }
+        window.push_back(current);
+        if window.len() > self.drift.rules.baseline_windows {
+            window.pop_front();
+        }
+        result
+    }
 }
 
 /// The `bound="estimate"` value of `metric` among `answers`.
@@ -275,6 +328,11 @@ impl local::Processor<OtapPdata> for SketchDetector {
             };
             match sketch_answers(&env, &self.config.quantiles, self.config.k) {
                 Ok(answers) => {
+                    if env.sketch_type == SketchType::KLLSketch {
+                        let (gauges, event) = self.drift(&env);
+                        out.extend(gauges);
+                        events.extend(event);
+                    }
                     if let Some(d) = estimate_of(&answers, "asap.distinct") {
                         let (gauges, event) =
                             self.cardinality.observe(&env, "sketch", d, env.count);
@@ -310,6 +368,8 @@ static SKETCH_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         Ok(ProcessorWrapper::local(
             SketchDetector {
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
+                drift: DriftTracker::new(config.drift.clone()),
+                baselines: HashMap::new(),
                 config,
             },
             node,
