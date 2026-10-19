@@ -372,6 +372,7 @@ dependencies = [
  "otel-arrow-dfe-telemetry",
  "proptest",
  "prost 0.13.5",
+ "prost 0.14.4",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

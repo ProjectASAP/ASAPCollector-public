@@ -1,6 +1,9 @@
 //! Multi-process OTAP sketch create -> merge -> estimate demonstration.
 //! Each ASAP processor runs in its own OS process and OTAP RuntimePipeline.
 
+#[path = "demo/prometheus_export.rs"]
+mod prometheus_export;
+
 use asap_precompute_rs::envelope::{Encoding, SketchEnvelope, SketchType};
 use asap_precompute_rs::observation::KeyValue;
 use asap_precompute_rs::otap::codec::{decode_pdata_to_observations, encode_envelopes_to_pdata};
@@ -756,6 +759,7 @@ struct DemoManifest {
 }
 
 struct ParentOptions {
+    prometheus_otlp_endpoint: Option<String>,
     output_dir: Option<PathBuf>,
     result_manifest: Option<PathBuf>,
     points_per_source: u64,
@@ -766,6 +770,7 @@ struct ParentOptions {
 
 fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> {
     let mut options = ParentOptions {
+        prometheus_otlp_endpoint: None,
         output_dir: None,
         result_manifest: None,
         points_per_source: 100,
@@ -780,6 +785,9 @@ fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> 
             .get(index + 1)
             .ok_or_else(|| format!("missing value for {flag}"))?;
         match flag.as_ref() {
+            "--prometheus-otlp-endpoint" => {
+                options.prometheus_otlp_endpoint = Some(value.to_string_lossy().into_owned());
+            }
             "--output-dir" => options.output_dir = Some(PathBuf::from(value)),
             "--result-manifest" => options.result_manifest = Some(PathBuf::from(value)),
             "--points-per-source" => {
@@ -811,6 +819,9 @@ fn parent_options(args: &[std::ffi::OsString]) -> Result<ParentOptions, String> 
             _ => return Err(format!("unknown argument {flag}")),
         }
         index += 2;
+    }
+    if options.prometheus_otlp_endpoint.is_some() && options.scenario != "kll" {
+        return Err("--prometheus-otlp-endpoint requires --scenario kll".into());
     }
     Ok(options)
 }
@@ -954,6 +965,10 @@ fn run_parent(options: ParentOptions) -> Result<(), String> {
         }
     }
     let validation_elapsed_nanoseconds = validation_start.elapsed().as_nanos();
+    if let Some(endpoint) = options.prometheus_otlp_endpoint {
+        prometheus_export::export(&out, &endpoint)?;
+        println!("KLL estimates exported to Prometheus");
+    }
     if let Some(path) = options.result_manifest {
         let manifest = DemoManifest {
             parent_pid: std::process::id(),

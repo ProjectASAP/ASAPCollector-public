@@ -28,14 +28,9 @@ pub struct KLLWrapper {
     sk: KLL<f64>,
     k: i32,
     seed: Option<u64>,
-    /// Snapshot of all observations seen since the last reset. Kept
-    /// alongside the in-tree compactor so [`Self::merge`] /
-    /// [`Self::apply_delta`] can replay the peer's items into our
-    /// compactor without poking at private state. The compactor
-    /// itself drives [`Self::snapshot`] via the wire-format accessors
-    /// added in `asap_sketchlib` (wire_levels/wire_items/wire_coin),
-    /// so cross-language byte-parity now lives against the compactor's
-    /// actual state, not this history vec.
+    /// Replay history used only by the legacy proto path. The ASAPv1 path
+    /// retains the compacted KLL state alone, keeping pane memory independent
+    /// of the number of incoming observations.
     history: Vec<f64>,
     /// Outbound wire format. KLL is full-only, so msgpack means the
     /// self-describing ASAPv1 form; proto means the legacy `KllState` envelope.
@@ -87,7 +82,9 @@ impl KLLWrapper {
     /// Insert a single observation.
     pub fn update(&mut self, value: f64) {
         if value.is_finite() {
-            self.history.push(value);
+            if !self.wire_encoding.is_msgpack() {
+                self.history.push(value);
+            }
             self.sk.update(&value);
         }
     }
@@ -100,10 +97,14 @@ impl KLLWrapper {
         I: IntoIterator<Item = f64>,
     {
         let values = values.into_iter();
-        self.history.reserve(values.size_hint().0);
+        if !self.wire_encoding.is_msgpack() {
+            self.history.reserve(values.size_hint().0);
+        }
         for value in values {
             if value.is_finite() {
-                self.history.push(value);
+                if !self.wire_encoding.is_msgpack() {
+                    self.history.push(value);
+                }
                 self.sk.update(&value);
             }
         }
@@ -308,6 +309,16 @@ impl SketchObserver for KLLObserver {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn asapv1_keeps_compacted_state_without_raw_replay_history() {
+        use super::*;
+        let mut sketch = KLLWrapper::new(200, Some(42)).with_wire_encoding(Encoding::Msgpack);
+        sketch.update_batch((0..20_000).map(|value| value as f64));
+        assert!(sketch.history.is_empty());
+        // The compactor reports retained weight, not the exact raw input count.
+        assert!(sketch.inner().count().abs_diff(20_000) < 400);
+        assert!(sketch.snapshot().unwrap().len() < 20_000);
+    }
     use super::*;
 
     #[test]

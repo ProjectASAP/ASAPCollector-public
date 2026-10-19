@@ -23,6 +23,9 @@ plugin = "asap_sketches"
   ## Window size. Rust duration string, parsed via humantime;
   ## passed verbatim into `PrecomputeConfig::window`.
   window_size = "10s"
+  # window_slide = "5s"      # KLL rolling lookback of 10s, emit every 5s
+  # Set transmit_sketch=false for overlapping sliding windows. Equal size
+  # and slide can transmit full disjoint panes for downstream merging.
 
   ## Output metric name stamped onto every emitted envelope.
   output_metric_name = "http_request_duration_ms"

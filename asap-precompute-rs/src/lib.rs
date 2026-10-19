@@ -21,6 +21,7 @@ pub mod adapter;
 pub mod config;
 pub mod control_channel;
 pub mod envelope;
+pub mod kll_windows;
 pub mod matchers;
 pub mod observation;
 #[cfg(feature = "otap")]
