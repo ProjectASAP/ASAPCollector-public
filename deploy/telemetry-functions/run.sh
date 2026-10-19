@@ -14,7 +14,10 @@ trap 'rm -rf "$context"' EXIT
 cp "$target/release/asap-collector" "$context/"
 strip --strip-debug "$context/asap-collector"
 "${docker[@]}" build -q -f deploy/collector.Dockerfile -t asap-collector:local "$context"
+[ "${1:-}" = "--build-only" ] && exit 0
 export USE_CASE=${USE_CASE:-latency}
+export PIPELINES=${PIPELINES:-./$USE_CASE}
+export COMMON=${COMMON:-./common}
 # Every generator counts scenario time from this second, so the three
 # pipelines get identical points.
 export SCENARIO_START=${SCENARIO_START:-$(($(date +%s) + 10))}
