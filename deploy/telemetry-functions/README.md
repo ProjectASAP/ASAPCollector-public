@@ -28,6 +28,18 @@ of scenario time, so all three pipelines receive identical points.
 | exact-detector | `exact_detector`: the same answers and events from the exact windows (`method="exact"`): the ground truth |
 | raw-branch-a/b, raw-merge | forward raw points (OTLP receiver -> exporter) |
 | raw-sink | `raw_sink`: writes every raw point as one log record to `loki-raw` and reports when `loki-raw` acknowledged each window's last point |
+| hh-accuracy | `heavy_hitter_accuracy`, outside the pipelines: in the top-k use case both detectors send it a copy of their answers; per window it reports heavy-hitter precision, recall, F1 and average relative count error |
+
+**Heavy-hitter accuracy** (top-k use case). A heavy hitter is a route with at
+least 1% of the window's points by the exact counts; the sketch reports a
+route when its estimate reaches 1%. Per window, `hh-accuracy` emits
+`asap_hh_precision` (reported routes that are heavy hitters / reported),
+`asap_hh_recall` (heavy hitters reported / heavy hitters), `asap_hh_f1`,
+`asap_hh_are` (mean |estimate - exact| / exact over the heavy hitters found),
+`asap_hh_truth` and `asap_hh_reported`. Both detectors report their top 20 so
+that every heavy hitter is in the exact list (about 10 routes reach 1% here);
+a window whose exact top 20 is all above the threshold only gets
+`asap_hh_incomplete`.
 
 Every pipeline reports its window completion delay as `asap_answer_delay`
 (seconds from a window's end until its result is complete at the end of the
@@ -46,7 +58,7 @@ reports each point's time from its event time to that acknowledgement
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
 | `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed | `/d/asap-cardinality`: distinct values with bound, class per key (stable, growing, identifier-like), events |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
-| `topk` | Count-Min (4 x 512) + top-10 heap per attribute key | 100,000 Zipf routes; a new route takes 15% of traffic at minute 10 | `/d/asap-topk`: top-10 with bound vs exact, new heavy hitters |
+| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | 100,000 Zipf routes; a new route takes 15% of traffic at minute 10 | `/d/asap-topk`: top-10 with bound vs exact, new heavy hitters, heavy-hitter precision/recall/F1/ARE |
 
 Answers reach Prometheus over OTLP as `asap_quantile`, `asap_distinct`,
 `asap_topk`, `asap_points`, `asap_cardinality_state`, `asap_drift_ks`,
@@ -60,7 +72,7 @@ and payload bytes per receiver, labelled with the stage.
 
 ## Run
 
-Linux, Docker with Compose, 18 free CPUs (0-17 by default; `CPU_BRANCH_A=20`
+Linux, Docker with Compose, 19 free CPUs (0-18 by default; `CPU_BRANCH_A=20`
 etc. move a stage) and memory for `loki-raw` (capped at `LOKI_RAW_MEMORY`,
 default 16g). From the repository root:
 
@@ -90,7 +102,7 @@ fails. The checks:
 | latency | exact p50/p99 inside the sketch's bound (routes with at least 2,000 points) |
 | cardinality | sketch and exact give every key the same class; the generated classes are found; distinct-count error at most 2%; class events in Loki |
 | drift | the changed route drifts in both methods; no other route does; drift event in Loki |
-| topk | the new route enters both top-10s; sketch recall@10 at least 0.9; novelty event in Loki |
+| topk | the new route enters both top-10s; sketch recall@10 at least 0.9; heavy-hitter precision and recall at least 0.9; novelty event in Loki |
 
 CI runs it on every PR (`.github/workflows/ci.yml`) with the stages sharing
 the runner's CPUs: a correctness check, not a capacity measurement.

@@ -393,6 +393,72 @@ pub fn topk_of(answers: &[SketchEnvelope]) -> Vec<(String, f64)> {
     top.into_iter().map(|(_, k, v)| (k, v)).collect()
 }
 
+/// How well a sketch's top-k finds and counts one window's heavy hitters: the
+/// keys with at least `phi` of the window's points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeavyHitterAccuracy {
+    /// Heavy hitters in the exact counts.
+    pub truth: usize,
+    /// Keys whose sketch estimate reaches the threshold.
+    pub reported: usize,
+    /// Reported keys that are heavy hitters.
+    pub true_positives: usize,
+    /// True positives / reported (1 when nothing is reported).
+    pub precision: f64,
+    /// True positives / heavy hitters (1 when there are none).
+    pub recall: f64,
+    /// Harmonic mean of precision and recall.
+    pub f1: f64,
+    /// Mean of |estimate - exact| / exact over the true positives (`None`
+    /// without any): the sketch has no count for a heavy hitter it missed.
+    pub average_relative_error: Option<f64>,
+}
+
+/// Compares a window's sketch top-k with its exact top-k at threshold
+/// `phi * points`. Both lists are `(key, count)` as reported, at most `k`
+/// long. Returns `None` when the exact list is full and its smallest count
+/// still reaches the threshold: the window may have more heavy hitters than
+/// the list shows.
+pub fn heavy_hitter_accuracy(
+    phi: f64,
+    points: f64,
+    k: usize,
+    exact: &[(String, f64)],
+    sketch: &[(String, f64)],
+) -> Option<HeavyHitterAccuracy> {
+    let threshold = phi * points;
+    let smallest = exact.iter().map(|e| e.1).fold(f64::INFINITY, f64::min);
+    if exact.len() >= k && smallest >= threshold {
+        return None;
+    }
+    let truth: HashMap<&str, f64> = exact
+        .iter()
+        .filter(|e| e.1 >= threshold)
+        .map(|(key, c)| (key.as_str(), *c))
+        .collect();
+    let reported: Vec<&(String, f64)> = sketch.iter().filter(|e| e.1 >= threshold).collect();
+    let errors: Vec<f64> = reported
+        .iter()
+        .filter_map(|(key, estimate)| truth.get(key.as_str()).map(|c| (estimate - c).abs() / c))
+        .collect();
+    let tp = errors.len();
+    let ratio = |n: usize, d: usize| if d == 0 { 1.0 } else { n as f64 / d as f64 };
+    let (precision, recall) = (ratio(tp, reported.len()), ratio(tp, truth.len()));
+    Some(HeavyHitterAccuracy {
+        truth: truth.len(),
+        reported: reported.len(),
+        true_positives: tp,
+        precision,
+        recall,
+        f1: if precision + recall == 0.0 {
+            0.0
+        } else {
+            2.0 * precision * recall / (precision + recall)
+        },
+        average_relative_error: (tp > 0).then(|| errors.iter().sum::<f64>() / tp as f64),
+    })
+}
+
 /// Flags heavy hitters that were not among the top keys of the previous
 /// windows. Sketch and exact use the same rule.
 #[derive(Default)]
@@ -819,5 +885,33 @@ impl CardinalityClassifier {
             ),
         });
         (out, event)
+    }
+}
+
+#[cfg(test)]
+mod heavy_hitter_tests {
+    use super::*;
+
+    #[test]
+    fn heavy_hitter_accuracy_counts_false_positives_and_misses() {
+        let list = |v: &[(&str, f64)]| {
+            v.iter()
+                .map(|(k, c)| (k.to_string(), *c))
+                .collect::<Vec<_>>()
+        };
+        // 1,000 points, phi 10%: a, b, c are heavy; the sketch overestimates
+        // d past the threshold and misses c.
+        let exact = list(&[("a", 400.0), ("b", 200.0), ("c", 100.0), ("d", 90.0)]);
+        let sketch = list(&[("a", 410.0), ("b", 220.0), ("d", 105.0)]);
+        let acc = heavy_hitter_accuracy(0.1, 1000.0, 20, &exact, &sketch).unwrap();
+        assert_eq!((acc.truth, acc.reported, acc.true_positives), (3, 3, 2));
+        assert!((acc.precision - 2.0 / 3.0).abs() < 1e-12);
+        assert!((acc.recall - 2.0 / 3.0).abs() < 1e-12);
+        assert!((acc.f1 - 2.0 / 3.0).abs() < 1e-12);
+        // (10/400 + 20/200) / 2
+        assert!((acc.average_relative_error.unwrap() - 0.0625).abs() < 1e-12);
+        // A full exact list whose last count is still heavy may be cut short.
+        assert!(heavy_hitter_accuracy(0.05, 1000.0, 4, &exact, &sketch).is_none());
+        assert!(heavy_hitter_accuracy(0.1, 1000.0, 4, &exact, &sketch).is_some());
     }
 }

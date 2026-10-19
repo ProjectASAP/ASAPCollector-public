@@ -62,6 +62,7 @@ jobs:
       CPU_RAW_BRANCH_B: "0-3"
       CPU_RAW_MERGE: "0-3"
       CPU_RAW_SINK: "0-3"
+      CPU_HH_ACCURACY: "0-3"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

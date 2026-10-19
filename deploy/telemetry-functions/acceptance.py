@@ -39,7 +39,8 @@ WINDOW_S = 60 // SCALE
 USE_CASES = ("latency", "cardinality", "drift", "topk")
 STAGES = tuple(f"{p}{s}" for p in ("", "exact-", "raw-") for s in ("generator-a", "generator-b"))
 STAGES += ("branch-a", "branch-b", "merge", "detector", "exact-branch-a", "exact-branch-b",
-           "exact-merge", "exact-detector", "raw-branch-a", "raw-branch-b", "raw-merge", "raw-sink")
+           "exact-merge", "exact-detector", "raw-branch-a", "raw-branch-b", "raw-merge", "raw-sink",
+           "hh-accuracy")
 METHODS = ("sketch", "exact", "raw")
 
 
@@ -200,10 +201,15 @@ def topk_checks(stack, t):
     new = stack.vector('max_over_time(asap_topk{key="/new/hot-route",bound=~"estimate|"}[10m])')
     yield check("new route in both top-10s", {m["method"] for m, _ in new} == {"sketch", "exact"},
                 str(sorted(m["method"] for m, _ in new)))
-    top = {m: {r["key"] for r, _ in stack.vector(f'asap_topk{{method="{m}",bound=~"estimate|"}} @ {t}')}
+    top10 = 'rank=~"[1-9]|10"'
+    top = {m: {r["key"] for r, _ in stack.vector(f'asap_topk{{method="{m}",bound=~"estimate|",{top10}}} @ {t}')}
            for m in ("sketch", "exact")}
     recall = len(top["sketch"] & top["exact"]) / max(1, len(top["exact"]))
     yield check("sketch top-10 recall vs exact >= 0.9", recall >= 0.9, f"recall {recall:.2f}")
+    hh = {m["__name__"]: v for m, v in stack.vector(f'{{__name__=~"asap_hh_(precision|recall|are)"}} @ {t}')}
+    yield check("heavy hitters (>= 1% of points): precision and recall >= 0.9",
+                hh.get("asap_hh_precision", 0) >= 0.9 and hh.get("asap_hh_recall", 0) >= 0.9,
+                ", ".join(f"{k.removeprefix('asap_hh_')} {v:.3f}" for k, v in sorted(hh.items())) or "no asap_hh gauges")
     events = stack.events('| event_kind="novelty" | method="sketch"')
     flagged = stack.vector('max_over_time(asap_topk_new{key="/new/hot-route"}[10m])')
     yield check("novelty event in Loki", any("/new/hot-route" in e for e in events),
