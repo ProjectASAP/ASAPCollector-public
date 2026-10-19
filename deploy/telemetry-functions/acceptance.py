@@ -9,7 +9,7 @@ completion delay. Prints one line per check and exits non-zero if any check
 fails.
 
 Time is scaled down 6x so a use case takes a few minutes: 10-second windows, a
-2-second merge grace, changes after 1/6 of their configured time and growth 6x
+5-second merge grace, changes after 1/6 of their configured time and growth 6x
 faster per minute. Rules counted in windows (baselines, thresholds) are as
 deployed.
 
@@ -50,7 +50,8 @@ def scaled_copy(directory, into):
         text = src.read_text()
         text = text.replace("window_size: 60s", f"window_size: {WINDOW_S}s")
         text = text.replace("window: 60s", f"window: {WINDOW_S}s")
-        text = text.replace("{grace: 5s}", "{grace: 2s}")
+        # The merge grace is not scaled: shared CI runners need the full 5 s
+        # for every source's sketch to arrive.
         text = re.sub(r"after_seconds: (\d+)", lambda m: f"after_seconds: {int(m[1]) // SCALE}", text)
         text = re.sub(r"growth_per_minute: ([0-9.]+)",
                       lambda m: f"growth_per_minute: {float(m[1]) * SCALE:g}", text)
@@ -126,9 +127,9 @@ def common_checks(stack, flt):
     yield check("full rate reaches the end (no backpressure)",
                 full and all(abs(v - expected) <= 0.01 * expected for v in full),
                 f"{len(full)} windows, points/window {sorted(set(int(v) for v in full))} vs {expected}")
-    yield check("sketch and exact windows hold the same points",
-                shared and all(w["sketch"][t] == w["exact"][t] for t in shared),
-                f"{len(shared)} windows compared")
+    diff = [(t, int(w["sketch"][t]), int(w["exact"][t])) for t in shared if w["sketch"][t] != w["exact"][t]]
+    yield check("sketch and exact windows hold the same points", shared and not diff,
+                f"{len(shared)} windows compared" + (f"; differ (window end, sketch, exact): {diff}" if diff else ""))
     # The raw pipeline writes every point to its own store; whether it keeps
     # up is the measurement, so its rate is reported, not required.
     raw = [int(w["raw"][t]) for t in sorted(w["raw"])[1:-1]]
@@ -204,8 +205,11 @@ def topk_checks(stack, t):
     recall = len(top["sketch"] & top["exact"]) / max(1, len(top["exact"]))
     yield check("sketch top-10 recall vs exact >= 0.9", recall >= 0.9, f"recall {recall:.2f}")
     events = stack.events('| event_kind="novelty" | method="sketch"')
+    flagged = stack.vector('max_over_time(asap_topk_new{key="/new/hot-route"}[10m])')
     yield check("novelty event in Loki", any("/new/hot-route" in e for e in events),
-                next((e for e in events if "/new/hot-route" in e), "none"))
+                next((e for e in events if "/new/hot-route" in e),
+                     f"none; {len(events)} sketch novelty events, "
+                     f"asap_topk_new gauge from {sorted(m['method'] for m, _ in flagged)}"))
 
 
 CASES = {
