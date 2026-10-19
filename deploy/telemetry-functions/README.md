@@ -81,7 +81,7 @@ reports each point's time from its event time to that acknowledgement
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
 | `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed | `/d/asap-cardinality`: distinct values with bound, class per key (stable, growing, identifier-like), events |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
-| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches, heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, freshness breakdown, CPU/memory per component and per approach, bits per second into each stage |
+| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, freshness breakdown, CPU/memory per component and per approach, bits per second into each stage |
 
 Answers reach Prometheus over OTLP as `asap_quantile`, `asap_distinct`,
 `asap_topk`, `asap_points`, `asap_cardinality_state`, `asap_drift_ks`,

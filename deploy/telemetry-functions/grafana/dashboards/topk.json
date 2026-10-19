@@ -38,6 +38,243 @@
       "id": 2
     },
     {
+      "type": "table",
+      "title": "Top-10 routes of the three approaches, latest window (union of their top-10s)",
+      "description": "One row per route in any approach's top-10. Error is (count - exact) / exact; empty when the route is outside that approach's reported top-20.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (key, exact_rank) (label_replace(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "max by (key, sketch_rank) (label_replace(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "max by (key, raw_rank) (label_replace(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "D",
+          "expr": "100 * (max by (key) (asap_topk{method=\"sketch\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\"}))))) - on (key) max by (key) (asap_topk{method=\"exact\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\"})))))) / on (key) max by (key) (asap_topk{method=\"exact\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}))))) and on (key) (max by (key, exact_rank) (label_replace(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "E",
+          "expr": "100 * (max by (key) (asap_topk{method=\"raw\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\"}))))) - on (key) max by (key) (asap_topk{method=\"exact\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\"})))))) / on (key) max by (key) (asap_topk{method=\"exact\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}))))) and on (key) (max by (key, exact_rank) (label_replace(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "key",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true
+            },
+            "indexByName": {
+              "key": 0,
+              "exact_rank": 1,
+              "Value #A": 2,
+              "sketch_rank": 3,
+              "Value #B": 4,
+              "Value #D": 5,
+              "raw_rank": 6,
+              "Value #C": 7,
+              "Value #E": 8
+            },
+            "renameByName": {
+              "key": "Route",
+              "exact_rank": "Exact rank",
+              "Value #A": "Exact count",
+              "sketch_rank": "Sketch rank",
+              "Value #B": "Sketch count",
+              "Value #D": "Sketch error",
+              "raw_rank": "Store+query rank",
+              "Value #C": "Store+query count",
+              "Value #E": "Store+query error"
+            }
+          }
+        },
+        {
+          "id": "convertFieldType",
+          "options": {
+            "conversions": [
+              {
+                "targetField": "Exact rank",
+                "destinationType": "number"
+              },
+              {
+                "targetField": "Sketch rank",
+                "destinationType": "number"
+              },
+              {
+                "targetField": "Store+query rank",
+                "destinationType": "number"
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Exact count",
+            "desc": true
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sketch count"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Exact count"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Store+query count"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Route"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Sketch error"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Store+query error"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "id": 3
+    },
+    {
       "type": "bargauge",
       "title": "Sketch (CMS + heap): top-10 routes, latest window",
       "datasource": {
@@ -77,9 +314,9 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 11
+        "y": 23
       },
-      "id": 3
+      "id": 4
     },
     {
       "type": "bargauge",
@@ -121,9 +358,9 @@
         "h": 10,
         "w": 8,
         "x": 8,
-        "y": 11
+        "y": 23
       },
-      "id": 4
+      "id": 5
     },
     {
       "type": "bargauge",
@@ -165,9 +402,9 @@
         "h": 10,
         "w": 8,
         "x": 16,
-        "y": 11
+        "y": 23
       },
-      "id": 5
+      "id": 6
     },
     {
       "type": "timeseries",
@@ -268,9 +505,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 21
+        "y": 33
       },
-      "id": 6
+      "id": 7
     },
     {
       "type": "logs",
@@ -294,9 +531,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 21
+        "y": 33
       },
-      "id": 7
+      "id": 8
     },
     {
       "type": "row",
@@ -307,9 +544,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 41
       },
-      "id": 8
+      "id": 9
     },
     {
       "type": "timeseries",
@@ -374,9 +611,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 42
       },
-      "id": 9
+      "id": 10
     },
     {
       "type": "timeseries",
@@ -453,9 +690,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 42
       },
-      "id": 10
+      "id": 11
     },
     {
       "type": "row",
@@ -466,9 +703,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 50
       },
-      "id": 11
+      "id": 12
     },
     {
       "type": "timeseries",
@@ -560,9 +797,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 39
+        "y": 51
       },
-      "id": 12
+      "id": 13
     },
     {
       "type": "timeseries",
@@ -603,9 +840,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 39
+        "y": 51
       },
-      "id": 13
+      "id": 14
     },
     {
       "type": "row",
@@ -616,9 +853,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 47
+        "y": 59
       },
-      "id": 14
+      "id": 15
     },
     {
       "type": "timeseries",
@@ -715,9 +952,9 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 60
       },
-      "id": 15
+      "id": 16
     },
     {
       "type": "timeseries",
@@ -789,9 +1026,9 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 55
+        "y": 67
       },
-      "id": 16
+      "id": 17
     },
     {
       "type": "timeseries",
@@ -863,9 +1100,9 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 55
+        "y": 67
       },
-      "id": 17
+      "id": 18
     },
     {
       "type": "timeseries",
@@ -922,9 +1159,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 55
+        "y": 67
       },
-      "id": 18
+      "id": 19
     },
     {
       "type": "row",
@@ -935,9 +1172,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 63
+        "y": 75
       },
-      "id": 19
+      "id": 20
     },
     {
       "type": "timeseries",
@@ -978,9 +1215,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 64
+        "y": 76
       },
-      "id": 20
+      "id": 21
     },
     {
       "type": "timeseries",
@@ -1087,9 +1324,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 64
+        "y": 76
       },
-      "id": 21
+      "id": 22
     },
     {
       "type": "timeseries",
@@ -1130,9 +1367,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 72
+        "y": 84
       },
-      "id": 22
+      "id": 23
     },
     {
       "type": "timeseries",
@@ -1239,9 +1476,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 72
+        "y": 84
       },
-      "id": 23
+      "id": 24
     },
     {
       "type": "row",
@@ -1252,9 +1489,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 80
+        "y": 92
       },
-      "id": 24
+      "id": 25
     },
     {
       "type": "timeseries",
@@ -1303,9 +1540,9 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 81
+        "y": 93
       },
-      "id": 25
+      "id": 26
     }
   ]
 }
