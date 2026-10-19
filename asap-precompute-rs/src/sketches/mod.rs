@@ -19,3 +19,31 @@ pub use countsketch::{CountSketchObserver, CountSketchWrapper};
 pub use ddsketch::{DDSketchObserver, DDSketchWrapper};
 pub use hll::{HLLObserver, HLLWrapper};
 pub use kll::{KLLObserver, KLLWrapper};
+
+use crate::envelope::SketchType;
+use crate::precompute::{PrecomputeError, Sketch};
+
+/// Decodes an ASAPv1 snapshot into the wrapper for `sketch_type`.
+pub fn decode_snapshot(
+    sketch_type: SketchType,
+    bytes: &[u8],
+) -> Result<Box<dyn Sketch>, PrecomputeError> {
+    Ok(match sketch_type {
+        SketchType::DDSketch => Box::new(DDSketchWrapper::from_snapshot(bytes)?),
+        SketchType::KLLSketch => Box::new(KLLWrapper::from_snapshot(bytes)?),
+        SketchType::HLLSketch => Box::new(HLLWrapper::from_snapshot(bytes)?),
+        SketchType::CountSketch => Box::new(CountSketchWrapper::from_snapshot(bytes)?),
+        SketchType::CountMinSketch => Box::new(CMSWrapper::from_snapshot(bytes)?),
+        SketchType::CountMinSketchWithHeap => Box::new(CMSHeapWrapper::from_snapshot(bytes)?),
+        SketchType::Unspecified => {
+            return Err(PrecomputeError::Other(
+                "sketch.envelope requires a sketch.type".into(),
+            ))
+        }
+        SketchType::Exact => {
+            return Err(PrecomputeError::Other(
+                "an exact window is not a sketch".into(),
+            ))
+        }
+    })
+}

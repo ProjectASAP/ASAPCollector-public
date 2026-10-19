@@ -176,7 +176,7 @@ pub fn sketch_size_string(sketch_type: SketchType, params: &SketchParams) -> Opt
                 _ => None,
             }
         }
-        SketchType::Unspecified => None,
+        SketchType::Unspecified | SketchType::Exact => None,
     }
 }
 

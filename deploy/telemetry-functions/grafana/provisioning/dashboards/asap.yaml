@@ -1,0 +1,3 @@
+apiVersion: 1
+providers:
+  - {name: ASAP telemetry functions, folder: ASAP, type: file, options: {path: /var/lib/grafana/dashboards}}

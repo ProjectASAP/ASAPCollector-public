@@ -11,11 +11,17 @@ mod schema;
 pub mod config;
 
 #[cfg(feature = "otap-engine")]
+pub mod answer_nodes;
+#[cfg(feature = "otap-engine")]
+pub mod baseline_nodes;
+#[cfg(feature = "otap-engine")]
 pub mod codec;
 #[cfg(feature = "otap-engine")]
 pub mod processor;
 #[cfg(feature = "otap-engine")]
 pub mod scenario_generator;
+#[cfg(feature = "otap-engine")]
+pub mod window_merge;
 
 pub use config::{ConfigError, PluginConfig, SketchDispatch};
 pub use schema::{

@@ -69,10 +69,6 @@ use crate::config::{sketch_size_string, SketchParams};
 use crate::envelope::{SketchEnvelope, SketchType};
 use crate::observation::{KeyValue, Observation, ObservationValue};
 
-use crate::sketches::{
-    CMSHeapWrapper, CMSWrapper, CountSketchWrapper, DDSketchWrapper, HLLWrapper, KLLWrapper,
-};
-
 use super::schema::{
     ATTR_AGG_ID, ATTR_ENVELOPE, ATTR_SCHEMA_VERSION, ATTR_SERIES_ID, ATTR_SKETCH_SIZE,
     ATTR_SKETCH_TYPE, ATTR_WINDOW_END_MS, ATTR_WINDOW_START_MS,
@@ -184,17 +180,14 @@ fn validate_self_describing_payload(sketch_type: SketchType, payload: &[u8]) -> 
     if payload.is_empty() {
         return Ok(());
     }
-    let decoded = match sketch_type {
-        SketchType::DDSketch => DDSketchWrapper::from_snapshot(payload).map(drop),
-        SketchType::KLLSketch => KLLWrapper::from_snapshot(payload).map(drop),
-        SketchType::HLLSketch => HLLWrapper::from_snapshot(payload).map(drop),
-        SketchType::CountSketch => CountSketchWrapper::from_snapshot(payload).map(drop),
-        SketchType::CountMinSketch => CMSWrapper::from_snapshot(payload).map(drop),
-        SketchType::CountMinSketchWithHeap => CMSHeapWrapper::from_snapshot(payload).map(drop),
-        SketchType::Unspecified => {
-            return Err("sketch.envelope requires a sketch.type".into());
-        }
-    };
+    if sketch_type == SketchType::Unspecified {
+        return Err("sketch.envelope requires a sketch.type".into());
+    }
+    if sketch_type == SketchType::Exact {
+        // Exact windows can be large; their consumer decodes them once.
+        return Ok(());
+    }
+    let decoded = crate::sketches::decode_snapshot(sketch_type, payload).map(drop);
     decoded.map_err(|error| format!("invalid {} sketch.envelope: {error}", sketch_type.name()))
 }
 

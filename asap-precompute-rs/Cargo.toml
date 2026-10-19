@@ -43,6 +43,7 @@ otel-arrow-dfe-pdata-views = { git = "https://github.com/open-telemetry/otel-arr
 otel-arrow-dfe-state = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-state", optional = true }
 otel-arrow-dfe-telemetry = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-telemetry", optional = true }
 otel-arrow-dfe-core-nodes = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-core-nodes", optional = true }
+otel-arrow-dfe-controller = { git = "https://github.com/open-telemetry/otel-arrow", rev = "3e85c3460361446ebfce99e9f35fffd2dd5ab740", package = "otel-arrow-dfe-controller", optional = true }
 linkme = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 humantime-serde = { version = "1", optional = true }
@@ -85,12 +86,25 @@ otap-engine = [
     "dep:tokio",
 ]
 
+# The deployable collector: the official OTAP engine controller with the
+# ASAP nodes linked in. Picks a TLS provider, so it is not part of the library.
+collector = [
+    "otap-engine",
+    "dep:otel-arrow-dfe-controller",
+    "otel-arrow-dfe-otap/crypto-ring",
+]
+
 # Network benchmark only: do not impose a TLS provider on library consumers.
 stream-benchmark = [
     "otap-engine",
     "otel-arrow-dfe-otap/crypto-ring",
     "otel-arrow-dfe-core-nodes/dev-tools",
 ]
+
+[[bin]]
+name = "asap-collector"
+path = "src/bin/asap_collector.rs"
+required-features = ["collector"]
 
 [[bin]]
 name = "asap-stream-bench"

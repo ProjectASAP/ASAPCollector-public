@@ -1,0 +1,20 @@
+global:
+  scrape_interval: 5s
+scrape_configs:
+  # Each collector's own engine telemetry: CPU time per pipeline, RSS, and
+  # per-node message and payload counters. stage = the compose service.
+  - job_name: collectors
+    metrics_path: /api/v1/metrics
+    params: {format: [prometheus]}
+    static_configs:
+      - targets: [generator-a:8085, generator-b:8085, branch-a:8085, branch-b:8085, merge:8085,
+                  detector:8085, exact-generator-a:8085, exact-generator-b:8085,
+                  exact-branch-a:8085, exact-branch-b:8085, exact-merge:8085,
+                  exact-detector:8085, raw-generator-a:8085, raw-generator-b:8085,
+                  raw-branch-a:8085, raw-branch-b:8085, raw-merge:8085, raw-sink:8085]
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: (.+):8085
+        target_label: stage
+# Answers (sketch, exact) and the raw pipeline's latency arrive through the
+# OTLP receiver.

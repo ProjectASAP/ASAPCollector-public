@@ -1,0 +1,166 @@
+# Three pipelines over the same generated input, sharing no processor:
+#   sketch: generator-a/b -> branch-a/b (sketch) -> merge -> detector
+#   exact:  exact-generator-a/b -> exact-branch-a/b (exact window) ->
+#           exact-merge -> exact-detector
+#   raw:    raw-generator-a/b -> raw-branch-a/b -> raw-merge -> raw-sink
+#           (every raw point into loki-raw)
+# Each stage is the official OTAP engine (asap-collector) in its own container,
+# pinned to one CPU, talking OTLP/HTTP over the compose network. The generators
+# of a source share one config (`downstream` is their pipeline's first stage)
+# and SCENARIO_START, so all three pipelines get identical points.
+# ./pipelines holds the use case's stage configs, ./common the stages that do
+# not depend on it; CPU_* variables move a stage to another core. Prometheus,
+# Grafana and Loki are the observers.
+x-collector: &collector
+  image: asap-collector:local
+  restart: "no"
+x-generator: &generator
+  <<: *collector
+  environment:
+    ASAP_SCENARIO_START: "${SCENARIO_START:-}"
+
+services:
+  # sketch pipeline
+  generator-a:
+    <<: *generator
+    command: ["--config", "/pipelines/generator-a.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_GENERATOR_A:-0}"
+    links: ["branch-a:downstream"]
+    depends_on: [branch-a]
+  generator-b:
+    <<: *generator
+    command: ["--config", "/pipelines/generator-b.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_GENERATOR_B:-1}"
+    links: ["branch-b:downstream"]
+    depends_on: [branch-b]
+  branch-a:
+    <<: *collector
+    command: ["--config", "/pipelines/branch.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_BRANCH_A:-2}"
+    depends_on: [merge]
+  branch-b:
+    <<: *collector
+    command: ["--config", "/pipelines/branch.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_BRANCH_B:-3}"
+    depends_on: [merge]
+  merge:
+    <<: *collector
+    command: ["--config", "/pipelines/merge.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_MERGE:-4}"
+    depends_on: [detector]
+  detector:
+    <<: *collector
+    command: ["--config", "/pipelines/detector.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_DETECTOR:-5}"
+    depends_on: [prometheus]
+  # exact pipeline
+  exact-generator-a:
+    <<: *generator
+    command: ["--config", "/pipelines/generator-a.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_EXACT_GENERATOR_A:-6}"
+    links: ["exact-branch-a:downstream"]
+    depends_on: [exact-branch-a]
+  exact-generator-b:
+    <<: *generator
+    command: ["--config", "/pipelines/generator-b.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_EXACT_GENERATOR_B:-7}"
+    links: ["exact-branch-b:downstream"]
+    depends_on: [exact-branch-b]
+  exact-branch-a:
+    <<: *collector
+    command: ["--config", "/pipelines/exact-branch.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_EXACT_BRANCH_A:-8}"
+    depends_on: [exact-merge]
+  exact-branch-b:
+    <<: *collector
+    command: ["--config", "/pipelines/exact-branch.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_EXACT_BRANCH_B:-9}"
+    depends_on: [exact-merge]
+  exact-merge:
+    <<: *collector
+    command: ["--config", "/common/exact-merge.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_EXACT_MERGE:-10}"
+    depends_on: [exact-detector]
+  exact-detector:
+    <<: *collector
+    command: ["--config", "/pipelines/exact-detector.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_EXACT_DETECTOR:-11}"
+    depends_on: [prometheus]
+  # raw pipeline
+  raw-generator-a:
+    <<: *generator
+    command: ["--config", "/pipelines/generator-a.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_RAW_GENERATOR_A:-12}"
+    links: ["raw-branch-a:downstream"]
+    depends_on: [raw-branch-a]
+  raw-generator-b:
+    <<: *generator
+    command: ["--config", "/pipelines/generator-b.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_RAW_GENERATOR_B:-13}"
+    links: ["raw-branch-b:downstream"]
+    depends_on: [raw-branch-b]
+  raw-branch-a:
+    <<: *collector
+    command: ["--config", "/common/raw-branch.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_RAW_BRANCH_A:-14}"
+    depends_on: [raw-merge]
+  raw-branch-b:
+    <<: *collector
+    command: ["--config", "/common/raw-branch.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_RAW_BRANCH_B:-15}"
+    depends_on: [raw-merge]
+  raw-merge:
+    <<: *collector
+    command: ["--config", "/common/raw-merge.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_RAW_MERGE:-16}"
+    depends_on: [raw-sink]
+  raw-sink:
+    <<: *collector
+    command: ["--config", "/common/raw-sink.yaml"]
+    volumes: ["./pipelines:/pipelines:ro", "./common:/common:ro"]
+    cpuset: "${CPU_RAW_SINK:-17}"
+    depends_on: [prometheus, loki-raw]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-otlp-receiver
+    ports: ["127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"]
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+  # The raw pipeline's store, apart from the Loki with the events.
+  loki-raw:
+    image: grafana/loki:3.5.0
+    command: ["-config.file=/etc/loki/loki-raw.yaml"]
+    ports: ["127.0.0.1:${LOKI_RAW_PORT:-3101}:3100"]
+    volumes: ["./loki-raw.yaml:/etc/loki/loki-raw.yaml:ro"]
+    mem_limit: "${LOKI_RAW_MEMORY:-16g}"
+  grafana:
+    image: grafana/grafana:12.1.0
+    ports: ["127.0.0.1:${GRAFANA_PORT:-3000}:3000"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+  loki:
+    image: grafana/loki:3.5.0
+    command: ["-config.file=/etc/loki/local-config.yaml"]
