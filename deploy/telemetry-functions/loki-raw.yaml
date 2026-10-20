@@ -36,5 +36,14 @@ limits_config:
   # The query job's top-k groups by route: up to a million series per query.
   max_query_series: 2000000
   query_timeout: 5m
+  # Only the latest windows are queried; keep 2 h so a long-running demo does
+  # not fill the disk (about 3 GB per hour at the top rate).
+  retention_period: 2h
+compactor:
+  working_directory: /loki/compactor
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 10m
+  delete_request_store: filesystem
 analytics:
   reporting_enabled: false
