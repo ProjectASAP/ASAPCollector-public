@@ -395,6 +395,88 @@
     },
     {
       "type": "timeseries",
+      "id": 10,
+      "title": "Throughput per pipeline: points per second each window delivered to the end of its pipeline",
+      "description": "Points in each 1-minute window that reached the end of the pipeline, divided by 60 s: for sketch and exact the points their detector answered for, for raw the points loki-raw acknowledged. Offered: 2 sources x 20,000 points/s. A pipeline below the offered line is dropping or falling behind.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (method) (asap_points{method=~\"sketch|exact\",attribute_key=\"\"}) / 60",
+          "legendFormat": "{{method}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (method) (asap_points{method=\"raw\"}) / 60",
+          "legendFormat": "{{method}}"
+        },
+        {
+          "refId": "C",
+          "expr": "vector(40000)",
+          "legendFormat": "offered"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "spanNulls": true,
+            "showPoints": "always",
+            "pointSize": 6
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "offered"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    4
+                  ]
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
       "title": "Window completion delay: seconds from a window's end until its result is complete",
       "datasource": {
         "type": "prometheus",
@@ -404,7 +486,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 26
+        "y": 34
       },
       "targets": [
         {
@@ -482,7 +564,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 26
+        "y": 34
       },
       "targets": [
         {
@@ -559,7 +641,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 42
       },
       "targets": [
         {
@@ -640,7 +722,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 34
+        "y": 42
       },
       "targets": [
         {
