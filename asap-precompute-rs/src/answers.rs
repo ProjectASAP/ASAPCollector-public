@@ -416,9 +416,9 @@ pub struct HeavyHitterAccuracy {
 
 /// Compares a window's sketch top-k with its exact top-k at threshold
 /// `phi * points`. Both lists are `(key, count)` as reported, at most `k`
-/// long. Returns `None` when the exact list is full and its smallest count
-/// still reaches the threshold: the window may have more heavy hitters than
-/// the list shows.
+/// long. Returns `None` when either list is full and its smallest count still
+/// reaches the threshold: the window may have more heavy hitters (exact) or
+/// more reported keys (sketch) than the list shows.
 pub fn heavy_hitter_accuracy(
     phi: f64,
     points: f64,
@@ -427,8 +427,10 @@ pub fn heavy_hitter_accuracy(
     sketch: &[(String, f64)],
 ) -> Option<HeavyHitterAccuracy> {
     let threshold = phi * points;
-    let smallest = exact.iter().map(|e| e.1).fold(f64::INFINITY, f64::min);
-    if exact.len() >= k && smallest >= threshold {
+    let cut_short = |list: &[(String, f64)]| {
+        list.len() >= k && list.iter().map(|e| e.1).fold(f64::INFINITY, f64::min) >= threshold
+    };
+    if cut_short(exact) || cut_short(sketch) {
         return None;
     }
     let truth: HashMap<&str, f64> = exact
@@ -913,5 +915,7 @@ mod heavy_hitter_tests {
         // A full exact list whose last count is still heavy may be cut short.
         assert!(heavy_hitter_accuracy(0.05, 1000.0, 4, &exact, &sketch).is_none());
         assert!(heavy_hitter_accuracy(0.1, 1000.0, 4, &exact, &sketch).is_some());
+        // So may a full sketch list whose last estimate is still reported.
+        assert!(heavy_hitter_accuracy(0.1, 1000.0, 3, &exact[3..], &sketch).is_none());
     }
 }
