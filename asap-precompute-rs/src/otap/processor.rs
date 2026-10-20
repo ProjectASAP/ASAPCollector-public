@@ -96,12 +96,12 @@ use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 use crate::config::PrecomputeConfigSet;
 use crate::envelope::SketchEnvelope;
 use crate::matchers::per_attribute;
-use crate::observation::ObservationValueKind;
+use crate::observation::{Observation, ObservationValueKind};
 use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::PluginConfig;
 use crate::precompute::{Precompute, PrecomputeError, PrecomputeImpl};
 
-use super::codec::{decode_pdata_to_observations, OtapSketchEncoder};
+use super::codec::{decode_each, OtapSketchEncoder};
 
 /// Public URN for the unified ASAP `asap_sketches` processor. Survives
 /// across hosts unchanged so a controller plan addressed at this URN
@@ -350,6 +350,8 @@ pub struct AsapSketchesProcessor {
     next_config_version: Arc<AtomicU64>,
     /// Stable SCHEMA/DICTIONARY identity for this processor's output stream.
     sketch_encoder: OtapSketchEncoder,
+    /// Reused buffer for per-attribute splits of the point being observed.
+    split: Observation,
 }
 
 impl AsapSketchesProcessor {
@@ -364,6 +366,7 @@ impl AsapSketchesProcessor {
             timer: None,
             next_config_version: Arc::new(AtomicU64::new(1)),
             sketch_encoder,
+            split: Observation::default(),
         }
     }
 
@@ -426,8 +429,62 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 effect_handler
                     .notify_ack(AckMsg::new(pdata.clone()))
                     .await?;
-                let outcome = match decode_pdata_to_observations(pdata) {
-                    Ok(outcome) => outcome,
+                let tumbling = self.plugin_config.window_slide.is_zero();
+                let precompute = &self.precompute;
+                let keys = &self.plugin_config.per_attribute;
+                let split = &mut self.split;
+                let mut closed = None;
+                let mut failure = None;
+                // Note: `observe` handles both "genuine OTLP metric" and
+                // "sketch shipped as binary inside an OTAP metric" (an
+                // upstream asap_sketches node's `sketch.envelope` output):
+                // the decoder tags the latter `ObservationValueKind::Envelope`
+                // and `Precompute::observe` merges those as pre-aggregated
+                // sketches instead of expanding them to scalar samples. See
+                // `codec.rs`'s module doc ("Scope").
+                //
+                // LateData / SeriesCapExceeded are expected outcomes already
+                // tallied in stats, so silent by design. Anything else (e.g.
+                // NoConfig, AggIdMismatch) is a misconfiguration, reported
+                // once per batch below.
+                let mut observe = |obs: &Observation| {
+                    match precompute.observe(obs) {
+                        Ok(())
+                        | Err(PrecomputeError::LateData)
+                        | Err(PrecomputeError::SeriesCapExceeded) => {}
+                        Err(e) => {
+                            let _ = failure.get_or_insert(e);
+                        }
+                    }
+                    Ok::<(), std::convert::Infallible>(())
+                };
+                let decoded = decode_each(pdata, |obs| {
+                    // A tumbling window closes as soon as a point's event time
+                    // passes its end, so no point lands in an earlier window.
+                    if tumbling
+                        && closed.is_none()
+                        && obs.value.kind != ObservationValueKind::Envelope
+                    {
+                        closed = Some(precompute.tick(obs.timestamp_ms));
+                    }
+                    let _ = if keys.is_empty() {
+                        observe(obs)
+                    } else {
+                        per_attribute(obs, keys, split, &mut observe)
+                    };
+                });
+                if let Some(envs) = closed {
+                    self.emit_envelopes(&envs, effect_handler).await?;
+                }
+                match decoded {
+                    Ok(0) => {}
+                    Ok(skipped) => {
+                        effect_handler
+                            .info(&format!(
+                                "asap_sketches: skipped {skipped} unsupported histogram/exponential-histogram data point(s)"
+                            ))
+                            .await;
+                    }
                     Err(error) => {
                         effect_handler
                             .info(&format!(
@@ -436,68 +493,11 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                             .await;
                         return Ok(());
                     }
-                };
-                if outcome.skipped_non_scalar > 0 {
+                }
+                if let Some(e) = failure {
                     effect_handler
-                        .info(&format!(
-                            "asap_sketches: skipped {} unsupported histogram/exponential-histogram data point(s)",
-                            outcome.skipped_non_scalar
-                        ))
+                        .info(&format!("asap_sketches: observe failed: {e}"))
                         .await;
-                }
-                // A tumbling window closes as soon as a point's event time
-                // passes its end, so no point lands in an earlier window.
-                if self.plugin_config.window_slide.is_zero() {
-                    if let Some(first) = outcome
-                        .observations
-                        .iter()
-                        .find(|o| o.value.kind != ObservationValueKind::Envelope)
-                    {
-                        let envs = self.precompute.tick(first.timestamp_ms);
-                        self.emit_envelopes(&envs, effect_handler).await?;
-                    }
-                }
-                let observations = if self.plugin_config.per_attribute.is_empty() {
-                    outcome.observations
-                } else {
-                    outcome
-                        .observations
-                        .iter()
-                        .flat_map(|o| per_attribute(o, &self.plugin_config.per_attribute))
-                        .collect()
-                };
-                for obs in &observations {
-                    // Note: `observe` here handles both "genuine OTLP
-                    // metric" and "sketch shipped as binary inside an
-                    // OTAP metric" (an upstream asap_sketches node's
-                    // `sketch.envelope` Summary output) — no branching
-                    // needed at this call site. `decode_pdata_to_observations`
-                    // already tags the latter as
-                    // `ObservationValueKind::Envelope`, and
-                    // `Precompute::observe` already routes those
-                    // internally to `observe_envelope` (merge as a
-                    // pre-aggregated sketch) instead of expanding them
-                    // to scalar samples. See `codec.rs`'s module doc
-                    // ("Scope") for the full picture.
-                    //
-                    // LateData / SeriesCapExceeded are expected,
-                    // already-tallied-in-stats outcomes (mirrors
-                    // the processor's ingest policy) — silent by design.
-                    // Anything else (e.g. NoConfig,
-                    // AggIdMismatch) indicates a real misconfiguration
-                    // and is at least surfaced via `effect_handler.info`
-                    // — a real error channel is follow-up work, but
-                    // this keeps it from being completely invisible.
-                    match self.precompute.observe(obs) {
-                        Ok(())
-                        | Err(PrecomputeError::LateData)
-                        | Err(PrecomputeError::SeriesCapExceeded) => {}
-                        Err(e) => {
-                            effect_handler
-                                .info(&format!("asap_sketches: observe failed: {e}"))
-                                .await;
-                        }
-                    }
                 }
                 if !self.plugin_config.window_slide.is_zero() {
                     // Completed upstream panes already have a boundary. Emit
@@ -590,6 +590,100 @@ fn asap_wall_clock_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// Per-point cost of each step of the top-k branch on generated batches
+    /// (100,000 Zipf routes, CMS 4 x 512 + top-10 heap). Run with
+    /// `cargo test --release --features otap-engine branch_phase_costs -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn branch_phase_costs() {
+        use crate::otap::scenario_generator::{Scenario, ScenarioConfig};
+        use otel_arrow_dfe_otap::pdata::OtapPdata;
+        use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
+        use otel_arrow_dfe_pdata::OtapPayload;
+        use std::time::Instant;
+
+        let scenario: ScenarioConfig = serde_json::from_value(serde_json::json!({
+            "seed": 1, "signals_per_second": 20000, "max_batch_size": 1024,
+            "metric_name": "http.server.request.duration",
+            "resource_attributes": {"service.name": "checkout", "source": "a"},
+            "attributes": [{"key": "http.route", "cardinality": 100000, "zipf": 1.1}],
+            "value": {"lognormal": {"median": 50.0, "sigma": 0.6}}
+        }))
+        .unwrap();
+        let mut scenario = Scenario::new(scenario).unwrap();
+        let mut pdata = |second: u64, index: usize| {
+            let data = scenario.batch(second, index, 1_000_000_000 * (60 + second));
+            let payload: OtapPayload = OtlpProtoMessage::Metrics(data).try_into().unwrap();
+            OtapPdata::new_todo_context(payload)
+        };
+        let batches: Vec<OtapPdata> = (0..20u64)
+            .flat_map(|s| (0..20).map(move |i| (s, i)))
+            .map(|(s, i)| pdata(s, i))
+            .collect();
+        let user: super::AsapSketchesUserConfig = serde_json::from_value(serde_json::json!({
+            "sketch_type": "countminsketch_heap", "window_size": "60s",
+            "output_metric_name": "http.server.request.duration",
+            "per_attribute": ["http.route"], "omit_resource_attrs": true,
+            "transmit_sketch": true, "sketch_params": {"rows": 4, "columns": 512, "k": 10}
+        }))
+        .unwrap();
+        let plugin = user.into_plugin_config().unwrap();
+        let (cfg, dispatch) = super::resolve_plugin_config(&plugin).unwrap();
+        let precompute = super::build_precompute(cfg, dispatch).unwrap();
+
+        let timed = |f: &mut dyn FnMut(&crate::observation::Observation)| {
+            let t = Instant::now();
+            for b in &batches {
+                crate::otap::codec::decode_each(b.clone(), &mut *f).unwrap();
+            }
+            t.elapsed()
+        };
+        let mut points = 0usize;
+        let decode = timed(&mut |_| points += 1);
+        let mut split = crate::observation::Observation::default();
+        let decode_split = timed(&mut |obs| {
+            crate::matchers::per_attribute::<()>(obs, &plugin.per_attribute, &mut split, |_| Ok(()))
+                .unwrap()
+        });
+        // The keys for the CMS-only timing, collected outside any timed run.
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for b in &batches {
+            crate::otap::codec::decode_each(b.clone(), |obs| {
+                crate::matchers::per_attribute::<()>(obs, &plugin.per_attribute, &mut split, |o| {
+                    keys.push(o.value.bytes.clone());
+                    Ok(())
+                })
+                .unwrap()
+            })
+            .unwrap();
+        }
+        let all = timed(&mut |obs| {
+            crate::matchers::per_attribute(obs, &plugin.per_attribute, &mut split, |o| {
+                precompute.observe(o)
+            })
+            .unwrap()
+        });
+        let mut cms = crate::sketches::CMSHeapWrapper::new(4, 512, 10);
+        let t = Instant::now();
+        for k in &keys {
+            cms.update(k, 1);
+        }
+        let cms_only = t.elapsed();
+        let us = |d: std::time::Duration| d.as_secs_f64() * 1e6 / points as f64;
+        println!("{points} points");
+        println!("decode OTAP -> observations  {:6.2} us/point", us(decode));
+        println!(
+            "per_attribute split          {:6.2} us/point",
+            us(decode_split) - us(decode)
+        );
+        println!(
+            "precompute.observe (all)     {:6.2} us/point",
+            us(all) - us(decode_split)
+        );
+        println!("total                        {:6.2} us/point", us(all));
+        println!("  of which CMS+heap update   {:6.2} us/point", us(cms_only));
+    }
+
     #[test]
     fn sliding_config_selects_pane_timer_and_validates_alignment() {
         let parse = |size: &str, slide: &str, transmit: bool| {
