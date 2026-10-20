@@ -1,4 +1,4 @@
-//! Count-Min sketch with a top-k heap, over [`asap_sketchlib::CMSHeap`].
+//! Count-Min sketch with a top-k heap, over [`asap_sketchlib::CountMinSketchWithHeap`].
 //!
 //! Implements [`Sketch`] + [`FrequencySketch`]. Snapshots are sketchlib's
 //! ASAPv1 envelope (kind `0x03 0x00`): the counter matrix plus the heap's
@@ -6,7 +6,7 @@
 
 use std::any::Any;
 
-use asap_sketchlib::{CMSHeap, DataInput, HeapItem, MATRIX_MAX_ROWS};
+use asap_sketchlib::{CountMinSketchWithHeap, DataInput, OwnedDataInput, MATRIX_MAX_ROWS};
 
 use crate::observation::{KeyValue, Observation};
 use crate::precompute::{
@@ -15,7 +15,7 @@ use crate::precompute::{
 
 /// Count-Min sketch plus heavy-hitter heap. Keys are raw bytes.
 pub struct CMSHeapWrapper {
-    sk: CMSHeap,
+    sk: CountMinSketchWithHeap,
 }
 
 impl CMSHeapWrapper {
@@ -23,20 +23,24 @@ impl CMSHeapWrapper {
     /// `1..=MATRIX_MAX_ROWS` as for [`super::CMSWrapper`].
     pub fn new(rows: usize, cols: usize, top_k: usize) -> Self {
         Self {
-            sk: CMSHeap::new(rows.clamp(1, MATRIX_MAX_ROWS), cols.max(1), top_k.max(1)),
+            sk: CountMinSketchWithHeap::new(
+                rows.clamp(1, MATRIX_MAX_ROWS),
+                cols.max(1),
+                top_k.max(1),
+            ),
         }
     }
 
     /// Decode a full ASAPv1 snapshot.
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, PrecomputeError> {
-        CMSHeap::deserialize_from_bytes(bytes)
+        CountMinSketchWithHeap::from_asapv1(bytes)
             .map(|sk| Self { sk })
             .map_err(|e| PrecomputeError::Other(format!("CMSHeapWrapper decode: {e}")))
     }
 
     /// Add `count` occurrences of `key` and refresh its heap entry.
     pub fn update(&mut self, key: &[u8], count: i64) {
-        self.sk.insert_many(&DataInput::Bytes(key), count);
+        self.sk.update_weighted(&DataInput::Bytes(key), count);
     }
 
     /// Merge counters, then re-rank both heaps' candidates on the merged counters.
@@ -51,7 +55,7 @@ impl CMSHeapWrapper {
     }
 
     /// Borrow the underlying sketch.
-    pub fn inner(&self) -> &CMSHeap {
+    pub fn inner(&self) -> &CountMinSketchWithHeap {
         &self.sk
     }
 }
@@ -62,7 +66,7 @@ impl Sketch for CMSHeapWrapper {
             return Ok(Vec::new());
         }
         self.sk
-            .serialize_to_bytes()
+            .to_asapv1()
             .map_err(|e| PrecomputeError::Other(format!("CMSHeapWrapper snapshot: {e}")))
     }
 
@@ -74,7 +78,8 @@ impl Sketch for CMSHeapWrapper {
     }
 
     fn reset(&mut self) {
-        self.sk = CMSHeap::new(self.sk.rows(), self.sk.cols(), self.sk.heap().capacity());
+        self.sk =
+            CountMinSketchWithHeap::new(self.sk.rows(), self.sk.cols(), self.sk.heap().capacity());
     }
 
     /// One point per heap entry (the configured `k`), labelled with its
@@ -111,7 +116,7 @@ impl FrequencySketch for CMSHeapWrapper {
             .heap()
             .iter()
             .filter_map(|item| match &item.key {
-                HeapItem::Bytes(key) => Some(FrequencyEntry {
+                OwnedDataInput::Bytes(key) => Some(FrequencyEntry {
                     key: key.clone(),
                     count: item.count as f64,
                 }),

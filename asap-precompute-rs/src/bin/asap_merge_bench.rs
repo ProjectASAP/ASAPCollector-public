@@ -18,9 +18,10 @@ use asap_precompute_rs::sketches::{
     decode_snapshot, CMSHeapWrapper, CMSWrapper, CountSketchWrapper, DDSketchWrapper, HLLWrapper,
     KLLWrapper,
 };
-use asap_sketchlib::sketches::KLL;
+use asap_sketchlib::sketches::Kll;
 use asap_sketchlib::{
-    CMSHeap, Count, CountMin, DDSketch, ErtlMLE, HyperLogLog, RegularPath, Vector2D,
+    CountMinSketch, CountMinSketchWithHeap, CountSketch, DdSketch, Ertl, HyperLogLog, RegularPath,
+    Vector2D,
 };
 
 /// splitmix64; enough randomness for realistic sketch contents.
@@ -122,43 +123,43 @@ fn direct_merge<T>(
 }
 
 fn direct_merge_for(sketch_type: SketchType, runs: usize, payloads: &[Vec<u8>]) -> Duration {
-    type Cms = CountMin<Vector2D<i64>, RegularPath>;
-    type Cs = Count<Vector2D<i64>, RegularPath>;
+    type Cms = CountMinSketch<Vector2D<i64>, RegularPath>;
+    type Cs = CountSketch<Vector2D<i64>, RegularPath>;
     match sketch_type {
         SketchType::KLLSketch => direct_merge(
             runs,
             payloads,
-            |b| KLL::<f64>::deserialize_from_bytes(b).unwrap(),
+            |b| Kll::<f64>::from_asapv1(b).unwrap(),
             |a, o| a.merge(o),
         ),
         SketchType::DDSketch => direct_merge(
             runs,
             payloads,
-            |b| DDSketch::deserialize_from_bytes(b).unwrap(),
+            |b| DdSketch::from_asapv1(b).unwrap(),
             |a, o| a.merge(o).unwrap(),
         ),
         SketchType::HLLSketch => direct_merge(
             runs,
             payloads,
-            |b| HyperLogLog::<ErtlMLE>::deserialize_from_bytes(b).unwrap(),
+            |b| HyperLogLog::<Ertl>::from_asapv1(b).unwrap(),
             |a, o| a.merge(o),
         ),
         SketchType::CountMinSketch => direct_merge(
             runs,
             payloads,
-            |b| Cms::deserialize_from_bytes(b).unwrap(),
+            |b| Cms::from_asapv1(b).unwrap(),
             |a, o| a.merge(o),
         ),
         SketchType::CountMinSketchWithHeap => direct_merge(
             runs,
             payloads,
-            |b| CMSHeap::deserialize_from_bytes(b).unwrap(),
-            |a: &mut CMSHeap, o: &CMSHeap| a.merge(o),
+            |b| CountMinSketchWithHeap::from_asapv1(b).unwrap(),
+            |a: &mut CountMinSketchWithHeap, o: &CountMinSketchWithHeap| a.merge(o),
         ),
         SketchType::CountSketch => direct_merge(
             runs,
             payloads,
-            |b| Cs::deserialize_from_bytes(b).unwrap(),
+            |b| Cs::from_asapv1(b).unwrap(),
             |a, o| a.merge(o),
         ),
         SketchType::Unspecified | SketchType::Exact => unreachable!(),

@@ -376,18 +376,14 @@ dependencies = [
 [[package]]
 name = "asap_sketchlib"
 version = "0.3.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=3fc3442c3275d374f79ba522f473de83912c6345#3fc3442c3275d374f79ba522f473de83912c6345"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=60101c6951c175600ff4f1dc87beeef24823fd2d#60101c6951c175600ff4f1dc87beeef24823fd2d"
 dependencies = [
- "bytes",
- "prost 0.13.5",
  "rand 0.9.4",
  "rmp-serde",
  "serde",
- "serde-big-array",
  "serde_bytes",
  "smallvec",
  "twox-hash",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -5597,16 +5593,6 @@ dependencies = [
 
 [[package]]
 name = "prost"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
-dependencies = [
- "bytes",
- "prost-derive 0.13.5",
-]
-
-[[package]]
-name = "prost"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
@@ -5643,7 +5629,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "petgraph 0.8.3",
@@ -5672,25 +5658,12 @@ dependencies = [
 
 [[package]]
 name = "prost-derive"
-version = "0.13.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
-dependencies = [
- "anyhow",
- "itertools 0.14.0",
- "proc-macro2",
- "quote",
- "syn 2.0.118",
-]
-
-[[package]]
-name = "prost-derive"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
@@ -6377,15 +6350,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-big-array"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11fc7cc2c76d73e0f27ee52abbd64eec84d46f370c88371120433196934e4b7f"
-dependencies = [
- "serde",
 ]
 
 [[package]]

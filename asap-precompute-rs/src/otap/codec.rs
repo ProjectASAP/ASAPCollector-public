@@ -1810,14 +1810,16 @@ mod tests {
         env.sketch_type = SketchType::CountMinSketchWithHeap;
         let mut sketch = CMSHeapWrapper::new(4, 64, 3);
         sketch.update(b"checkout", 5);
-        env.payload = sketch.snapshot().expect("CMSHeap ASAPv1 envelope");
+        env.payload = sketch
+            .snapshot()
+            .expect("CountMinSketchWithHeap ASAPv1 envelope");
         let pdata = encode_envelopes_to_pdata(std::slice::from_ref(&env)).expect("encode");
         let outcome = decode_pdata_to_observations(pdata).expect("decode");
         let decoded = outcome.observations[0].value.envelope.as_ref().unwrap();
         assert_eq!(decoded.sketch_type, SketchType::CountMinSketchWithHeap);
         assert_eq!(decoded.payload, env.payload);
 
-        // A CMSHeap payload labelled as KLL is still rejected.
+        // A CountMinSketchWithHeap payload labelled as KLL is still rejected.
         env.sketch_type = SketchType::KLLSketch;
         assert!(encode_envelopes_to_pdata(std::slice::from_ref(&env)).is_err());
     }

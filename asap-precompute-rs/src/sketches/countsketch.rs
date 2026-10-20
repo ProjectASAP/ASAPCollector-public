@@ -1,14 +1,14 @@
-//! Count Sketch wrapper over [`asap_sketchlib::Count`].
+//! Count Sketch wrapper over [`asap_sketchlib::CountSketch`].
 //!
 //! Implements [`Sketch`] + [`FrequencySketch`]. Snapshots are sketchlib's
 //! ASAPv1 envelope (kind `0x04 0x00`).
 
-use asap_sketchlib::{Count, DataInput, RegularPath, Vector2D, MATRIX_MAX_ROWS};
+use asap_sketchlib::{CountSketch, DataInput, RegularPath, Vector2D, MATRIX_MAX_ROWS};
 
 use crate::observation::Observation;
 use crate::precompute::{FrequencyEntry, FrequencySketch, PrecomputeError, Sketch, SketchObserver};
 
-type Cs = Count<Vector2D<i64>, RegularPath>;
+type Cs = CountSketch<Vector2D<i64>, RegularPath>;
 
 /// Count Sketch wrapper. Keys are raw bytes.
 pub struct CountSketchWrapper {
@@ -26,14 +26,14 @@ impl CountSketchWrapper {
 
     /// Decode a full ASAPv1 snapshot.
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, PrecomputeError> {
-        Cs::deserialize_from_bytes(bytes)
+        Cs::from_asapv1(bytes)
             .map(|sk| Self { sk })
             .map_err(|e| PrecomputeError::Other(format!("CountSketchWrapper decode: {e}")))
     }
 
     /// Add `count` occurrences of `key`.
     pub fn update(&mut self, key: &[u8], count: i64) {
-        self.sk.insert_many(&DataInput::Bytes(key), count);
+        self.sk.update_weighted(&DataInput::Bytes(key), count);
     }
 
     /// Borrow the underlying sketch.
@@ -48,7 +48,7 @@ impl Sketch for CountSketchWrapper {
             return Ok(Vec::new());
         }
         self.sk
-            .serialize_to_bytes()
+            .to_asapv1()
             .map_err(|e| PrecomputeError::Other(format!("CountSketchWrapper snapshot: {e}")))
     }
 

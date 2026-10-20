@@ -1,17 +1,17 @@
-//! KLL wrapper over [`asap_sketchlib::KLL`].
+//! KLL wrapper over [`asap_sketchlib::Kll`].
 //!
 //! Implements [`Sketch`] + [`QuantileSketch`]. Snapshots are sketchlib's
 //! ASAPv1 envelope. KLL uses random compaction, so the wrapper takes an
 //! optional seed for deterministic compaction.
 
-use asap_sketchlib::sketches::KLL;
+use asap_sketchlib::sketches::Kll;
 
 use crate::observation::{KeyValue, Observation};
 use crate::precompute::{EstimatePoint, PrecomputeError, QuantileSketch, Sketch, SketchObserver};
 
-/// KLL wrapper over `asap_sketchlib::KLL<f64>`.
+/// KLL wrapper over `asap_sketchlib::Kll<f64>`.
 pub struct KLLWrapper {
-    sk: KLL<f64>,
+    sk: Kll<f64>,
 }
 
 impl KLLWrapper {
@@ -19,15 +19,15 @@ impl KLLWrapper {
     /// `seed = Some(s)` enables deterministic compaction.
     pub fn new(k: i32, seed: Option<u64>) -> Self {
         let sk = match seed {
-            Some(s) => KLL::init_kll_with_seed(k, s),
-            None => KLL::init_kll(k),
+            Some(s) => Kll::with_k_and_seed(k, s),
+            None => Kll::with_k(k),
         };
         Self { sk }
     }
 
     /// Decode a full ASAPv1 snapshot.
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, PrecomputeError> {
-        KLL::deserialize_from_bytes(bytes)
+        Kll::from_asapv1(bytes)
             .map(|sk| Self { sk })
             .map_err(|e| PrecomputeError::Other(format!("KLLWrapper decode: {e}")))
     }
@@ -49,8 +49,8 @@ impl KLLWrapper {
         }
     }
 
-    /// Borrow the underlying `KLL`.
-    pub fn inner(&self) -> &KLL<f64> {
+    /// Borrow the underlying `Kll`.
+    pub fn inner(&self) -> &Kll<f64> {
         &self.sk
     }
 }
@@ -61,7 +61,7 @@ impl Sketch for KLLWrapper {
             return Ok(Vec::new());
         }
         self.sk
-            .serialize_to_bytes()
+            .to_asapv1()
             .map_err(|e| PrecomputeError::Other(format!("KLLWrapper snapshot: {e}")))
     }
 
