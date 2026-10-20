@@ -407,109 +407,6 @@
       "id": 6
     },
     {
-      "type": "timeseries",
-      "title": "Count of /new/hot-route per window: sketch with Count-Min bound, exact, store and query",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus"
-      },
-      "description": "Count-Min overestimates; the lower bound is the estimate minus the error bound.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "asap_topk{key=\"/new/hot-route\",method=\"sketch\",bound=\"estimate\"}",
-          "legendFormat": "sketch"
-        },
-        {
-          "refId": "B",
-          "expr": "asap_topk{key=\"/new/hot-route\",method=\"sketch\",bound=\"lower\"}",
-          "legendFormat": "sketch lower bound"
-        },
-        {
-          "refId": "C",
-          "expr": "asap_topk{key=\"/new/hot-route\",method=\"exact\"}",
-          "legendFormat": "exact"
-        },
-        {
-          "refId": "D",
-          "expr": "asap_topk{key=\"/new/hot-route\",method=\"raw\"}",
-          "legendFormat": "store and query"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "min": 0
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 33
-      },
-      "id": 7
-    },
-    {
       "type": "logs",
       "title": "New heavy hitters (Loki events from both detectors)",
       "datasource": {
@@ -529,11 +426,11 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 24,
+        "x": 0,
         "y": 33
       },
-      "id": 8
+      "id": 7
     },
     {
       "type": "row",
@@ -546,7 +443,7 @@
         "x": 0,
         "y": 41
       },
-      "id": 9
+      "id": 8
     },
     {
       "type": "timeseries",
@@ -613,7 +510,7 @@
         "x": 0,
         "y": 42
       },
-      "id": 10
+      "id": 9
     },
     {
       "type": "timeseries",
@@ -692,7 +589,7 @@
         "x": 12,
         "y": 42
       },
-      "id": 11
+      "id": 10
     },
     {
       "type": "row",
@@ -705,7 +602,7 @@
         "x": 0,
         "y": 50
       },
-      "id": 12
+      "id": 11
     },
     {
       "type": "timeseries",
@@ -799,7 +696,7 @@
         "x": 0,
         "y": 51
       },
-      "id": 13
+      "id": 12
     },
     {
       "type": "timeseries",
@@ -842,7 +739,7 @@
         "x": 12,
         "y": 51
       },
-      "id": 14
+      "id": 13
     },
     {
       "type": "row",
@@ -855,7 +752,7 @@
         "x": 0,
         "y": 59
       },
-      "id": 15
+      "id": 14
     },
     {
       "type": "timeseries",
@@ -954,7 +851,7 @@
         "x": 0,
         "y": 60
       },
-      "id": 16
+      "id": 15
     },
     {
       "type": "timeseries",
@@ -1028,7 +925,7 @@
         "x": 0,
         "y": 67
       },
-      "id": 17
+      "id": 16
     },
     {
       "type": "timeseries",
@@ -1102,7 +999,7 @@
         "x": 8,
         "y": 67
       },
-      "id": 18
+      "id": 17
     },
     {
       "type": "timeseries",
@@ -1161,11 +1058,11 @@
         "x": 16,
         "y": 67
       },
-      "id": 19
+      "id": 18
     },
     {
       "type": "row",
-      "title": "Resources: per component and whole system (generators excluded)",
+      "title": "Resources per approach (generators and the hh-accuracy observer excluded)",
       "collapsed": false,
       "panels": [],
       "gridPos": {
@@ -1174,21 +1071,26 @@
         "x": 0,
         "y": 75
       },
-      "id": 20
+      "id": 19
     },
     {
       "type": "timeseries",
-      "title": "CPU cores per component",
+      "title": "Sketch: CPU cores per component",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "Pipeline stages from the engine's CPU time; Prometheus, loki-raw and query-job from their process CPU time.",
+      "description": "Pipeline stages from the engine's CPU time; loki-raw and query-job from their process CPU time. total: the whole approach.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage!~\".*generator.*\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{job=~\"prometheus|loki-raw|query-job\"}[1m]))",
+          "expr": "sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m]))",
           "legendFormat": "{{stage}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])))",
+          "legendFormat": "total"
         }
       ],
       "fieldConfig": {
@@ -1203,8 +1105,11 @@
       },
       "options": {
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -1212,31 +1117,82 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 10,
+        "w": 8,
         "x": 0,
+        "y": 76
+      },
+      "id": 20
+    },
+    {
+      "type": "timeseries",
+      "title": "Exact: CPU cores per component",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "Pipeline stages from the engine's CPU time; loki-raw and query-job from their process CPU time. total: the whole approach.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\",otel_scope_pipeline_id=\"main\"}[1m]))",
+          "legendFormat": "{{stage}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\",otel_scope_pipeline_id=\"main\"}[1m])))",
+          "legendFormat": "total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
         "y": 76
       },
       "id": 21
     },
     {
       "type": "timeseries",
-      "title": "Whole-system CPU cores per approach",
+      "title": "Store and query: CPU cores per component",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "sketch: branch-a/b, merge, detector. exact: exact-branch-a/b, exact-merge, exact-detector. store and query: raw-sink-a/b, loki-raw, query-job. Prometheus holds the answers of all three and the monitoring data.",
+      "description": "Pipeline stages from the engine's CPU time; loki-raw and query-job from their process CPU time. total: the whole approach.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (approach) (label_replace(label_replace(label_replace(sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage!~\".*generator.*|hh-accuracy\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{job=~\"loki-raw|query-job\"}[1m])), \"approach\", \"sketch\", \"stage\", \"branch-.|merge|detector\"), \"approach\", \"exact\", \"stage\", \"exact-.*\"), \"approach\", \"store and query\", \"stage\", \"raw-sink-.|loki-raw|query-job\"))",
-          "legendFormat": "{{approach}}"
+          "expr": "sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{job=~\"loki-raw|query-job\"}[1m]))",
+          "legendFormat": "{{stage}}"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(process_cpu_seconds_total{job=\"prometheus\"}[1m]))",
-          "legendFormat": "Prometheus (shared)"
+          "expr": "sum(sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{job=~\"loki-raw|query-job\"}[1m])))",
+          "legendFormat": "total"
         }
       ],
       "fieldConfig": {
@@ -1247,73 +1203,15 @@
           "unit": "short",
           "min": 0
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Prometheus (shared)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#73bf69"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -1321,26 +1219,31 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
+        "h": 10,
+        "w": 8,
+        "x": 16,
         "y": 76
       },
       "id": 22
     },
     {
       "type": "timeseries",
-      "title": "Resident memory per component",
+      "title": "Sketch: resident memory per component",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "",
+      "description": "total: the whole approach.",
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (stage) (memory_rss{job=\"collectors\",stage!~\".*generator.*\"}) or max by (stage) (process_resident_memory_bytes{job=~\"prometheus|loki-raw|query-job\"})",
+          "expr": "max by (stage) (memory_rss{job=\"collectors\",stage=~\"branch-.|merge|detector\"})",
           "legendFormat": "{{stage}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"branch-.|merge|detector\"}))",
+          "legendFormat": "total"
         }
       ],
       "fieldConfig": {
@@ -1355,8 +1258,11 @@
       },
       "options": {
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -1364,31 +1270,31 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 10,
+        "w": 8,
         "x": 0,
-        "y": 84
+        "y": 86
       },
       "id": 23
     },
     {
       "type": "timeseries",
-      "title": "Whole-system resident memory per approach",
+      "title": "Exact: resident memory per component",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "",
+      "description": "total: the whole approach.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (approach) (label_replace(label_replace(label_replace(max by (stage) (memory_rss{job=\"collectors\",stage!~\".*generator.*|hh-accuracy\"}) or max by (stage) (process_resident_memory_bytes{job=~\"loki-raw|query-job\"}), \"approach\", \"sketch\", \"stage\", \"branch-.|merge|detector\"), \"approach\", \"exact\", \"stage\", \"exact-.*\"), \"approach\", \"store and query\", \"stage\", \"raw-sink-.|loki-raw|query-job\"))",
-          "legendFormat": "{{approach}}"
+          "expr": "max by (stage) (memory_rss{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\"})",
+          "legendFormat": "{{stage}}"
         },
         {
           "refId": "B",
-          "expr": "max(process_resident_memory_bytes{job=\"prometheus\"})",
-          "legendFormat": "Prometheus (shared)"
+          "expr": "sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\"}))",
+          "legendFormat": "total"
         }
       ],
       "fieldConfig": {
@@ -1399,73 +1305,15 @@
           "unit": "bytes",
           "min": 0
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Prometheus (shared)"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#73bf69"
-                }
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -1473,29 +1321,67 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 84
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 86
       },
       "id": 24
     },
     {
-      "type": "row",
-      "title": "Bytes between stages",
-      "collapsed": false,
-      "panels": [],
+      "type": "timeseries",
+      "title": "Store and query: resident memory per component",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "total: the whole approach.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (stage) (memory_rss{job=\"collectors\",stage=~\"raw-sink-.\"}) or max by (stage) (process_resident_memory_bytes{job=~\"loki-raw|query-job\"})",
+          "legendFormat": "{{stage}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"raw-sink-.\"}) or max by (stage) (process_resident_memory_bytes{job=~\"loki-raw|query-job\"}))",
+          "legendFormat": "total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 92
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 86
       },
       "id": 25
     },
     {
       "type": "timeseries",
-      "title": "Bits per second into each stage, log scale",
+      "title": "Sketch: bits per second into each stage",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
@@ -1504,13 +1390,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (stage) (rate(payload_size_bytes_total{job=\"collectors\",stage!~\".*generator.*|hh-accuracy\",otel_scope_node_type=\"receiver\"}[1m])) * 8",
-          "legendFormat": "into {{stage}}"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(rate(loki_distributor_bytes_received_total[1m])) * 8",
-          "legendFormat": "into loki-raw"
+          "expr": "sum by (stage) (rate(payload_size_bytes_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
+          "legendFormat": "{{stage}}"
         }
       ],
       "fieldConfig": {
@@ -1528,6 +1409,150 @@
       },
       "options": {
         "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 96
+      },
+      "id": 26
+    },
+    {
+      "type": "timeseries",
+      "title": "Exact: bits per second into each stage",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows. into loki-raw: raw log records.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(payload_size_bytes_total{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true,
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 96
+      },
+      "id": 27
+    },
+    {
+      "type": "timeseries",
+      "title": "Store and query: bits per second into each stage",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows. into loki-raw: raw log records.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (stage) (rate(payload_size_bytes_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or label_replace(sum(rate(loki_distributor_bytes_received_total[2m])) * 8, \"stage\", \"loki-raw\", \"\", \"\")",
+          "legendFormat": "{{stage}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true,
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          },
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 96
+      },
+      "id": 28
+    },
+    {
+      "type": "timeseries",
+      "title": "Shared by all three: Prometheus CPU cores",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "Prometheus holds the answers of all three approaches and the monitoring data.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(process_cpu_seconds_total{job=\"prometheus\"}[1m]))",
+          "legendFormat": "Prometheus"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
           "displayMode": "list",
           "placement": "bottom"
         },
@@ -1538,11 +1563,54 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
-        "y": 93
+        "y": 106
       },
-      "id": 26
+      "id": 29
+    },
+    {
+      "type": "timeseries",
+      "title": "Shared by all three: Prometheus resident memory",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(process_resident_memory_bytes{job=\"prometheus\"})",
+          "legendFormat": "Prometheus"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true
+          },
+          "unit": "bytes",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 106
+      },
+      "id": 30
     }
   ]
 }
