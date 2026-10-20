@@ -1,4 +1,8 @@
-# Source b: four attributes with known cardinality behaviour.
+# Source b: four attributes with known cardinality behaviour. Traffic grows
+# over 30 minutes so the three pipelines can be compared as load rises: the rate
+# per source doubles every 5 minutes (5,000 to 80,000 points/s), and at minute 10
+# http.route explodes from 20 to 20,000 values (as when an ID leaks into the
+# route).
 version: otel_dataflow/v1
 engine:
   http_admin:
@@ -17,7 +21,7 @@ groups:
             type: urn:asap:receiver:scenario_generator
             config:
               seed: 2
-              signals_per_second: 20000
+              signals_per_second: 5000
               metric_name: http.server.request.duration
               resource_attributes: {service.name: checkout, source: "b"}
               attributes:
@@ -26,6 +30,12 @@ groups:
                 - {key: k8s.pod.name, cardinality: 50, growth_per_minute: 0.05}  # growing
                 - {key: user.id, unique: true}                        # identifier-like
               value: {lognormal: {median: 50.0, sigma: 0.6}}
+              changes:
+                - {after_seconds: 300, signals_per_second: 10000}
+                - {after_seconds: 600, signals_per_second: 20000}
+                - {after_seconds: 900, signals_per_second: 40000}
+                - {after_seconds: 1200, signals_per_second: 80000}
+                - {after_seconds: 600, attribute: http.route, cardinality: 20000}
           export:
             type: exporter:otlp_http
             config:

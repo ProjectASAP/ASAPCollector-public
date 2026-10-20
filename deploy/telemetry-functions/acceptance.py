@@ -197,6 +197,16 @@ def cardinality_checks(stack, t):
             for k in keys if (k, "sketch") in distinct and (k, "exact") in distinct}
     yield check("distinct-count error <= 2% for every key", errs and max(errs.values()) <= 0.02,
                 ", ".join(f"{k} {e:.2%}" for k, e in errs.items()))
+    # Store and query answers later than exact: compare the latest window it answered.
+    raw = {m["attribute_key"]: series for m, series in stack.matrix('asap_distinct{method="raw"}')}
+    exact = {m["attribute_key"]: series for m, series in stack.matrix('asap_distinct{method="exact"}')}
+    ends = set.intersection(*[set(v) for v in raw.values()]) if raw else set()
+    end = max(ends, default=None)
+    raw_errs = {k: abs(raw[k][end] - exact[k][end]) / exact[k][end]
+                for k in raw if end in exact.get(k, {})} if end else {}
+    yield check("store and query: distinct counts from loki-raw, error <= 1% for every key",
+                raw_errs and len(raw_errs) == len(raw) and max(raw_errs.values()) <= 0.01,
+                ", ".join(f"{k} {e:.2%}" for k, e in sorted(raw_errs.items())) or "no raw distinct counts")
     events = stack.events('| event_kind="cardinality" | method="sketch"')
     yield check("class events in Loki", any("identifier-like" in e for e in events),
                 f"{len(events)} sketch events")

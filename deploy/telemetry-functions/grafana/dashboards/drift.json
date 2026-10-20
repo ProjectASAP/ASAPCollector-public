@@ -397,7 +397,7 @@
       "type": "timeseries",
       "id": 10,
       "title": "Throughput per pipeline: points per second each window delivered to the end of its pipeline",
-      "description": "Points in each 1-minute window that reached the end of the pipeline, divided by 60 s: for sketch and exact the points their detector answered for, for raw the points loki-raw acknowledged. Offered: 2 sources x 20,000 points/s. A pipeline below the offered line is dropping or falling behind.",
+      "description": "Points in each 1-minute window that reached the end of the pipeline, divided by 60 s: for sketch and exact the points their detector answered for, for raw the points loki-raw acknowledged within 50 s of the window's end. Offered: 2 sources x 20,000 points/s. A pipeline below the offered line is dropping or falling behind.",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
@@ -411,12 +411,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (method) (asap_points{method=~\"sketch|exact\",attribute_key=\"\"}) / 60",
+          "expr": "sum by (method) (last_over_time(asap_points{method=~\"sketch|exact\",attribute_key=\"\"}[2m])) / 60",
           "legendFormat": "{{method}}"
         },
         {
           "refId": "B",
-          "expr": "sum by (method) (asap_points{method=\"raw\"}) / 60",
+          "expr": "sum by (method) (last_over_time(asap_points{method=\"raw\"}[2m])) / 60",
           "legendFormat": "{{method}}"
         },
         {

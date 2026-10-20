@@ -30,7 +30,7 @@ of scenario time, so all three pipelines receive identical points.
 | exact-merge | `exact_merge`: adds both sources' exact windows and emits each as soon as both have sent it (5 s timeout) |
 | exact-detector | `exact_detector`: the same answers and events from the exact windows (`method="exact"`): the ground truth |
 | raw-sink-a/b | `raw_sink`, the only stage per source: writes every raw point as one log record to `loki-raw` (4 requests in flight) and reports when `loki-raw` acknowledged each window's last point (`source` label), as soon as its source has sent a later point and every message of the window is acknowledged (5 s timeout if the source idles) |
-| query-job | `query_job.py`: once per window, times each approach's backend query (`asap_query_seconds`, labelled `method` and `backend`); in the top-k use case it also runs the LogQL top-20 over `loki-raw` and reports that answer and its heavy-hitter accuracy against exact (`method="raw"`) |
+| query-job | `query_job.py`: once per window, times each approach's backend query (`asap_query_seconds`, labelled `method` and `backend`); it also answers from `loki-raw` with LogQL (`method="raw"`): in the top-k use case the top-20 and its heavy-hitter accuracy against exact, in the cardinality use case the distinct count of every attribute key (`asap_query_failed` when Loki refuses a query) |
 | hh-accuracy | `heavy_hitter_accuracy`, outside the pipelines: in the top-k use case both detectors send it a copy of their answers; per window it reports heavy-hitter precision, recall, F1 and average relative count error |
 
 **Heavy-hitter accuracy** (top-k use case). A heavy hitter is a route with at
@@ -46,7 +46,9 @@ a window whose exact top 20 is all above the threshold only gets
 
 Each dashboard also shows every pipeline's throughput: the points per window
 that reached the end of the pipeline (`asap_points`; for raw, the points
-`loki-raw` acknowledged) divided by the window length.
+`loki-raw` acknowledged within 50 s of the window's end, after which raw-sink
+reports the window anyway) divided by the window length. A pipeline that stops
+reporting shows a gap after 2 minutes rather than its last value.
 
 **Latency breakdown.** Merges and detectors report, per window, when they
 received its last input and when they emitted it, in seconds after the window's
@@ -90,7 +92,7 @@ reports each point's time from its event time to that acknowledgement
 | `USE_CASE` | Sketch | Scenario | Dashboard |
 | --- | --- | --- | --- |
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
-| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed | `/d/asap-cardinality`: distinct values with bound, class per key (stable, growing, identifier-like), events |
+| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, relative error over time, throughput and distinct values over time, freshness breakdown, CPU/memory/bits per component of each approach |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
 | `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, freshness breakdown, CPU/memory per component and per approach, bits per second into each stage |
 
@@ -135,7 +137,7 @@ fails. The checks:
 | --- | --- |
 | all | every stage up; points per window equal the offered rate (no backpressure); sketch and exact windows hold the same points; every pipeline reports its window completion delay (the raw pipeline's points per window are reported, not required); merges and detectors report their timing; the query job times the sketch and exact backend queries |
 | latency | exact p50/p99 inside the sketch's bound (routes with at least 2,000 points) |
-| cardinality | sketch and exact give every key the same class; the generated classes are found; distinct-count error at most 2%; class events in Loki |
+| cardinality | sketch and exact give every key the same class; the generated classes are found; distinct-count error at most 2%; store and query answers every key from `loki-raw` within 1% of exact; class events in Loki |
 | drift | the changed route drifts in both methods; no other route does; drift event in Loki |
 | topk | the new route enters both top-10s; sketch recall@10 at least 0.9; heavy-hitter precision and recall at least 0.9; store and query answers from `loki-raw` with heavy-hitter recall at least 0.9; novelty event in Loki |
 

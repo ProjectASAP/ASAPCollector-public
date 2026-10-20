@@ -33,8 +33,9 @@ limits_config:
   per_stream_rate_limit_burst: 2GB
   reject_old_samples: false
   max_structured_metadata_entries_count: 512
-  # The query job's top-k groups by route: up to a million series per query.
-  max_query_series: 2000000
+  # The query job groups by an attribute: up to a million routes (top-k) or
+  # every user.id of a window (cardinality, about 10 million at the top rate).
+  max_query_series: 20000000
   query_timeout: 5m
   # Only the latest windows are queried; keep 2 h so a long-running demo does
   # not fill the disk (about 3 GB per hour at the top rate).

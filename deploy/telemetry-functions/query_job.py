@@ -4,13 +4,23 @@ query latency of every approach.
 
 Once per window, after the window is complete in each pipeline:
 
-* sketch and exact: times the Prometheus query that reads the window's top-k
+* sketch and exact: times the Prometheus query that reads the window's
   answer (`asap_query_seconds{backend="prometheus"}`).
 * raw (store and query): once both raw sinks report the window stored in
-  loki-raw, computes the top-k from the raw log records with one LogQL query,
-  times it (`asap_query_seconds{backend="loki"}`), and reports the answer
-  (`asap_topk{method="raw"}`) and its heavy-hitter accuracy against the exact
-  pipeline (`asap_hh_*{method="raw"}`, same definition as the hh-accuracy node).
+  loki-raw and the exact answer is in, computes the answer from the raw log
+  records with LogQL and times it (`asap_query_seconds{backend="loki"}`; the
+  whole answer when it takes several queries).
+  - topk: one top-k query; reports `asap_topk{method="raw"}` and its
+    heavy-hitter accuracy against exact (`asap_hh_*{method="raw"}`, same
+    definition as the hh-accuracy node).
+  - cardinality: one distinct-count query per attribute key; reports
+    `asap_distinct{method="raw"}`. A query Loki fails (for example over its
+    series limit) is reported as `asap_query_failed{method="raw"}`.
+
+With each raw answer it also republishes the sketch and exact answers of the
+same window (`asap_compare_topk`, `asap_compare_distinct`,
+`asap_compare_class`, labelled `method`), so a dashboard can show the three
+approaches side by side for one window although store and query answers later.
 
 The raw answer runs once exact has answered the same window, so a slow exact
 pipeline delays it; freshness comes from the pipelines' own gauges and is not
@@ -19,11 +29,12 @@ affected. A window raw-sink reported with points still unacknowledged (its
 
 Gauges carry the window end as their timestamp, so Prometheus stores them at
 the same time as the pipelines' own per-window gauges. The job also exposes
-its own CPU time and resident memory. Only the top-k use case has a raw answer
-here; for other use cases it only times the backend queries.
+its own CPU time and resident memory. Only the top-k and cardinality use cases
+have a raw answer here; for the others it only times the backend queries.
 
 Configuration (environment): USE_CASE, WINDOW_SECONDS (60), K (20), PHI (0.01),
-RAW_SOURCES (2), PROMETHEUS, LOKI_RAW, PORT (9100).
+RAW_SOURCES (2), ATTRIBUTE_KEYS (cardinality: keys to count), PROMETHEUS,
+LOKI_RAW, PORT (9100).
 """
 import json
 import os
@@ -42,11 +53,15 @@ K = int(os.environ.get("K", "20"))
 PHI = float(os.environ.get("PHI", "0.01"))
 RAW_SOURCES = int(os.environ.get("RAW_SOURCES", "2"))
 PORT = int(os.environ.get("PORT", "9100"))
+ATTRIBUTE_KEYS = os.environ.get("ATTRIBUTE_KEYS", "http.route,http.method,k8s.pod.name,user.id").split(",")
 ATTRIBUTE = "http.route"
 # Loki stores OTLP attributes as structured metadata with dots replaced.
 LOKI_LABEL = ATTRIBUTE.replace(".", "_")
 LOKI_STREAM = '{service_name="checkout"}'
 TOPK_SELECTOR = f'attribute_key="{ATTRIBUTE}",bound="estimate"'
+# What a dashboard reads for each use case's answer.
+ANSWER_METRIC = {"topk": "asap_topk", "cardinality": "asap_distinct", "latency": "asap_quantile",
+                 "drift": "asap_drift_ks"}.get(USE_CASE, "asap_points")
 
 # Latest sample per series: (name, sorted labels) -> (value, timestamp ms).
 samples = {}
@@ -88,6 +103,15 @@ def put(name, labels, value, end_s):
         samples[(name, tuple(sorted(labels.items())))] = (value, end_s * 1000)
 
 
+def replace(name, rows, end_s):
+    """Replaces every sample of `name` with `rows` ((labels, value) pairs)."""
+    with lock:
+        for key in [k for k in samples if k[0] == name]:
+            del samples[key]
+    for labels, value in rows:
+        put(name, labels, value, end_s)
+
+
 def heavy_hitter_accuracy(points, exact, reported_list):
     """As `answers::heavy_hitter_accuracy`; None when the exact list may hide
     more heavy hitters."""
@@ -107,7 +131,7 @@ def heavy_hitter_accuracy(points, exact, reported_list):
 
 def time_prometheus_answer(method, end):
     t0 = time.monotonic()
-    at_window(f'asap_topk{{method="{method}",{TOPK_SELECTOR}}}', end)
+    at_window(f'{ANSWER_METRIC}{{method="{method}"}}', end)
     put("asap_query_seconds", {"method": method, "backend": "prometheus"}, time.monotonic() - t0, end)
 
 
@@ -116,8 +140,47 @@ def flag_incomplete(end):
     put("asap_raw_incomplete", {"method": "raw"}, 1.0 if unacknowledged > 0 else 0.0, end)
 
 
-def raw_answer(end):
-    """Top-k of window (end - WINDOW_S, end] from loki-raw; True when done."""
+def loki_at_window_end(query, end):
+    """Instant LogQL query over window [end - WINDOW_S, end): LogQL ranges are
+    (t - W, t], so evaluate at the window's last millisecond."""
+    return get(LOKI_RAW, "/loki/api/v1/query", {"query": query, "time": str(end * 1_000_000_000 - 1_000_000)})
+
+
+def raw_distinct(end):
+    """Distinct values per attribute key of the window from loki-raw; True when done."""
+    if not at_window('asap_distinct{method="exact"}', end):
+        return False
+    flag_incomplete(end)
+    compared = [({"method": m, "attribute_key": r["attribute_key"]}, v) for m in ("sketch", "exact")
+                for r, v in at_window(f'asap_distinct{{method="{m}",bound="estimate"}}', end)]
+    classes = [({"method": m, "attribute_key": r["attribute_key"], "state": r["state"]}, 1.0)
+               for m in ("sketch", "exact")
+               for r, v in at_window(f'asap_cardinality_state{{method="{m}"}}', end) if v == 1]
+    total = 0.0
+    for key in ATTRIBUTE_KEYS:
+        label = key.replace(".", "_")
+        query = f"count(sum by ({label}) (count_over_time({LOKI_STREAM}[{WINDOW_S}s])))"
+        labels = {"method": "raw", "attribute_key": key}
+        t0 = time.monotonic()
+        try:
+            rows = loki_at_window_end(query, end)
+        except Exception as e:  # the store refused or timed out: no answer for this key
+            total += time.monotonic() - t0
+            print(f"query_job: {key} at {end}: {e}", flush=True)
+            put("asap_query_failed", labels, 1.0, end)
+            continue
+        total += time.monotonic() - t0
+        distinct = float(rows[0]["value"][1]) if rows else 0.0
+        put("asap_distinct", dict(labels, bound="estimate"), distinct, end)
+        compared.append((labels, distinct))
+    put("asap_query_seconds", {"method": "raw", "backend": "loki"}, total, end)
+    replace("asap_compare_distinct", compared, end)
+    replace("asap_compare_class", classes, end)
+    return True
+
+
+def raw_topk(end):
+    """Top-k of window [end - WINDOW_S, end) from loki-raw; True when done."""
     exact_rows = at_window(f'asap_topk{{method="exact",{TOPK_SELECTOR}}}', end)
     exact_points = sum(v for _, v in at_window(
         f'asap_points{{method="exact",attribute_key="{ATTRIBUTE}"}}', end))
@@ -126,20 +189,20 @@ def raw_answer(end):
     flag_incomplete(end)
     query = (f"topk({K}, sum by ({LOKI_LABEL}) "
              f"(count_over_time({LOKI_STREAM}[{WINDOW_S}s])))")
-    # The window is [end - W, end) in ms; LogQL ranges are (t - W, t].
-    at_ns = end * 1_000_000_000 - 1_000_000
     t0 = time.monotonic()
-    rows = get(LOKI_RAW, "/loki/api/v1/query", {"query": query, "time": str(at_ns)})
+    rows = loki_at_window_end(query, end)
     latency = time.monotonic() - t0
     put("asap_query_seconds", {"method": "raw", "backend": "loki"}, latency, end)
     top = sorted(((r["metric"].get(LOKI_LABEL, ""), float(r["value"][1])) for r in rows),
                  key=lambda kc: -kc[1])
-    with lock:
-        for key in [k for k in samples if k[0] == "asap_topk"]:
-            del samples[key]
-    for rank, (key, count) in enumerate(top, 1):
-        put("asap_topk", {"method": "raw", "attribute_key": ATTRIBUTE, "bound": "estimate",
-                          "rank": str(rank), "key": key}, count, end)
+    replace("asap_topk", [({"method": "raw", "attribute_key": ATTRIBUTE, "bound": "estimate",
+                            "rank": str(rank), "key": key}, count) for rank, (key, count) in enumerate(top, 1)], end)
+    sketch_rows = at_window(f'asap_topk{{method="sketch",{TOPK_SELECTOR}}}', end)
+    replace("asap_compare_topk",
+            [({"method": m, "rank": r["rank"], "key": r["key"]}, v)
+             for m, rows_ in (("sketch", sketch_rows), ("exact", exact_rows)) for r, v in rows_]
+            + [({"method": "raw", "rank": str(rank), "key": key}, count) for rank, (key, count) in enumerate(top, 1)],
+            end)
     exact = sorted(((m["key"], v) for m, v in exact_rows), key=lambda kc: -kc[1])
     acc = heavy_hitter_accuracy(exact_points, exact, top)
     labels = {"method": "raw", "attribute_key": ATTRIBUTE, "phi": f"{PHI:g}"}
@@ -162,7 +225,8 @@ def loop():
                     if end not in done[method] and end > started - 2 * WINDOW_S:
                         time_prometheus_answer(method, end)
                         done[method].add(end)
-            if USE_CASE == "topk":
+            raw_answer = {"topk": raw_topk, "cardinality": raw_distinct}.get(USE_CASE)
+            if raw_answer:
                 ready = window_ends('asap_answer_delay{method="raw"}')
                 for end in sorted(e for e, n in ready.items() if n >= RAW_SOURCES):
                     # Accuracy is against the exact answer of the same window.

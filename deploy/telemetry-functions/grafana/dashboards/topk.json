@@ -39,8 +39,8 @@
     },
     {
       "type": "table",
-      "title": "Top-10 routes of the three approaches, latest window (union of their top-10s)",
-      "description": "One row per route in any approach's top-10. Error is (count - exact) / exact; empty when the route is outside that approach's reported top-20.",
+      "title": "Top-10 routes of the three approaches, latest window all three answered (union of their top-10s)",
+      "description": "One row per route in any approach's top-10, all from the latest window store and query has answered (query-job republishes sketch and exact for it). Error is (count - exact) / exact; empty when the route is outside that approach's reported top-20.",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
@@ -48,31 +48,31 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (key, exact_rank) (label_replace(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "expr": "max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\"))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "B",
-          "expr": "max by (key, sketch_rank) (label_replace(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "expr": "max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\"))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "C",
-          "expr": "max by (key, raw_rank) (label_replace(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "expr": "max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\"))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "D",
-          "expr": "100 * (max by (key) (asap_topk{method=\"sketch\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\"}))))) - on (key) max by (key) (asap_topk{method=\"exact\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\"})))))) / on (key) max by (key) (asap_topk{method=\"exact\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}))))) and on (key) (max by (key, exact_rank) (label_replace(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
+          "expr": "100 * (max by (key) (asap_compare_topk{method=\"sketch\"} and (timestamp(asap_compare_topk{method=\"sketch\"}) == scalar(max(timestamp(asap_compare_topk{method=\"sketch\"}))))) - on (key) max by (key) (asap_compare_topk{method=\"exact\"} and (timestamp(asap_compare_topk{method=\"exact\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\"})))))) / on (key) max by (key) (asap_compare_topk{method=\"exact\"} and (timestamp(asap_compare_topk{method=\"exact\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\"}))))) and on (key) (max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "E",
-          "expr": "100 * (max by (key) (asap_topk{method=\"raw\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\"}))))) - on (key) max by (key) (asap_topk{method=\"exact\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\"})))))) / on (key) max by (key) (asap_topk{method=\"exact\",bound=\"estimate\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\"}))))) and on (key) (max by (key, exact_rank) (label_replace(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
+          "expr": "100 * (max by (key) (asap_compare_topk{method=\"raw\"} and (timestamp(asap_compare_topk{method=\"raw\"}) == scalar(max(timestamp(asap_compare_topk{method=\"raw\"}))))) - on (key) max by (key) (asap_compare_topk{method=\"exact\"} and (timestamp(asap_compare_topk{method=\"exact\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\"})))))) / on (key) max by (key) (asap_compare_topk{method=\"exact\"} and (timestamp(asap_compare_topk{method=\"exact\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\"}))))) and on (key) (max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
           "format": "table",
           "instant": true
         }
@@ -611,16 +611,16 @@
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "Both sources together. The generators skip batches a pipeline cannot take, so a pipeline that falls behind delivers less.",
+      "description": "Both sources together. The generators skip batches a pipeline cannot take, so a pipeline that falls behind delivers less. Store and query: points loki-raw acknowledged within 50 s of the window's end. A pipeline that stops reporting shows a gap after 2 minutes.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (method) (asap_points{method=~\"sketch|exact\",attribute_key=\"http.route\"}) / 60",
+          "expr": "sum by (method) (last_over_time(asap_points{method=~\"sketch|exact\",attribute_key=\"http.route\"}[2m])) / 60",
           "legendFormat": "{{method}}"
         },
         {
           "refId": "B",
-          "expr": "sum(asap_points{method=\"raw\"}) / 60",
+          "expr": "sum(last_over_time(asap_points{method=\"raw\"}[2m])) / 60",
           "legendFormat": "store and query"
         }
       ],
@@ -1062,7 +1062,7 @@
     },
     {
       "type": "row",
-      "title": "Resources per approach (generators and the hh-accuracy observer excluded)",
+      "title": "Resources per approach (generators and observers excluded)",
       "collapsed": false,
       "panels": [],
       "gridPos": {
