@@ -2,10 +2,11 @@
 #   sketch: generator-a/b -> branch-a/b (sketch) -> merge -> detector
 #   exact:  exact-generator-a/b -> exact-branch-a/b (exact window) ->
 #           exact-merge -> exact-detector
-#   raw:    raw-generator-a/b -> raw-branch-a/b -> raw-merge -> raw-sink
-#           (every raw point into loki-raw)
+#   store and query (raw): raw-generator-a/b -> raw-sink-a/b (every raw point
+#           into loki-raw); query-job computes the answer from loki-raw
 # hh-accuracy sits outside the pipelines: in the top-k use case both detectors
 # send it a copy of their answers, and it reports heavy-hitter accuracy.
+# query-job also times each approach's backend query (Prometheus or Loki).
 # Each stage is the official OTAP engine (asap-collector) in its own container,
 # pinned to one CPU, talking OTLP/HTTP over the compose network. The generators
 # of a source share one config (`downstream` is their pipeline's first stage)
@@ -100,51 +101,48 @@ services:
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_EXACT_DETECTOR:-11}"
     depends_on: [prometheus, hh-accuracy]
-  # raw pipeline
+  # store-and-query pipeline: one stage per source, then the query job
   raw-generator-a:
     <<: *generator
     command: ["--config", "/pipelines/generator-a.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_RAW_GENERATOR_A:-12}"
-    links: ["raw-branch-a:downstream"]
-    depends_on: [raw-branch-a]
+    links: ["raw-sink-a:downstream"]
+    depends_on: [raw-sink-a]
   raw-generator-b:
     <<: *generator
     command: ["--config", "/pipelines/generator-b.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_RAW_GENERATOR_B:-13}"
-    links: ["raw-branch-b:downstream"]
-    depends_on: [raw-branch-b]
-  raw-branch-a:
+    links: ["raw-sink-b:downstream"]
+    depends_on: [raw-sink-b]
+  raw-sink-a:
     <<: *collector
-    command: ["--config", "/common/raw-branch.yaml"]
+    command: ["--config", "/common/raw-sink-a.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
-    cpuset: "${CPU_RAW_BRANCH_A:-14}"
-    depends_on: [raw-merge]
-  raw-branch-b:
+    cpuset: "${CPU_RAW_SINK_A:-14}"
+    depends_on: [prometheus, loki-raw]
+  raw-sink-b:
     <<: *collector
-    command: ["--config", "/common/raw-branch.yaml"]
+    command: ["--config", "/common/raw-sink-b.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
-    cpuset: "${CPU_RAW_BRANCH_B:-15}"
-    depends_on: [raw-merge]
-  raw-merge:
-    <<: *collector
-    command: ["--config", "/common/raw-merge.yaml"]
-    volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
-    cpuset: "${CPU_RAW_MERGE:-16}"
-    depends_on: [raw-sink]
-  raw-sink:
-    <<: *collector
-    command: ["--config", "/common/raw-sink.yaml"]
-    volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
-    cpuset: "${CPU_RAW_SINK:-17}"
+    cpuset: "${CPU_RAW_SINK_B:-15}"
+    depends_on: [prometheus, loki-raw]
+  query-job:
+    image: python:3.12-slim
+    command: ["python3", "/app/query_job.py"]
+    volumes: ["./query_job.py:/app/query_job.py:ro"]
+    environment:
+      USE_CASE: "${USE_CASE:-latency}"
+      WINDOW_SECONDS: "${WINDOW_SECONDS:-60}"
+    cpuset: "${CPU_QUERY_JOB:-16}"
     depends_on: [prometheus, loki-raw]
   # Outside the pipelines: compares the sketch and exact top-k answers.
   hh-accuracy:
     <<: *collector
     command: ["--config", "/common/hh-accuracy.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
-    cpuset: "${CPU_HH_ACCURACY:-18}"
+    cpuset: "${CPU_HH_ACCURACY:-17}"
     depends_on: [prometheus]
 
   prometheus:

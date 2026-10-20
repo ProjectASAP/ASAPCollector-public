@@ -11,11 +11,19 @@ scrape_configs:
                   detector:8085, exact-generator-a:8085, exact-generator-b:8085,
                   exact-branch-a:8085, exact-branch-b:8085, exact-merge:8085,
                   exact-detector:8085, raw-generator-a:8085, raw-generator-b:8085,
-                  raw-branch-a:8085, raw-branch-b:8085, raw-merge:8085, raw-sink:8085,
-                  hh-accuracy:8085]
+                  raw-sink-a:8085, raw-sink-b:8085, hh-accuracy:8085]
     relabel_configs:
       - source_labels: [__address__]
         regex: (.+):8085
         target_label: stage
 # Answers (sketch, exact) and the raw pipeline's latency arrive through the
 # OTLP receiver.
+  # The backends and the query job: their own CPU time and memory, so each
+  # approach's whole-system cost includes them. The query job's gauges carry
+  # the window end as their timestamp.
+  - job_name: prometheus
+    static_configs: [{targets: ["localhost:9090"], labels: {stage: prometheus}}]
+  - job_name: loki-raw
+    static_configs: [{targets: ["loki-raw:3100"], labels: {stage: loki-raw}}]
+  - job_name: query-job
+    static_configs: [{targets: ["query-job:9100"], labels: {stage: query-job}}]

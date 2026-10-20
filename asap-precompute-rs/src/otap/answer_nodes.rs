@@ -129,6 +129,84 @@ fn with_delay(envs: &[SketchEnvelope], now_ms: u64) -> Vec<SketchEnvelope> {
     out
 }
 
+/// When a stage got the last input of a window and when it emitted the
+/// window, in seconds after the window's end: `asap.stage.received` and
+/// `asap.stage.emitted`, labelled `method` and `stage`. Together they give the
+/// latency breakdown of each pipeline (the gap between one stage's emission
+/// and the next one's receipt is transmission).
+pub(super) fn stage_timing(
+    window_start_ms: u64,
+    window_end_ms: u64,
+    method: &str,
+    stage: &str,
+    received_ms: u64,
+    emitted_ms: u64,
+) -> Vec<SketchEnvelope> {
+    [
+        ("asap.stage.received", received_ms),
+        ("asap.stage.emitted", emitted_ms),
+    ]
+    .into_iter()
+    .map(|(metric, at)| SketchEnvelope {
+        labels: vec![
+            KeyValue::new("method", method),
+            KeyValue::new("stage", stage),
+        ],
+        metric_name: metric.into(),
+        window_start_ms,
+        window_end_ms,
+        value: at.saturating_sub(window_end_ms) as f64 / 1000.0,
+        ..Default::default()
+    })
+    .collect()
+}
+
+/// Stage timings an upstream stage (the merge) sent along with its windows,
+/// for a detector to pass on to the answer backend.
+pub(super) fn upstream_timing(observations: &[Observation]) -> Vec<SketchEnvelope> {
+    observations
+        .iter()
+        .filter(|o| o.metric.starts_with("asap.stage.") && o.value.envelope.is_none())
+        .map(|o| SketchEnvelope {
+            labels: o.labels.clone(),
+            metric_name: o.metric.clone(),
+            window_start_ms: o.timestamp_ms,
+            window_end_ms: o.timestamp_ms,
+            value: o.value.float,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Sends gauges as they are, without `asap.answer.delay`.
+pub(super) async fn send_gauges(
+    envs: &[SketchEnvelope],
+    effects: &mut local::EffectHandler<OtapPdata>,
+) -> Result<(), Error> {
+    if envs.is_empty() {
+        return Ok(());
+    }
+    match gauges_pdata(envs) {
+        Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
+        Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
+    }
+    Ok(())
+}
+
+/// The detector's own timing of each window in `windows`, received at
+/// `received_ms` and emitted now.
+pub(super) fn detector_timing(
+    windows: &std::collections::BTreeSet<(u64, u64)>,
+    method: &str,
+    received_ms: u64,
+) -> Vec<SketchEnvelope> {
+    let now = now_ms();
+    windows
+        .iter()
+        .flat_map(|(start, end)| stage_timing(*start, *end, method, "detector", received_ms, now))
+        .collect()
+}
+
 /// Plain OTLP gauges with every label on the data point, so backends such
 /// as Prometheus keep them as series labels.
 pub(super) fn gauges_pdata(envs: &[SketchEnvelope]) -> Result<OtapPdata, String> {
@@ -332,11 +410,16 @@ impl local::Processor<OtapPdata> for SketchDetector {
         };
         // Consumed into state here: ack so upstream (e.g. fanout) can move on.
         effects.notify_ack(AckMsg::new(pdata.clone())).await?;
+        let received = now_ms();
         let (mut out, mut events) = (Vec::new(), Vec::new());
-        for obs in observations(pdata, effects).await {
+        let observations = observations(pdata, effects).await;
+        send_gauges(&upstream_timing(&observations), effects).await?;
+        let mut windows = std::collections::BTreeSet::new();
+        for obs in observations {
             let Some(env) = obs.value.envelope.filter(|e| !e.payload.is_empty()) else {
                 continue;
             };
+            let _ = windows.insert((env.window_start_ms, env.window_end_ms));
             match sketch_answers(&env, &self.config.quantiles, self.config.k) {
                 Ok(answers) => {
                     if env.sketch_type == SketchType::KLLSketch {
@@ -361,6 +444,7 @@ impl local::Processor<OtapPdata> for SketchDetector {
                 Err(e) => effects.info(&format!("sketch_detector: {e}")).await,
             }
         }
+        out.extend(detector_timing(&windows, "sketch", received));
         emit(&out, &events, effects).await
     }
 }

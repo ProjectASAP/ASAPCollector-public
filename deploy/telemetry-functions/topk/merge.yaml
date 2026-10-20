@@ -1,4 +1,4 @@
-# Stage 2: merge every source's sketch for a window, 5 s after it ends.
+# Stage 2: merge both sources' sketches for a window as soon as both sent it (5 s timeout).
 version: otel_dataflow/v1
 engine:
   http_admin:
@@ -20,7 +20,7 @@ groups:
                 http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
           merge:
             type: urn:asap:processor:window_merge
-            config: {grace: 5s}
+            config: {sources: 2, grace: 5s}
           to_detector:
             type: exporter:otlp_http
             config:

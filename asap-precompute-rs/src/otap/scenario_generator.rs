@@ -24,6 +24,8 @@
 //!     - {after_seconds: 1800, attribute: http.route, equals: http.route-3,
 //!        value: {lognormal: {median: 100.0, sigma: 0.6}}}
 //!     - {after_seconds: 2700, attribute: http.route, inject: new-hot, share: 0.2}
+//!     - {after_seconds: 600, signals_per_second: 100000}
+//!     - {after_seconds: 900, attribute: http.route, cardinality: 1000}
 //! ```
 //!
 //! Attribute values are `<key>-<n>` (`<key>-<seed>-<n>` when unique); with
@@ -135,14 +137,23 @@ pub enum Distribution {
     },
 }
 
-/// A change starting `after_seconds` into the run.
+/// A change starting `after_seconds` into the run: a new rate, or a change
+/// to one attribute (its values' distribution, an injected value, or its
+/// number of distinct values).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Change {
     /// Seconds after start.
     pub after_seconds: u64,
-    /// Attribute the change refers to.
+    /// New data points per second from this time on.
+    #[serde(default)]
+    pub signals_per_second: Option<usize>,
+    /// Attribute the change refers to; empty for a rate change.
+    #[serde(default)]
     pub attribute: String,
+    /// New number of distinct values of `attribute` from this time on.
+    #[serde(default)]
+    pub cardinality: Option<u64>,
     /// With `value`: only points whose attribute equals this value change.
     #[serde(default)]
     pub equals: Option<String>,
@@ -198,8 +209,8 @@ impl Rng {
 pub struct Scenario {
     cfg: ScenarioConfig,
     rng: Rng,
-    /// Zipf CDF per attribute index, when `zipf` is set.
-    cdfs: HashMap<usize, Vec<f64>>,
+    /// Zipf CDF per (attribute index, cardinality), when `zipf` is set.
+    cdfs: HashMap<(usize, u64), Vec<f64>>,
     unique_counter: u64,
 }
 
@@ -214,6 +225,18 @@ impl Scenario {
         if cfg.signals_per_second == 0 || cfg.max_batch_size == 0 {
             return Err("signals_per_second and max_batch_size must be positive".into());
         }
+        for c in &cfg.changes {
+            let rate_only = c.signals_per_second.is_some() && c.attribute.is_empty();
+            if c.signals_per_second == Some(0)
+                || c.cardinality == Some(0)
+                || (!rate_only && !cfg.attributes.iter().any(|a| a.key == c.attribute))
+            {
+                return Err(format!(
+                    "change at {} s: a positive rate, or an existing attribute",
+                    c.after_seconds
+                ));
+            }
+        }
         let mut cdfs = HashMap::new();
         for (i, a) in cfg.attributes.iter().enumerate() {
             if a.cardinality == 0 || (a.zipf.is_some() && a.growth_per_minute != 0.0) {
@@ -222,16 +245,24 @@ impl Scenario {
                     a.key
                 ));
             }
-            if let Some(s) = a.zipf {
-                let mut total = 0.0;
-                let mut cdf: Vec<f64> = (1..=a.cardinality)
-                    .map(|rank| {
-                        total += (rank as f64).powf(-s);
-                        total
-                    })
-                    .collect();
-                cdf.iter_mut().for_each(|c| *c /= total);
-                cdfs.insert(i, cdf);
+            let Some(s) = a.zipf else { continue };
+            let changed = cfg
+                .changes
+                .iter()
+                .filter(|c| c.attribute == a.key)
+                .filter_map(|c| c.cardinality);
+            for n in std::iter::once(a.cardinality).chain(changed) {
+                cdfs.entry((i, n)).or_insert_with(|| {
+                    let mut total = 0.0;
+                    let mut cdf: Vec<f64> = (1..=n)
+                        .map(|rank| {
+                            total += (rank as f64).powf(-s);
+                            total
+                        })
+                        .collect();
+                    cdf.iter_mut().for_each(|c| *c /= total);
+                    cdf
+                });
             }
         }
         Ok(Self {
@@ -242,41 +273,85 @@ impl Scenario {
         })
     }
 
-    fn attribute_value(&mut self, i: usize, minutes: f64) -> String {
+    /// Data points per second at scenario second `second`.
+    pub fn rate_at(&self, second: u64) -> usize {
+        self.cfg
+            .changes
+            .iter()
+            .filter(|c| second >= c.after_seconds)
+            .filter_map(|c| c.signals_per_second.map(|r| (c.after_seconds, r)))
+            .max_by_key(|(after, _)| *after)
+            .map_or(self.cfg.signals_per_second, |(_, r)| r)
+    }
+
+    /// The highest rate of the scenario: it sets the batches per second.
+    fn max_rate(&self) -> usize {
+        self.cfg
+            .changes
+            .iter()
+            .filter_map(|c| c.signals_per_second)
+            .fold(self.cfg.signals_per_second, usize::max)
+    }
+
+    /// Batches per second: enough for the highest rate in `max_batch_size`s.
+    pub fn batches_per_second(&self) -> usize {
+        self.max_rate().div_ceil(self.cfg.max_batch_size)
+    }
+
+    /// Distinct values of attribute `i` at scenario second `second`.
+    fn cardinality_at(&self, i: usize, second: u64) -> u64 {
+        let a = &self.cfg.attributes[i];
+        self.cfg
+            .changes
+            .iter()
+            .filter(|c| second >= c.after_seconds && c.attribute == a.key)
+            .filter_map(|c| c.cardinality.map(|n| (c.after_seconds, n)))
+            .max_by_key(|(after, _)| *after)
+            .map_or(a.cardinality, |(_, n)| n)
+    }
+
+    fn attribute_value(&mut self, i: usize, second: u64) -> String {
+        let minutes = second as f64 / 60.0;
+        let cardinality = self.cardinality_at(i, second);
         let a = &self.cfg.attributes[i];
         if a.unique {
             // The seed keeps sources with different seeds from reusing values.
             self.unique_counter += 1;
             return format!("{}-{}-{}", a.key, self.cfg.seed, self.unique_counter);
         }
-        let n = if let Some(cdf) = self.cdfs.get(&i) {
+        let n = if let Some(cdf) = self.cdfs.get(&(i, cardinality)) {
             let u = self.rng.unit();
             cdf.partition_point(|&c| c < u).min(cdf.len() - 1) as u64
         } else {
-            let live = (a.cardinality as f64 * (1.0 + a.growth_per_minute).powf(minutes)).max(1.0);
+            let live = (cardinality as f64 * (1.0 + a.growth_per_minute).powf(minutes)).max(1.0);
             (self.rng.unit() * live) as u64
         };
         format!("{}-{n}", a.key)
     }
 
-    /// Batch `index` (of `max_batch_size` points, fewer at the end) of scenario
-    /// second `second`, stamped `time_ns`. The same arguments always give the
-    /// same points.
+    /// First point and number of points of batch `index` of second `second`.
+    pub fn batch_range(&self, second: u64, index: usize) -> (usize, usize) {
+        let (rate, slots) = (self.rate_at(second), self.batches_per_second());
+        let first = index * rate / slots;
+        (first, (index + 1) * rate / slots - first)
+    }
+
+    /// Batch `index` of the [`Self::batches_per_second`] batches of scenario
+    /// second `second`, stamped `time_ns`: that second's points split evenly
+    /// over its batches, so at most `max_batch_size`. The same arguments always
+    /// give the same points.
     pub fn batch(&mut self, second: u64, index: usize, time_ns: u64) -> MetricsData {
-        let (rate, size) = (self.cfg.signals_per_second, self.cfg.max_batch_size);
-        let first = index * size;
-        let count = rate.saturating_sub(first).min(size);
+        let (first, count) = self.batch_range(second, index);
         self.rng = Rng(mix(self.cfg.seed ^ mix(second ^ mix(index as u64))));
-        self.unique_counter = second * rate as u64 + first as u64;
+        self.unique_counter = second * self.max_rate() as u64 + first as u64;
         let secs = second;
-        let minutes = second as f64 / 60.0;
         let points = (0..count)
             .map(|_| {
                 let mut values: Vec<(String, String)> = (0..self.cfg.attributes.len())
                     .map(|i| {
                         (
                             self.cfg.attributes[i].key.clone(),
-                            self.attribute_value(i, minutes),
+                            self.attribute_value(i, second),
                         )
                     })
                     .collect();
@@ -388,11 +463,7 @@ impl local::Receiver<OtapPdata> for ScenarioReceiver {
         // Batch g (second g / n, index g % n) is sent at start + g / n seconds;
         // a generator that falls behind skips batches rather than shifting
         // later ones.
-        let (rate, size) = (
-            self.scenario.cfg.signals_per_second,
-            self.scenario.cfg.max_batch_size,
-        );
-        let per_second = rate.div_ceil(size) as u64;
+        let per_second = self.scenario.batches_per_second() as u64;
         let period_ns = 1_000_000_000 / per_second;
         let start = scenario_start_ns();
         let now = now_ns();
@@ -418,7 +489,8 @@ impl local::Receiver<OtapPdata> for ScenarioReceiver {
                     let batch = first_batch + (elapsed + period_ns / 2) / period_ns;
                     let (second, index) = (batch / per_second, batch % per_second);
                     let time_ns = start + second * 1_000_000_000 + index * 1_000_000_000 / per_second;
-                    {
+                    // Below the highest rate some batches are empty.
+                    if self.scenario.batch_range(second, index as usize).1 > 0 {
                         let data = self.scenario.batch(second, index as usize, time_ns);
                         let payload: OtapPayload = OtlpProtoMessage::Metrics(data)
                             .try_into()
@@ -521,6 +593,43 @@ mod tests {
             .filter(|p| attr(p, "route").contains("hot"))
             .count();
         assert!((800..1200).contains(&hot), "{hot}");
+    }
+
+    #[test]
+    fn rate_and_cardinality_change_after_their_time() {
+        let cfg = r#"{"signals_per_second":1000,"max_batch_size":500,"metric_name":"m",
+            "value":{"uniform":{"min":0,"max":1}},
+            "attributes":[{"key":"route","cardinality":10,"zipf":1.1}],
+            "changes":[{"after_seconds":60,"signals_per_second":4000},
+                       {"after_seconds":60,"attribute":"route","cardinality":1000}]}"#;
+        let s = Scenario::new(config(cfg)).unwrap();
+        assert_eq!(s.batches_per_second(), 8);
+        let sizes = |at| (0..8).map(|i| s.batch_range(at, i).1).collect::<Vec<_>>();
+        assert_eq!(sizes(0).iter().sum::<usize>(), 1000);
+        assert_eq!(sizes(60), vec![500; 8]);
+        let mut s = Scenario::new(config(cfg)).unwrap();
+        let routes = |s: &mut Scenario, at| {
+            (0..8)
+                .flat_map(|i| {
+                    let data = s.batch(at, i, 1);
+                    match &data.resource_metrics[0].scope_metrics[0].metrics[0].data {
+                        Some(otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::metric::Data::Gauge(g)) => {
+                            g.data_points.iter().map(|p| attr(p, "route")).collect::<Vec<_>>()
+                        }
+                        _ => panic!("expected a gauge"),
+                    }
+                })
+                .collect::<std::collections::HashSet<_>>()
+        };
+        assert!(routes(&mut s, 0).len() <= 10);
+        assert!(routes(&mut s, 60).len() > 100);
+    }
+
+    #[test]
+    fn changes_need_a_rate_or_an_existing_attribute() {
+        let bad = r#"{"signals_per_second":1,"metric_name":"m","value":{"uniform":{"min":0,"max":1}},
+            "changes":[{"after_seconds":1,"attribute":"nope","cardinality":5}]}"#;
+        assert!(Scenario::new(config(bad)).is_err());
     }
 
     #[test]

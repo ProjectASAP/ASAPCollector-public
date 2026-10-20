@@ -4,8 +4,8 @@
 pipelines     The three pipelines (sketch, exact, raw) side by side over
               offered rates, fed identical points: CPU of each stage, memory,
               points delivered per second and window completion delay. The raw
-              pipeline's branch only forwards points, so the sketch branch's
-              CPU minus the raw branch's is the cost of the function.
+              pipeline has one stage per source (raw-sink-a/b, writing to
+              loki-raw), reported in the branch columns.
 accuracy-size Error against exact versus sketch size: KLL k (latency p99
               error) and Count-Min width (top-10 recall and count error),
               with the bytes merge receives per window.
@@ -26,11 +26,11 @@ from pathlib import Path
 
 import acceptance as acc
 
-# Stages of each pipeline: per-source branches, merge, end.
+# Stages of each pipeline: per-source stage, merge, end (None: no such stage).
 PIPELINES = {
     "sketch": ("branch", "merge", "detector"),
     "exact": ("exact-branch", "exact-merge", "exact-detector"),
-    "raw": ("raw-branch", "raw-merge", "raw-sink"),
+    "raw": ("raw-sink", None, None),
 }
 
 
@@ -60,7 +60,7 @@ def measure(stack, use_case, seconds):
     flt = acc.CASES[use_case][0]
     row = {}
     for name, (branch, merge, end) in PIPELINES.items():
-        stages = [f"{branch}-a", f"{branch}-b", merge, end]
+        stages = [f"{branch}-a", f"{branch}-b"] + [s for s in (merge, end) if s]
         # Total points over the range divided by the windows it covers.
         sel = f'asap_points{{method="{name}"' + ("" if name == "raw" else f",{flt}") + "}"
         seen = (stack.vector(f"max(count_over_time({sel}[{rng}]))") or [({}, float("nan"))])[0][1]
@@ -81,7 +81,8 @@ def measure(stack, use_case, seconds):
 def run(args, use_case, rate, edits=(), extra=None):
     with tempfile.TemporaryDirectory(prefix="asap-exp-") as tmp:
         pipelines, common = prepare(use_case, Path(tmp), rate, edits)
-        stack = acc.Stack(shlex.split(args.docker_command), pipelines, common, args.prometheus, args.loki)
+        stack = acc.Stack(shlex.split(args.docker_command), use_case, pipelines, common,
+                          args.prometheus, args.loki)
         stack.compose("down", "--remove-orphans")
         stack.compose("up", "-d")
         try:
@@ -119,7 +120,7 @@ def topk_error(stack):
     sketch, exact = get("sketch"), get("exact")
     errs = [abs(sketch[k] - exact[k]) / exact[k] for k in exact if k in sketch]
     hh = {m["__name__"].removeprefix("asap_hh_"): v
-          for m, v in stack.vector(f'{{__name__=~"asap_hh_(precision|recall|f1|are)"}} @ {t}')}
+          for m, v in stack.vector(f'{{__name__=~"asap_hh_(precision|recall|f1|are)",method="sketch"}} @ {t}')}
     return {"recall_at_10": len(set(sketch) & set(exact)) / max(1, len(exact)),
             "count_rel_error_mean": statistics.mean(errs) if errs else float("nan"),
             **{f"hh_{k}": v for k, v in sorted(hh.items())}, **merge_bytes(stack)}

@@ -4,7 +4,7 @@
 //! heavy hitters: keys with at least `phi` of the window's points. It sits
 //! outside both pipelines and only reads their output.
 //!
-//! Gauges, labelled with the series labels and `phi`: `asap.hh.precision`,
+//! Gauges, labelled with the series labels, `phi` and `method="sketch"`: `asap.hh.precision`,
 //! `asap.hh.recall`, `asap.hh.f1`, `asap.hh.are` (average relative count error
 //! over the true positives), `asap.hh.truth` and `asap.hh.reported`. A window
 //! whose exact top-k may hide more heavy hitters (`k` entries, all above the
@@ -151,6 +151,8 @@ impl HhAccuracy {
         let points = exact.points.unwrap_or(0.0);
         let mut labels: Vec<KeyValue> = series.iter().map(|(k, v)| KeyValue::new(k, v)).collect();
         labels.push(KeyValue::new("phi", self.config.phi.to_string()));
+        // The sketch's accuracy; the store-and-query job reports `method="raw"`.
+        labels.push(KeyValue::new("method", "sketch"));
         let gauge = |metric: &str, value: f64| SketchEnvelope {
             labels: labels.clone(),
             metric_name: metric.into(),

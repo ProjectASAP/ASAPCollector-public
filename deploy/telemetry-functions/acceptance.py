@@ -9,9 +9,10 @@ completion delay. Prints one line per check and exits non-zero if any check
 fails.
 
 Time is scaled down 6x so a use case takes a few minutes: 10-second windows, a
-5-second merge grace, changes after 1/6 of their configured time and growth 6x
+5-second timeout for a missing source, changes after 1/6 of their configured time and growth 6x
 faster per minute. Rules counted in windows (baselines, thresholds) are as
-deployed.
+deployed. Rate and cardinality ramps are left out: acceptance checks the
+answers at the starting rate; how each approach scales is what the demo shows.
 
     deploy/telemetry-functions/acceptance.py --docker-command "sudo docker"
     deploy/telemetry-functions/acceptance.py --use-cases drift topk
@@ -34,14 +35,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 SCALE = 6
-RATE = 20000  # signals/s per source, as in the generator configs
 WINDOW_S = 60 // SCALE
 USE_CASES = ("latency", "cardinality", "drift", "topk")
 STAGES = tuple(f"{p}{s}" for p in ("", "exact-", "raw-") for s in ("generator-a", "generator-b"))
 STAGES += ("branch-a", "branch-b", "merge", "detector", "exact-branch-a", "exact-branch-b",
-           "exact-merge", "exact-detector", "raw-branch-a", "raw-branch-b", "raw-merge", "raw-sink",
-           "hh-accuracy")
+           "exact-merge", "exact-detector", "raw-sink-a", "raw-sink-b", "hh-accuracy")
 METHODS = ("sketch", "exact", "raw")
+
+
+def rate(directory):
+    """Data points per second per source at the start of the scenario."""
+    text = (HERE / directory / "generator-a.yaml").read_text()
+    return int(re.search(r"signals_per_second: (\d+)", text)[1])
 
 
 def scaled_copy(directory, into):
@@ -51,8 +56,9 @@ def scaled_copy(directory, into):
         text = src.read_text()
         text = text.replace("window_size: 60s", f"window_size: {WINDOW_S}s")
         text = text.replace("window: 60s", f"window: {WINDOW_S}s")
-        # The merge grace is not scaled: shared CI runners need the full 5 s
-        # for every source's sketch to arrive.
+        # The 5 s timeout for a missing source is not scaled: merges emit as
+        # soon as both sources sent a window, and shared CI runners can be slow.
+        text = re.sub(r"\n\s*- \{after_seconds: \d+, (signals_per_second|attribute: [^,]+, cardinality): \d+\}", "", text)
         text = re.sub(r"after_seconds: (\d+)", lambda m: f"after_seconds: {int(m[1]) // SCALE}", text)
         text = re.sub(r"growth_per_minute: ([0-9.]+)",
                       lambda m: f"growth_per_minute: {float(m[1]) * SCALE:g}", text)
@@ -60,8 +66,10 @@ def scaled_copy(directory, into):
 
 
 class Stack:
-    def __init__(self, docker, pipelines, common, prometheus, loki):
-        self.docker, self.pipelines, self.common = docker, pipelines, common
+    def __init__(self, docker, use_case, pipelines, common, prometheus, loki):
+        self.docker, self.use_case = docker, use_case
+        self.pipelines, self.common = pipelines, common
+        self.rate = rate(use_case)
         self.prometheus, self.loki = prometheus, loki
         # The generators of all three pipelines count from the same second.
         self.start = int(time.time()) + 10
@@ -69,7 +77,8 @@ class Stack:
     def compose(self, *args):
         # A CI runner has about 16 GB; the raw pipeline's store gets 4.
         env = dict(os.environ, PIPELINES=str(self.pipelines), COMMON=str(self.common),
-                   SCENARIO_START=str(self.start), LOKI_RAW_MEMORY="4g")
+                   SCENARIO_START=str(self.start), LOKI_RAW_MEMORY="4g",
+                   USE_CASE=self.use_case, WINDOW_SECONDS=str(WINDOW_S))
         cmd = self.docker + ["compose", "-f", str(HERE / "compose.yaml"), *args]
         return subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
 
@@ -123,7 +132,7 @@ def common_checks(stack, flt):
                 f"{sum(v == 1 for _, v in up)}/{len(STAGES)} collectors up")
     w = windows(stack, flt)
     shared = sorted(set(w["sketch"]) & set(w["exact"]))[1:-1]  # skip partial edges
-    expected = 2 * RATE * WINDOW_S
+    expected = 2 * stack.rate * WINDOW_S
     full = [w["exact"][t] for t in shared]
     yield check("full rate reaches the end (no backpressure)",
                 full and all(abs(v - expected) <= 0.01 * expected for v in full),
@@ -139,6 +148,14 @@ def common_checks(stack, flt):
                 set(delay) >= set(METHODS),
                 ", ".join(f"{m} {delay[m]:.1f} s" for m in METHODS if m in delay)
                 + f"; raw points/window {sorted(set(raw))} vs {expected}")
+    stages = {(m["method"], m["stage"]) for m, _ in stack.vector(
+        "max by (method, stage) (max_over_time(asap_stage_emitted[5m]))")}
+    want = {(m, s) for m in ("sketch", "exact") for s in ("merge", "detector")}
+    yield check("merge and detector report their timing (latency breakdown)", stages >= want,
+                f"{sorted(stages)}")
+    queried = {m["method"] for m, _ in stack.vector("max_over_time(asap_query_seconds[5m])")}
+    yield check("the query job times the backend query of sketch and exact",
+                queried >= {"sketch", "exact"}, f"{sorted(queried)}")
 
 
 def latency_checks(stack, t):
@@ -199,17 +216,25 @@ def drift_checks(stack, t):
 
 def topk_checks(stack, t):
     new = stack.vector('max_over_time(asap_topk{key="/new/hot-route",bound=~"estimate|"}[10m])')
-    yield check("new route in both top-10s", {m["method"] for m, _ in new} == {"sketch", "exact"},
+    yield check("new route in the sketch and exact top-10s", {m["method"] for m, _ in new} >= {"sketch", "exact"},
                 str(sorted(m["method"] for m, _ in new)))
     top10 = 'rank=~"[1-9]|10"'
     top = {m: {r["key"] for r, _ in stack.vector(f'asap_topk{{method="{m}",bound=~"estimate|",{top10}}} @ {t}')}
            for m in ("sketch", "exact")}
     recall = len(top["sketch"] & top["exact"]) / max(1, len(top["exact"]))
     yield check("sketch top-10 recall vs exact >= 0.9", recall >= 0.9, f"recall {recall:.2f}")
-    hh = {m["__name__"]: v for m, v in stack.vector(f'{{__name__=~"asap_hh_(precision|recall|are)"}} @ {t}')}
+    hh = {m["__name__"]: v for m, v in stack.vector(
+        f'{{__name__=~"asap_hh_(precision|recall|are)",method="sketch"}} @ {t}')}
     yield check("heavy hitters (>= 1% of points): precision and recall >= 0.9",
                 hh.get("asap_hh_precision", 0) >= 0.9 and hh.get("asap_hh_recall", 0) >= 0.9,
                 ", ".join(f"{k.removeprefix('asap_hh_')} {v:.3f}" for k, v in sorted(hh.items())) or "no asap_hh gauges")
+    raw = {m["__name__"]: v for m, v in stack.vector(
+        '{__name__=~"asap_hh_(precision|recall)",method="raw"}')}
+    loki = stack.vector('max_over_time(asap_query_seconds{method="raw",backend="loki"}[5m])')
+    yield check("store and query: top-k from loki-raw, heavy-hitter recall >= 0.9",
+                loki and raw.get("asap_hh_recall", 0) >= 0.9,
+                ", ".join(f"{k.removeprefix('asap_hh_')} {v:.3f}" for k, v in sorted(raw.items()))
+                + (f"; Loki query {loki[0][1]:.2f} s" if loki else "; no Loki query timed"))
     events = stack.events('| event_kind="novelty" | method="sketch"')
     flagged = stack.vector('max_over_time(asap_topk_new{key="/new/hot-route"}[10m])')
     yield check("novelty event in Loki", any("/new/hot-route" in e for e in events),
@@ -235,7 +260,8 @@ def run_case(args, use_case):
         scaled_copy("common", common)
         for f in [pipelines, common, *pipelines.iterdir(), *common.iterdir()]:
             f.chmod(0o755 if f.is_dir() else 0o644)
-        stack = Stack(shlex.split(args.docker_command), pipelines, common, args.prometheus, args.loki)
+        stack = Stack(shlex.split(args.docker_command), use_case, pipelines, common,
+                      args.prometheus, args.loki)
         stack.compose("down", "--remove-orphans")
         stack.compose("up", "-d")
         try:
