@@ -198,13 +198,8 @@ impl WindowState {
             last_seen_ms: obs.timestamp_ms,
             count: 0,
         };
-        self.series.insert(key.clone(), entry);
         stats.active_series += 1;
-
-        let entry = self
-            .series
-            .get_mut(&key)
-            .expect("series entry must exist after insert");
+        let entry = self.series.entry(key).or_insert(entry);
         observer.observe(entry.sketch.as_mut(), obs)?;
         entry.count += 1;
         Ok(())

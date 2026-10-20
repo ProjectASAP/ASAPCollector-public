@@ -353,7 +353,7 @@ impl PrecomputeConfig {
     }
 
     /// Writes [`Self::series_key_for`] into `buf`, replacing its contents.
-    pub fn write_series_key_for(&self, buf: &mut String, obs: &Observation) {
+    pub(crate) fn write_series_key_for(&self, buf: &mut String, obs: &Observation) {
         use crate::matchers::write_series_key;
         if self.global_aggregation {
             write_series_key(buf, self.agg_id, &[], &[], &[]);

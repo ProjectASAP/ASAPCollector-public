@@ -641,14 +641,22 @@ mod tests {
         let mut points = 0usize;
         let decode = timed(&mut |_| points += 1);
         let mut split = crate::observation::Observation::default();
-        let mut keys: Vec<Vec<u8>> = Vec::new();
         let decode_split = timed(&mut |obs| {
-            crate::matchers::per_attribute::<()>(obs, &plugin.per_attribute, &mut split, |o| {
-                keys.push(o.value.bytes.clone());
-                Ok(())
-            })
-            .unwrap()
+            crate::matchers::per_attribute::<()>(obs, &plugin.per_attribute, &mut split, |_| Ok(()))
+                .unwrap()
         });
+        // The keys for the CMS-only timing, collected outside any timed run.
+        let mut keys: Vec<Vec<u8>> = Vec::new();
+        for b in &batches {
+            crate::otap::codec::decode_each(b.clone(), |obs| {
+                crate::matchers::per_attribute::<()>(obs, &plugin.per_attribute, &mut split, |o| {
+                    keys.push(o.value.bytes.clone());
+                    Ok(())
+                })
+                .unwrap()
+            })
+            .unwrap();
+        }
         let all = timed(&mut |obs| {
             crate::matchers::per_attribute(obs, &plugin.per_attribute, &mut split, |o| {
                 precompute.observe(o)

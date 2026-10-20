@@ -143,7 +143,7 @@ pub fn series_key(
 
 /// Writes [`series_key`] into `buf`, replacing its contents, so a hot path
 /// can reuse one buffer.
-pub fn write_series_key(
+pub(crate) fn write_series_key(
     buf: &mut String,
     agg_id: AggId,
     resource_labels: &[KeyValue],
