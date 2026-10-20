@@ -64,6 +64,17 @@ approach: sketch and exact count their four stages, store and query its sinks,
 `loki-raw` and the query job; Prometheus, which holds every approach's answers
 and the monitoring data, is shown on its own.
 
+The merges count a window's messages, not distinct sources: a source that sends
+a window twice (a retried request, or a branch restarted or reconfigured
+mid-window) completes it early, and the other source's late input is logged and
+dropped. If raw-sink is still waiting for `loki-raw` 50 s after a window's end,
+it reports the window anyway with `asap_raw_unacknowledged` (points still
+waiting) and that time as its delay; the query job flags such windows with
+`asap_raw_incomplete`. The generators size their batches for the scenario's
+peak rate, so at the starting rate a batch holds about 60 points instead of
+1,024. A cardinality change on a growing attribute applies the growth from the
+start of the scenario, not from the change.
+
 Every pipeline reports its window completion delay as `asap_answer_delay`
 (seconds from a window's end until its result is complete at the end of the
 pipeline): sketch and exact when their detector emits the window's answers,

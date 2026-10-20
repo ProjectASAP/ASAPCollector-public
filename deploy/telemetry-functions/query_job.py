@@ -12,6 +12,11 @@ Once per window, after the window is complete in each pipeline:
   (`asap_topk{method="raw"}`) and its heavy-hitter accuracy against the exact
   pipeline (`asap_hh_*{method="raw"}`, same definition as the hh-accuracy node).
 
+The raw answer runs once exact has answered the same window, so a slow exact
+pipeline delays it; freshness comes from the pipelines' own gauges and is not
+affected. A window raw-sink reported with points still unacknowledged (its
+50 s timeout) is answered anyway and flagged with `asap_raw_incomplete`.
+
 Gauges carry the window end as their timestamp, so Prometheus stores them at
 the same time as the pipelines' own per-window gauges. The job also exposes
 its own CPU time and resident memory. Only the top-k use case has a raw answer
@@ -106,6 +111,11 @@ def time_prometheus_answer(method, end):
     put("asap_query_seconds", {"method": method, "backend": "prometheus"}, time.monotonic() - t0, end)
 
 
+def flag_incomplete(end):
+    unacknowledged = sum(v for _, v in at_window('asap_raw_unacknowledged{method="raw"}', end))
+    put("asap_raw_incomplete", {"method": "raw"}, 1.0 if unacknowledged > 0 else 0.0, end)
+
+
 def raw_answer(end):
     """Top-k of window (end - WINDOW_S, end] from loki-raw; True when done."""
     exact_rows = at_window(f'asap_topk{{method="exact",{TOPK_SELECTOR}}}', end)
@@ -113,6 +123,7 @@ def raw_answer(end):
         f'asap_points{{method="exact",attribute_key="{ATTRIBUTE}"}}', end))
     if not exact_rows or not exact_points:
         return False
+    flag_incomplete(end)
     query = (f"topk({K}, sum by ({LOKI_LABEL}) "
              f"(count_over_time({LOKI_STREAM}[{WINDOW_S}s])))")
     # The window is [end - W, end) in ms; LogQL ranges are (t - W, t].
@@ -163,6 +174,10 @@ def loop():
         time.sleep(1)
 
 
+def escape(value):
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
 def own_metrics():
     usage = resource.getrusage(resource.RUSAGE_SELF)
     with open("/proc/self/statm") as f:
@@ -176,7 +191,7 @@ class Metrics(BaseHTTPRequestHandler):
         lines = own_metrics()
         with lock:
             for (name, labels), (value, ts) in sorted(samples.items()):
-                text = ",".join(f'{k}="{v}"' for k, v in labels)
+                text = ",".join(f'{k}="{escape(v)}"' for k, v in labels)
                 lines.append(f"{name}{{{text}}} {value} {ts}")
         body = ("\n".join(lines) + "\n").encode()
         self.send_response(200)

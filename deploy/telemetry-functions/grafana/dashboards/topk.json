@@ -860,7 +860,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting out the grace for late sources.",
+      "description": "Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
       "targets": [
         {
           "refId": "A",
@@ -875,7 +875,7 @@
         {
           "refId": "C",
           "expr": "max(asap_stage_emitted{method=\"sketch\",stage=\"merge\"}) - max(asap_stage_received{method=\"sketch\",stage=\"merge\"})",
-          "legendFormat": "merge (grace)"
+          "legendFormat": "merge (waits for both sources)"
         },
         {
           "refId": "D",
@@ -934,7 +934,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting out the grace for late sources.",
+      "description": "Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
       "targets": [
         {
           "refId": "A",
@@ -949,7 +949,7 @@
         {
           "refId": "C",
           "expr": "max(asap_stage_emitted{method=\"exact\",stage=\"merge\"}) - max(asap_stage_received{method=\"exact\",stage=\"merge\"})",
-          "legendFormat": "merge (grace)"
+          "legendFormat": "merge (waits for both sources)"
         },
         {
           "refId": "D",

@@ -120,7 +120,7 @@ def topk_error(stack):
     sketch, exact = get("sketch"), get("exact")
     errs = [abs(sketch[k] - exact[k]) / exact[k] for k in exact if k in sketch]
     hh = {m["__name__"].removeprefix("asap_hh_"): v
-          for m, v in stack.vector(f'{{__name__=~"asap_hh_(precision|recall|f1|are)"}} @ {t}')}
+          for m, v in stack.vector(f'{{__name__=~"asap_hh_(precision|recall|f1|are)",method="sketch"}} @ {t}')}
     return {"recall_at_10": len(set(sketch) & set(exact)) / max(1, len(exact)),
             "count_rel_error_mean": statistics.mean(errs) if errs else float("nan"),
             **{f"hh_{k}": v for k, v in sorted(hh.items())}, **merge_bytes(stack)}

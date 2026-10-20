@@ -7,7 +7,11 @@
 //! after its end on this host's clock if a source is missing. Each source
 //! (`asap_sketches`) sends all of a window's sketches in one message, in window
 //! order, so a window is complete when `sources` messages carried it.
-//! Envelopes for a window already emitted are counted as late and dropped.
+//! Envelopes for a window already emitted are counted as late, logged and
+//! dropped. The count is of messages, not of distinct sources: a source that
+//! sends a window twice (a retried request, or a branch restarted or
+//! reconfigured mid-window) completes it early, and the other source's
+//! sketch then arrives late and is logged as such.
 //! Scalar (non-sketch) inputs pass through unchanged.
 //!
 //! ```yaml
@@ -246,6 +250,7 @@ impl local::Processor<OtapPdata> for WindowMergeProcessor {
                 };
                 let mut passthrough = Vec::new();
                 let mut carried = std::collections::BTreeSet::new();
+                let late_before = self.merger.late;
                 for obs in observations {
                     match (obs.value.kind, obs.value.envelope) {
                         (ObservationValueKind::Envelope, Some(env)) if !env.payload.is_empty() => {
@@ -257,6 +262,14 @@ impl local::Processor<OtapPdata> for WindowMergeProcessor {
                         (ObservationValueKind::Envelope, Some(env)) => passthrough.push(*env),
                         _ => {}
                     }
+                }
+                if self.merger.late > late_before {
+                    effects
+                        .info(&format!(
+                            "window_merge: {} sketches arrived after their window was emitted",
+                            self.merger.late - late_before
+                        ))
+                        .await;
                 }
                 for end in carried {
                     self.merger.message_carried(end);

@@ -8,6 +8,8 @@
 //! * `urn:asap:processor:exact_merge` adds up the sources' windows and emits
 //!   each as soon as all `sources` have sent it (each sends a window in one
 //!   message, in window order), or `grace` after its end if one is missing.
+//!   Like `window_merge` it counts messages, not distinct sources; windows
+//!   arriving after they were emitted are logged and dropped.
 //! * `urn:asap:processor:exact_detector` computes each merged window's exact
 //!   answers and events, with `method="exact"`: the ground truth.
 //! * `urn:asap:processor:raw_sink` ends the raw pipeline, which only forwards
@@ -323,10 +325,11 @@ struct ExactMerge {
 }
 
 impl ExactMerge {
-    /// Adds one source's window; windows already emitted drop it as late.
-    fn add(&mut self, env: SketchEnvelope) -> Result<(), crate::precompute::PrecomputeError> {
+    /// Adds one source's window; returns false when the window was already
+    /// emitted and the input is dropped as late.
+    fn add(&mut self, env: SketchEnvelope) -> Result<bool, crate::precompute::PrecomputeError> {
         if env.window_end_ms <= self.emitted_until {
-            return Ok(());
+            return Ok(false);
         }
         let w = ExactWindow::decode(&env.payload)?;
         let _ = self.arrived.insert(env.window_end_ms, now_ms());
@@ -338,7 +341,7 @@ impl ExactMerge {
                 window.insert(key, (env, w));
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Every window all sources sent or that ended `grace` before `now`;
@@ -381,14 +384,24 @@ impl local::Processor<OtapPdata> for ExactMerge {
             Message::PData(pdata) => {
                 effects.notify_ack(AckMsg::new(pdata.clone())).await?;
                 let mut carried = std::collections::BTreeSet::new();
+                let mut late = 0;
                 for obs in observations(pdata, effects).await {
                     let Some(env) = obs.value.envelope else {
                         continue;
                     };
                     let _ = carried.insert(env.window_end_ms);
-                    if let Err(e) = self.add(*env) {
-                        effects.info(&format!("exact_merge: {e}")).await;
+                    match self.add(*env) {
+                        Ok(true) => {}
+                        Ok(false) => late += 1,
+                        Err(e) => effects.info(&format!("exact_merge: {e}")).await,
                     }
+                }
+                if late > 0 {
+                    effects
+                        .info(&format!(
+                            "exact_merge: {late} windows arrived after they were emitted"
+                        ))
+                        .await;
                 }
                 for end in carried.into_iter().filter(|e| *e > self.emitted_until) {
                     *self.messages.entry(end).or_default() += 1;
@@ -634,8 +647,10 @@ impl RawSink {
     }
 
     /// Gauges of every window the source has moved past (a later point, or
-    /// `grace` after its end) with no message waiting for the store (or that
-    /// ended 10 graces ago). The source sends points in time order.
+    /// `grace` after its end) with no message waiting for the store, or that
+    /// ended 10 graces ago: then `asap.raw.unacknowledged` counts the points
+    /// still waiting and the delay is the time of the report. The source sends
+    /// points in time order.
     fn due(&mut self, now: u64) -> Vec<SketchEnvelope> {
         let grace = self.config.grace.as_millis() as u64;
         let size = self.config.window.as_millis() as u64;
@@ -652,6 +667,19 @@ impl RawSink {
         for end in ready {
             let mut w = self.windows.remove(&end).unwrap_or_default();
             self.emitted_until = self.emitted_until.max(end);
+            let unacknowledged: usize = self
+                .in_flight
+                .values()
+                .flat_map(|windows| windows.iter())
+                .filter(|(e, _)| *e == end)
+                .map(|(_, times)| times.len())
+                .sum();
+            // On shutdown `now` is u64::MAX: report the real time instead.
+            let complete_ms = if unacknowledged > 0 {
+                now.min(now_ms())
+            } else {
+                w.last_ack_ms
+            };
             let template = SketchEnvelope {
                 window_start_ms: end - size,
                 window_end_ms: end,
@@ -675,7 +703,12 @@ impl RawSink {
             out.push(metric(
                 "asap.answer.delay",
                 &[],
-                w.last_ack_ms.saturating_sub(end) as f64 / 1000.0,
+                complete_ms.saturating_sub(end) as f64 / 1000.0,
+            ));
+            out.push(metric(
+                "asap.raw.unacknowledged",
+                &[],
+                unacknowledged as f64,
             ));
             out.push(metric("asap.points", &[], w.transit_s.len() as f64));
             out.push(metric("asap.raw.failed", &[], w.failed as f64));
@@ -970,7 +1003,9 @@ mod tests {
             encoder: OtapSketchEncoder::default(),
             timer_started: false,
         };
-        sources.into_iter().for_each(|e| merge.add(e).unwrap());
+        for e in sources {
+            assert!(merge.add(e).unwrap());
+        }
         assert!(merge.due(64_000).is_empty());
         let merged = merge.due(65_000);
         assert_eq!(merged.len(), 2);
@@ -996,7 +1031,7 @@ mod tests {
         assert_eq!(get(&out, "asap.topk", ("rank", "1")), Some(26.0));
         assert!(out.iter().all(|e| e.window_end_ms == 60_000));
         // A late window is dropped.
-        merge.add(branch_window(2_000)).unwrap();
+        assert!(!merge.add(branch_window(2_000)).unwrap());
         assert!(merge.due(200_000).is_empty());
     }
 
@@ -1027,6 +1062,36 @@ mod tests {
         *merge.messages.entry(120_000).or_default() += 1;
         assert!(merge.due(124_000).is_empty());
         assert_eq!(merge.due(125_000).len(), 1);
+    }
+
+    #[test]
+    fn raw_sink_reports_unacknowledged_points_after_ten_graces() {
+        let mut raw = RawSink {
+            config: serde_json::from_value(serde_json::json!({})).unwrap(),
+            windows: BTreeMap::new(),
+            in_flight: HashMap::new(),
+            next_id: 0,
+            emitted_until: 0,
+            sent_until_ms: 0,
+            timer_started: false,
+        };
+        let stored = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
+        let _waiting = raw.send(&[
+            point(59_000, "/a", "u1", 1.0),
+            point(59_500, "/b", "u2", 1.0),
+        ]);
+        raw.answered(stored, 10_100, true);
+        assert!(raw.due(109_000).is_empty(), "still waiting for the store");
+        let out = raw.due(110_000);
+        assert_eq!(
+            get(&out, "asap.raw.unacknowledged", ("method", "raw")),
+            Some(2.0)
+        );
+        assert_eq!(
+            get(&out, "asap.answer.delay", ("method", "raw")),
+            Some(50.0)
+        );
+        assert_eq!(get(&out, "asap.points", ("method", "raw")), Some(1.0));
     }
 
     #[test]
