@@ -9,7 +9,7 @@ completion delay. Prints one line per check and exits non-zero if any check
 fails.
 
 Time is scaled down 6x so a use case takes a few minutes: 10-second windows, a
-5-second merge grace, changes after 1/6 of their configured time and growth 6x
+5-second timeout for a missing source, changes after 1/6 of their configured time and growth 6x
 faster per minute. Rules counted in windows (baselines, thresholds) are as
 deployed. Rate and cardinality ramps are left out: acceptance checks the
 answers at the starting rate; how each approach scales is what the demo shows.
@@ -56,8 +56,8 @@ def scaled_copy(directory, into):
         text = src.read_text()
         text = text.replace("window_size: 60s", f"window_size: {WINDOW_S}s")
         text = text.replace("window: 60s", f"window: {WINDOW_S}s")
-        # The merge grace is not scaled: shared CI runners need the full 5 s
-        # for every source's sketch to arrive.
+        # The 5 s timeout for a missing source is not scaled: merges emit as
+        # soon as both sources sent a window, and shared CI runners can be slow.
         text = re.sub(r"\n\s*- \{after_seconds: \d+, (signals_per_second|attribute: [^,]+, cardinality): \d+\}", "", text)
         text = re.sub(r"after_seconds: (\d+)", lambda m: f"after_seconds: {int(m[1]) // SCALE}", text)
         text = re.sub(r"growth_per_minute: ([0-9.]+)",

@@ -3,13 +3,16 @@
 //!
 //! Each input envelope names its series (labels, sketch type, agg id) and its
 //! window. Envelopes with the same series and window are merged. A window is
-//! emitted once, `grace` after its end on this host's clock; envelopes for a
-//! window already emitted are counted as late and dropped. Scalar (non-sketch)
-//! inputs pass through unchanged.
+//! emitted once: as soon as each of `sources` sources has sent it, or `grace`
+//! after its end on this host's clock if a source is missing. Each source
+//! (`asap_sketches`) sends all of a window's sketches in one message, in window
+//! order, so a window is complete when `sources` messages carried it.
+//! Envelopes for a window already emitted are counted as late and dropped.
+//! Scalar (non-sketch) inputs pass through unchanged.
 //!
 //! ```yaml
 //! type: urn:asap:processor:window_merge
-//! config: {grace: 5s}
+//! config: {sources: 2, grace: 5s}
 //! ```
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -47,9 +50,12 @@ pub const WINDOW_MERGE_URN: &str = "urn:asap:processor:window_merge";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WindowMergeConfig {
-    /// How long after a window's end to wait for the last source.
+    /// How long after a window's end to wait for a missing source.
     #[serde(default = "default_grace", with = "humantime_serde")]
     pub grace: Duration,
+    /// Sources sending each window; 0 waits the full grace.
+    #[serde(default)]
+    pub sources: usize,
 }
 
 fn default_grace() -> Duration {
@@ -61,7 +67,7 @@ struct Pending {
     sketch: Box<dyn Sketch>,
 }
 
-/// Windows waiting for their grace period, keyed by window end then series.
+/// Windows waiting for their sources, keyed by window end then series.
 #[derive(Default)]
 pub struct WindowMerger {
     windows: BTreeMap<u64, BTreeMap<String, Pending>>,
@@ -71,6 +77,8 @@ pub struct WindowMerger {
     pub late: u64,
     /// When the last source's sketch of each open window arrived (ms).
     arrived: BTreeMap<u64, u64>,
+    /// Messages (one per source) that carried each open window.
+    messages: BTreeMap<u64, usize>,
 }
 
 fn series_key(e: &SketchEnvelope) -> String {
@@ -116,15 +124,33 @@ impl WindowMerger {
         Ok(())
     }
 
+    /// Counts one source's message carrying window `end`.
+    pub fn message_carried(&mut self, end: u64) {
+        if end > self.emitted_until {
+            *self.messages.entry(end).or_default() += 1;
+        }
+    }
+
     /// Removes and returns when the last sketch of window `end` arrived.
     pub fn take_arrival(&mut self, end: u64) -> Option<u64> {
         self.arrived.remove(&end)
     }
 
-    /// Merged envelopes of every window that ended `grace` or more before `now_ms`.
-    pub fn due(&mut self, now_ms: u64, grace: Duration) -> Vec<SketchEnvelope> {
-        let cutoff = now_ms.saturating_sub(grace.as_millis() as u64);
-        let open = self.windows.split_off(&(cutoff + 1));
+    /// Merged envelopes of every window that `sources` messages carried or
+    /// that ended `grace` or more before `now_ms`. Sources send windows in
+    /// order, so every earlier window is complete too.
+    pub fn due(&mut self, now_ms: u64, grace: Duration, sources: usize) -> Vec<SketchEnvelope> {
+        let timed_out = now_ms.saturating_sub(grace.as_millis() as u64);
+        let complete = self
+            .messages
+            .iter()
+            .filter(|(_, n)| sources > 0 && **n >= sources)
+            .map(|(end, _)| *end)
+            .max()
+            .unwrap_or(0);
+        let cutoff = timed_out.max(complete);
+        self.messages = self.messages.split_off(&(cutoff.saturating_add(1)));
+        let open = self.windows.split_off(&(cutoff.saturating_add(1)));
         let ready = std::mem::replace(&mut self.windows, open);
         let mut out = Vec::new();
         for (end, series) in ready {
@@ -219,9 +245,11 @@ impl local::Processor<OtapPdata> for WindowMergeProcessor {
                     }
                 };
                 let mut passthrough = Vec::new();
+                let mut carried = std::collections::BTreeSet::new();
                 for obs in observations {
                     match (obs.value.kind, obs.value.envelope) {
                         (ObservationValueKind::Envelope, Some(env)) if !env.payload.is_empty() => {
+                            let _ = carried.insert(env.window_end_ms);
                             if let Err(e) = self.merger.add(*env) {
                                 effects.info(&format!("window_merge: {e}")).await;
                             }
@@ -230,14 +258,23 @@ impl local::Processor<OtapPdata> for WindowMergeProcessor {
                         _ => {}
                     }
                 }
-                self.emit(passthrough, effects).await
+                for end in carried {
+                    self.merger.message_carried(end);
+                }
+                self.emit(passthrough, effects).await?;
+                let due = self
+                    .merger
+                    .due(now_ms(), self.config.grace, self.config.sources);
+                self.emit(due, effects).await
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
-                let due = self.merger.due(now_ms(), self.config.grace);
+                let due = self
+                    .merger
+                    .due(now_ms(), self.config.grace, self.config.sources);
                 self.emit(due, effects).await
             }
             Message::Control(NodeControlMsg::Shutdown { .. }) => {
-                let all = self.merger.due(u64::MAX, Duration::ZERO);
+                let all = self.merger.due(u64::MAX, Duration::ZERO, 0);
                 self.emit(all, effects).await
             }
             _ => Ok(()),
@@ -304,8 +341,8 @@ mod tests {
         m.add(hll(500..1500, 0)).unwrap();
         m.add(hll(0..10, 60_000)).unwrap();
         let grace = Duration::from_secs(5);
-        assert!(m.due(64_000, grace).is_empty());
-        let out = m.due(65_000, grace);
+        assert!(m.due(64_000, grace, 0).is_empty());
+        let out = m.due(65_000, grace, 0);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].count, 2000);
         let merged = HLLWrapper::from_snapshot(&out[0].payload).unwrap();
@@ -314,7 +351,27 @@ mod tests {
         // A source arriving after its window was emitted is late.
         m.add(hll(0..5, 0)).unwrap();
         assert_eq!(m.late, 1);
-        assert_eq!(m.due(125_000, grace).len(), 1);
+        assert_eq!(m.due(125_000, grace, 0).len(), 1);
+    }
+
+    #[test]
+    fn emits_a_window_once_every_source_sent_it() {
+        let mut m = WindowMerger::default();
+        let grace = Duration::from_secs(5);
+        m.add(hll(0..1000, 0)).unwrap();
+        m.message_carried(60_000);
+        // One of two sources: wait.
+        assert!(m.due(60_010, grace, 2).is_empty());
+        m.add(hll(500..1500, 0)).unwrap();
+        m.message_carried(60_000);
+        let out = m.due(60_020, grace, 2);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].count, 2000);
+        // A missing source: emitted at the grace.
+        m.add(hll(0..10, 60_000)).unwrap();
+        m.message_carried(120_000);
+        assert!(m.due(124_000, grace, 2).is_empty());
+        assert_eq!(m.due(125_000, grace, 2).len(), 1);
     }
 
     #[test]

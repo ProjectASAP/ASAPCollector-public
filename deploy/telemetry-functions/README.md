@@ -24,12 +24,12 @@ of scenario time, so all three pipelines receive identical points.
 | --- | --- |
 | generator-a/b, exact-generator-a/b, raw-generator-a/b | `scenario_generator`: seeded traffic for the use case (temporary stand-in for the official traffic generator) |
 | branch-a/b | `asap_sketches`: one sketch per series per 1-minute window |
-| merge | `window_merge`: merges both sources' sketches per window, 5 s after the window ends |
+| merge | `window_merge`: merges both sources' sketches per window and emits it as soon as both have sent it (5 s timeout for a missing source) |
 | detector | `sketch_detector`: answers with bounds, baseline comparisons, events (`method="sketch"`) |
 | exact-branch-a/b | `exact_branch`: every value per quantile series and a value -> count map per attribute key, per 1-minute window |
-| exact-merge | `exact_merge`: adds both sources' exact windows, 5 s after the window ends |
+| exact-merge | `exact_merge`: adds both sources' exact windows and emits each as soon as both have sent it (5 s timeout) |
 | exact-detector | `exact_detector`: the same answers and events from the exact windows (`method="exact"`): the ground truth |
-| raw-sink-a/b | `raw_sink`, the only stage per source: writes every raw point as one log record to `loki-raw` (4 requests in flight) and reports when `loki-raw` acknowledged each window's last point (`source` label) |
+| raw-sink-a/b | `raw_sink`, the only stage per source: writes every raw point as one log record to `loki-raw` (4 requests in flight) and reports when `loki-raw` acknowledged each window's last point (`source` label), as soon as its source has sent a later point and every message of the window is acknowledged (5 s timeout if the source idles) |
 | query-job | `query_job.py`: once per window, times each approach's backend query (`asap_query_seconds`, labelled `method` and `backend`); in the top-k use case it also runs the LogQL top-20 over `loki-raw` and reports that answer and its heavy-hitter accuracy against exact (`method="raw"`) |
 | hh-accuracy | `heavy_hitter_accuracy`, outside the pipelines: in the top-k use case both detectors send it a copy of their answers; per window it reports heavy-hitter precision, recall, F1 and average relative count error |
 
@@ -54,7 +54,7 @@ end (`asap_stage_received` and `asap_stage_emitted`, labelled `method` and
 `stage`); detectors pass the merge's timing on to Prometheus. With the query
 job's backend query time, the top-k dashboard stacks each approach's freshness:
 the window wait (up to 60 s for a window's first sample), branch and transfer to
-the merge, the merge's grace, transfer to the detector, the detector, and the
+the merge, the merge's wait for both sources, transfer to the detector, the detector, and the
 query. For store and query: the window wait, ingestion into `loki-raw` (last
 point acknowledged) and the LogQL query.
 
