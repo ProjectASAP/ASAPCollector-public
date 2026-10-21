@@ -15,7 +15,7 @@ flowchart LR
 
 - **`cmsheap`**: each branch inserts every key into a
   [`CMSHeapWrapper`](../asap-precompute-rs/src/sketches/cms_heap.rs), which
-  wraps `asap_sketchlib::CMSHeap`: a 4 x 2048 Count-Min sketch plus a 10-slot
+  wraps `asap_sketchlib::CountMinSketchWithHeap`: a 4 x 2048 Count-Min sketch plus a 10-slot
   heavy-hitter heap. One ASAPv1 envelope (`CountMinSketchWithHeap`, kind
   `0x03 0x00`) per source and window goes to merge. Merge adds the counters
   and re-ranks both heaps' candidates on the merged counters; estimate reads

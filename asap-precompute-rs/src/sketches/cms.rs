@@ -1,14 +1,14 @@
-//! Count-Min sketch wrapper over [`asap_sketchlib::CountMin`].
+//! Count-Min sketch wrapper over [`asap_sketchlib::CountMinSketch`].
 //!
 //! Implements [`Sketch`] + [`FrequencySketch`]. Snapshots are sketchlib's
 //! ASAPv1 envelope (kind `0x02 0x00`).
 
-use asap_sketchlib::{CountMin, DataInput, RegularPath, Vector2D, MATRIX_MAX_ROWS};
+use asap_sketchlib::{CountMinSketch, DataInput, RegularPath, Vector2D, MATRIX_MAX_ROWS};
 
 use crate::observation::Observation;
 use crate::precompute::{FrequencyEntry, FrequencySketch, PrecomputeError, Sketch, SketchObserver};
 
-type Cms = CountMin<Vector2D<i64>, RegularPath>;
+type Cms = CountMinSketch<Vector2D<i64>, RegularPath>;
 
 /// Count-Min sketch wrapper. Keys are raw bytes.
 pub struct CMSWrapper {
@@ -26,14 +26,14 @@ impl CMSWrapper {
 
     /// Decode a full ASAPv1 snapshot.
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, PrecomputeError> {
-        Cms::deserialize_from_bytes(bytes)
+        Cms::from_asapv1(bytes)
             .map(|sk| Self { sk })
             .map_err(|e| PrecomputeError::Other(format!("CMSWrapper decode: {e}")))
     }
 
     /// Add `count` occurrences of `key`.
     pub fn update(&mut self, key: &[u8], count: i64) {
-        self.sk.insert_many(&DataInput::Bytes(key), count);
+        self.sk.update_weighted(&DataInput::Bytes(key), count);
     }
 
     /// Borrow the underlying sketch.
@@ -48,7 +48,7 @@ impl Sketch for CMSWrapper {
             return Ok(Vec::new());
         }
         self.sk
-            .serialize_to_bytes()
+            .to_asapv1()
             .map_err(|e| PrecomputeError::Other(format!("CMSWrapper snapshot: {e}")))
     }
 

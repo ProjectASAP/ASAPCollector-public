@@ -1,16 +1,16 @@
-//! DDSketch wrapper over [`asap_sketchlib::DDSketch`].
+//! DDSketch wrapper over [`asap_sketchlib::DdSketch`].
 //!
 //! Implements [`Sketch`] + [`QuantileSketch`]. Snapshots are sketchlib's
 //! ASAPv1 envelope (kind `0x05 0x00`).
 
-use asap_sketchlib::DDSketch;
+use asap_sketchlib::DdSketch;
 
 use crate::observation::{KeyValue, Observation};
 use crate::precompute::{EstimatePoint, PrecomputeError, QuantileSketch, Sketch, SketchObserver};
 
 /// DDSketch wrapper.
 pub struct DDSketchWrapper {
-    sk: DDSketch,
+    sk: DdSketch,
 }
 
 impl DDSketchWrapper {
@@ -18,13 +18,13 @@ impl DDSketchWrapper {
     /// `alpha` must satisfy `0 < alpha < 1`.
     pub fn new(alpha: f64) -> Self {
         Self {
-            sk: DDSketch::new(alpha),
+            sk: DdSketch::new(alpha),
         }
     }
 
     /// Decode a full ASAPv1 snapshot.
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, PrecomputeError> {
-        DDSketch::deserialize_from_bytes(bytes)
+        DdSketch::from_asapv1(bytes)
             .map(|sk| Self { sk })
             .map_err(|e| PrecomputeError::Other(format!("DDSketchWrapper decode: {e}")))
     }
@@ -35,7 +35,7 @@ impl DDSketchWrapper {
     }
 
     /// Borrow the underlying sketch.
-    pub fn inner(&self) -> &DDSketch {
+    pub fn inner(&self) -> &DdSketch {
         &self.sk
     }
 }
@@ -46,7 +46,7 @@ impl Sketch for DDSketchWrapper {
             return Ok(Vec::new());
         }
         self.sk
-            .serialize_to_bytes()
+            .to_asapv1()
             .map_err(|e| PrecomputeError::Other(format!("DDSketchWrapper snapshot: {e}")))
     }
 
@@ -60,7 +60,7 @@ impl Sketch for DDSketchWrapper {
     }
 
     fn reset(&mut self) {
-        self.sk = DDSketch::new(self.sk.alpha());
+        self.sk = DdSketch::new(self.sk.alpha());
     }
 
     fn estimate(&self, quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {

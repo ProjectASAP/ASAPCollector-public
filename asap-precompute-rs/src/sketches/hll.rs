@@ -4,7 +4,7 @@
 //! Implements [`Sketch`] + [`CardinalitySketch`]. Snapshots are sketchlib's
 //! ASAPv1 envelope (kind `0x01 0x02`).
 
-use asap_sketchlib::{DataInput, ErtlMLE, HyperLogLog};
+use asap_sketchlib::{DataInput, Ertl, HyperLogLog};
 
 use crate::observation::Observation;
 use crate::precompute::{
@@ -14,7 +14,7 @@ use crate::precompute::{
 /// HyperLogLog wrapper (2^14 registers, Ertl MLE estimator).
 #[derive(Default)]
 pub struct HLLWrapper {
-    sk: HyperLogLog<ErtlMLE>,
+    sk: HyperLogLog<Ertl>,
 }
 
 impl HLLWrapper {
@@ -25,18 +25,18 @@ impl HLLWrapper {
 
     /// Decode a full ASAPv1 snapshot.
     pub fn from_snapshot(bytes: &[u8]) -> Result<Self, PrecomputeError> {
-        HyperLogLog::<ErtlMLE>::deserialize_from_bytes(bytes)
+        HyperLogLog::<Ertl>::from_asapv1(bytes)
             .map(|sk| Self { sk })
             .map_err(|e| PrecomputeError::Other(format!("HLLWrapper decode: {e}")))
     }
 
     /// Insert a byte-slice key.
     pub fn update(&mut self, value: &[u8]) {
-        self.sk.insert(&DataInput::Bytes(value));
+        self.sk.update(&DataInput::Bytes(value));
     }
 
     /// Borrow the underlying sketch.
-    pub fn inner(&self) -> &HyperLogLog<ErtlMLE> {
+    pub fn inner(&self) -> &HyperLogLog<Ertl> {
         &self.sk
     }
 
@@ -51,7 +51,7 @@ impl Sketch for HLLWrapper {
             return Ok(Vec::new());
         }
         self.sk
-            .serialize_to_bytes()
+            .to_asapv1()
             .map_err(|e| PrecomputeError::Other(format!("HLLWrapper snapshot: {e}")))
     }
 
@@ -64,7 +64,7 @@ impl Sketch for HLLWrapper {
     }
 
     fn reset(&mut self) {
-        self.sk = HyperLogLog::<ErtlMLE>::new();
+        self.sk = HyperLogLog::<Ertl>::new();
     }
 
     fn estimate(&self, _quantiles: &[f64], _top_k: usize) -> Vec<EstimatePoint> {

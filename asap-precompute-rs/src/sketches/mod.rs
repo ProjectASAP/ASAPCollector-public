@@ -2,8 +2,8 @@
 //!
 //! Each wrapper adapts one native sketchlib sketch to the host-neutral
 //! [`crate::precompute::Sketch`] trait family. `snapshot()` returns the
-//! sketch's self-describing ASAPv1 envelope from `serialize_to_bytes`, and
-//! `merge_snapshot()` decodes one with `deserialize_from_bytes` and merges
+//! sketch's self-describing ASAPv1 envelope from `to_asapv1`, and
+//! `merge_snapshot()` decodes one with `from_asapv1` and merges
 //! it. Every payload is full state; there are no deltas.
 
 pub mod cms;
