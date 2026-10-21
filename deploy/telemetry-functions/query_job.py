@@ -13,28 +13,29 @@ Once per window, after the window is complete in each pipeline:
   - topk: one top-k query; reports `asap_topk{method="raw"}` and its
     heavy-hitter accuracy against exact (`asap_hh_*{method="raw"}`, same
     definition as the hh-accuracy node).
-  - cardinality: one distinct-count query per attribute key; reports
-    `asap_distinct{method="raw"}`. A query Loki fails (for example over its
-    series limit) is reported as `asap_query_failed{method="raw"}`.
+  - cardinality: one distinct-count query per attribute key exact counted;
+    reports `asap_distinct{method="raw"}`. A query Loki refuses or answers
+    with no result is reported as `asap_query_failed{method="raw"}` instead.
 
 With each raw answer it also republishes the sketch and exact answers of the
 same window (`asap_compare_topk`, `asap_compare_distinct`,
-`asap_compare_class`, labelled `method`), so a dashboard can show the three
-approaches side by side for one window although store and query answers later.
+`asap_compare_class`, labelled `method`; `asap_compare_failed` for refused
+keys) and that window's end (`asap_compare_window_end`, ms). These carry no
+timestamp, so a dashboard always finds the latest compared window however far
+store and query lags behind.
 
 The raw answer runs once exact has answered the same window, so a slow exact
 pipeline delays it; freshness comes from the pipelines' own gauges and is not
 affected. A window raw-sink reported with points still unacknowledged (its
 50 s timeout) is answered anyway and flagged with `asap_raw_incomplete`.
 
-Gauges carry the window end as their timestamp, so Prometheus stores them at
+The other gauges carry the window end as their timestamp, so Prometheus stores them at
 the same time as the pipelines' own per-window gauges. The job also exposes
 its own CPU time and resident memory. Only the top-k and cardinality use cases
 have a raw answer here; for the others it only times the backend queries.
 
 Configuration (environment): USE_CASE, WINDOW_SECONDS (60), K (20), PHI (0.01),
-RAW_SOURCES (2), ATTRIBUTE_KEYS (cardinality: keys to count), PROMETHEUS,
-LOKI_RAW, PORT (9100).
+RAW_SOURCES (2), PROMETHEUS, LOKI_RAW, PORT (9100).
 """
 import json
 import os
@@ -53,7 +54,6 @@ K = int(os.environ.get("K", "20"))
 PHI = float(os.environ.get("PHI", "0.01"))
 RAW_SOURCES = int(os.environ.get("RAW_SOURCES", "2"))
 PORT = int(os.environ.get("PORT", "9100"))
-ATTRIBUTE_KEYS = os.environ.get("ATTRIBUTE_KEYS", "http.route,http.method,k8s.pod.name,user.id").split(",")
 ATTRIBUTE = "http.route"
 # Loki stores OTLP attributes as structured metadata with dots replaced.
 LOKI_LABEL = ATTRIBUTE.replace(".", "_")
@@ -99,8 +99,10 @@ def at_window(expr, end):
 
 
 def put(name, labels, value, end_s):
+    """Sets a gauge stamped at window end `end_s`; None leaves it unstamped
+    (Prometheus stamps it at the scrape)."""
     with lock:
-        samples[(name, tuple(sorted(labels.items())))] = (value, end_s * 1000)
+        samples[(name, tuple(sorted(labels.items())))] = (value, None if end_s is None else end_s * 1000)
 
 
 def replace(name, rows, end_s):
@@ -148,34 +150,41 @@ def loki_at_window_end(query, end):
 
 def raw_distinct(end):
     """Distinct values per attribute key of the window from loki-raw; True when done."""
-    if not at_window('asap_distinct{method="exact"}', end):
+    exact = at_window('asap_distinct{method="exact"}', end)
+    if not exact:
         return False
     flag_incomplete(end)
+    failed = []
     compared = [({"method": m, "attribute_key": r["attribute_key"]}, v) for m in ("sketch", "exact")
                 for r, v in at_window(f'asap_distinct{{method="{m}",bound="estimate"}}', end)]
     classes = [({"method": m, "attribute_key": r["attribute_key"], "state": r["state"]}, 1.0)
                for m in ("sketch", "exact")
                for r, v in at_window(f'asap_cardinality_state{{method="{m}"}}', end) if v == 1]
     total = 0.0
-    for key in ATTRIBUTE_KEYS:
+    for key in sorted({r["attribute_key"] for r, _ in exact}):
         label = key.replace(".", "_")
         query = f"count(sum by ({label}) (count_over_time({LOKI_STREAM}[{WINDOW_S}s])))"
         labels = {"method": "raw", "attribute_key": key}
         t0 = time.monotonic()
         try:
             rows = loki_at_window_end(query, end)
-        except Exception as e:  # the store refused or timed out: no answer for this key
+            if not rows:
+                raise ValueError("no result")
+        except Exception as e:  # refused, timed out or empty: no answer for this key
             total += time.monotonic() - t0
             print(f"query_job: {key} at {end}: {e}", flush=True)
             put("asap_query_failed", labels, 1.0, end)
+            failed.append(({"attribute_key": key}, 1.0))
             continue
         total += time.monotonic() - t0
-        distinct = float(rows[0]["value"][1]) if rows else 0.0
+        distinct = float(rows[0]["value"][1])
         put("asap_distinct", dict(labels, bound="estimate"), distinct, end)
         compared.append((labels, distinct))
     put("asap_query_seconds", {"method": "raw", "backend": "loki"}, total, end)
-    replace("asap_compare_distinct", compared, end)
-    replace("asap_compare_class", classes, end)
+    replace("asap_compare_distinct", compared, None)
+    replace("asap_compare_class", classes, None)
+    replace("asap_compare_failed", failed, None)
+    put("asap_compare_window_end", {}, end * 1000.0, None)
     return True
 
 
@@ -202,7 +211,8 @@ def raw_topk(end):
             [({"method": m, "rank": r["rank"], "key": r["key"]}, v)
              for m, rows_ in (("sketch", sketch_rows), ("exact", exact_rows)) for r, v in rows_]
             + [({"method": "raw", "rank": str(rank), "key": key}, count) for rank, (key, count) in enumerate(top, 1)],
-            end)
+            None)
+    put("asap_compare_window_end", {}, end * 1000.0, None)
     exact = sorted(((m["key"], v) for m, v in exact_rows), key=lambda kc: -kc[1])
     acc = heavy_hitter_accuracy(exact_points, exact, top)
     labels = {"method": "raw", "attribute_key": ATTRIBUTE, "phi": f"{PHI:g}"}
@@ -256,7 +266,7 @@ class Metrics(BaseHTTPRequestHandler):
         with lock:
             for (name, labels), (value, ts) in sorted(samples.items()):
                 text = ",".join(f'{k}="{escape(v)}"' for k, v in labels)
-                lines.append(f"{name}{{{text}}} {value} {ts}")
+                lines.append(f"{name}{{{text}}} {value}" + ("" if ts is None else f" {ts}"))
         body = ("\n".join(lines) + "\n").encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; version=0.0.4")

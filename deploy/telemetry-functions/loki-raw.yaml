@@ -34,7 +34,9 @@ limits_config:
   reject_old_samples: false
   max_structured_metadata_entries_count: 512
   # The query job groups by an attribute: up to a million routes (top-k) or
-  # every user.id of a window (cardinality, about 10 million at the top rate).
+  # every user.id of a window (cardinality). Even so, Loki refuses the user.id
+  # distinct count (HTTP 413) from about 2.4 million values per window, so
+  # store and query has no user.id answer from 20,000 points/s per source.
   max_query_series: 20000000
   query_timeout: 5m
   # Only the latest windows are queried; keep 2 h so a long-running demo does

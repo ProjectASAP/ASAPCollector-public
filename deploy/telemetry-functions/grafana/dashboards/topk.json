@@ -39,8 +39,8 @@
     },
     {
       "type": "table",
-      "title": "Top-10 routes of the three approaches, latest window all three answered (union of their top-10s)",
-      "description": "One row per route in any approach's top-10, all from the latest window store and query has answered (query-job republishes sketch and exact for it). Error is (count - exact) / exact; empty when the route is outside that approach's reported top-20.",
+      "title": "Top-10 routes of the three approaches, latest window store and query answered (union of their top-10s)",
+      "description": "One row per route in any approach's top-10, all from the latest window store and query has answered (query-job republishes sketch and exact for it), which lags behind when the log store is slow; the panel on the right shows which window. Error is (count - exact) / exact; empty when the route is outside that approach's reported top-20.",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
@@ -48,31 +48,31 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "expr": "max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}, \"exact_rank\", \"$1\", \"rank\", \"(.*)\"))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "B",
-          "expr": "max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "expr": "max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}, \"sketch_rank\", \"$1\", \"rank\", \"(.*)\"))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "C",
-          "expr": "max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\"))",
+          "expr": "max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}, \"raw_rank\", \"$1\", \"rank\", \"(.*)\"))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "D",
-          "expr": "100 * (max by (key) (asap_compare_topk{method=\"sketch\"} and (timestamp(asap_compare_topk{method=\"sketch\"}) == scalar(max(timestamp(asap_compare_topk{method=\"sketch\"}))))) - on (key) max by (key) (asap_compare_topk{method=\"exact\"} and (timestamp(asap_compare_topk{method=\"exact\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\"})))))) / on (key) max by (key) (asap_compare_topk{method=\"exact\"} and (timestamp(asap_compare_topk{method=\"exact\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\"}))))) and on (key) (max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
+          "expr": "100 * (max by (key) (asap_compare_topk{method=\"sketch\"}) - on (key) max by (key) (asap_compare_topk{method=\"exact\"})) / on (key) max by (key) (asap_compare_topk{method=\"exact\"}) and on (key) (max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}, \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}, \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}, \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "E",
-          "expr": "100 * (max by (key) (asap_compare_topk{method=\"raw\"} and (timestamp(asap_compare_topk{method=\"raw\"}) == scalar(max(timestamp(asap_compare_topk{method=\"raw\"}))))) - on (key) max by (key) (asap_compare_topk{method=\"exact\"} and (timestamp(asap_compare_topk{method=\"exact\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\"})))))) / on (key) max by (key) (asap_compare_topk{method=\"exact\"} and (timestamp(asap_compare_topk{method=\"exact\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\"}))))) and on (key) (max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"})))), \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"})))), \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"} and (timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"})))), \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
+          "expr": "100 * (max by (key) (asap_compare_topk{method=\"raw\"}) - on (key) max by (key) (asap_compare_topk{method=\"exact\"})) / on (key) max by (key) (asap_compare_topk{method=\"exact\"}) and on (key) (max by (key, exact_rank) (label_replace(asap_compare_topk{method=\"exact\",rank=~\"[1-9]|10\"}, \"exact_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, sketch_rank) (label_replace(asap_compare_topk{method=\"sketch\",rank=~\"[1-9]|10\"}, \"sketch_rank\", \"$1\", \"rank\", \"(.*)\")) or max by (key, raw_rank) (label_replace(asap_compare_topk{method=\"raw\",rank=~\"[1-9]|10\"}, \"raw_rank\", \"$1\", \"rank\", \"(.*)\")))",
           "format": "table",
           "instant": true
         }
@@ -268,11 +268,52 @@
       },
       "gridPos": {
         "h": 12,
-        "w": 24,
+        "w": 20,
         "x": 0,
         "y": 11
       },
       "id": 3
+    },
+    {
+      "type": "stat",
+      "title": "Window compared (end)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "End of the window the table compares: the latest one store and query has answered.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_compare_window_end",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIsoNoDateIfToday"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 12,
+        "w": 4,
+        "x": 20,
+        "y": 11
+      },
+      "id": 4
     },
     {
       "type": "bargauge",
@@ -316,7 +357,7 @@
         "x": 0,
         "y": 23
       },
-      "id": 4
+      "id": 5
     },
     {
       "type": "bargauge",
@@ -360,7 +401,7 @@
         "x": 8,
         "y": 23
       },
-      "id": 5
+      "id": 6
     },
     {
       "type": "bargauge",
@@ -404,7 +445,7 @@
         "x": 16,
         "y": 23
       },
-      "id": 6
+      "id": 7
     },
     {
       "type": "logs",
@@ -430,7 +471,7 @@
         "x": 0,
         "y": 33
       },
-      "id": 7
+      "id": 8
     },
     {
       "type": "row",
@@ -443,7 +484,7 @@
         "x": 0,
         "y": 41
       },
-      "id": 8
+      "id": 9
     },
     {
       "type": "timeseries",
@@ -510,7 +551,7 @@
         "x": 0,
         "y": 42
       },
-      "id": 9
+      "id": 10
     },
     {
       "type": "timeseries",
@@ -589,7 +630,7 @@
         "x": 12,
         "y": 42
       },
-      "id": 10
+      "id": 11
     },
     {
       "type": "row",
@@ -602,7 +643,7 @@
         "x": 0,
         "y": 50
       },
-      "id": 11
+      "id": 12
     },
     {
       "type": "timeseries",
@@ -696,7 +737,7 @@
         "x": 0,
         "y": 51
       },
-      "id": 12
+      "id": 13
     },
     {
       "type": "timeseries",
@@ -739,7 +780,7 @@
         "x": 12,
         "y": 51
       },
-      "id": 13
+      "id": 14
     },
     {
       "type": "row",
@@ -752,7 +793,7 @@
         "x": 0,
         "y": 59
       },
-      "id": 14
+      "id": 15
     },
     {
       "type": "timeseries",
@@ -851,7 +892,7 @@
         "x": 0,
         "y": 60
       },
-      "id": 15
+      "id": 16
     },
     {
       "type": "timeseries",
@@ -925,7 +966,7 @@
         "x": 0,
         "y": 67
       },
-      "id": 16
+      "id": 17
     },
     {
       "type": "timeseries",
@@ -999,7 +1040,7 @@
         "x": 8,
         "y": 67
       },
-      "id": 17
+      "id": 18
     },
     {
       "type": "timeseries",
@@ -1008,7 +1049,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "",
+      "description": "Seconds per segment. into loki-raw: the window's end until loki-raw acknowledged its last point (or raw-sink's 50 s timeout). The query time includes refused and timed-out queries; with several queries per window it is their sum.",
       "targets": [
         {
           "refId": "A",
@@ -1058,7 +1099,7 @@
         "x": 16,
         "y": 67
       },
-      "id": 18
+      "id": 19
     },
     {
       "type": "row",
@@ -1071,7 +1112,7 @@
         "x": 0,
         "y": 75
       },
-      "id": 19
+      "id": 20
     },
     {
       "type": "timeseries",
@@ -1122,7 +1163,7 @@
         "x": 0,
         "y": 76
       },
-      "id": 20
+      "id": 21
     },
     {
       "type": "timeseries",
@@ -1173,7 +1214,7 @@
         "x": 8,
         "y": 76
       },
-      "id": 21
+      "id": 22
     },
     {
       "type": "timeseries",
@@ -1224,7 +1265,7 @@
         "x": 16,
         "y": 76
       },
-      "id": 22
+      "id": 23
     },
     {
       "type": "timeseries",
@@ -1275,7 +1316,7 @@
         "x": 0,
         "y": 88
       },
-      "id": 23
+      "id": 24
     },
     {
       "type": "timeseries",
@@ -1326,7 +1367,7 @@
         "x": 8,
         "y": 88
       },
-      "id": 24
+      "id": 25
     },
     {
       "type": "timeseries",
@@ -1377,7 +1418,7 @@
         "x": 16,
         "y": 88
       },
-      "id": 25
+      "id": 26
     },
     {
       "type": "timeseries",
@@ -1426,7 +1467,7 @@
         "x": 0,
         "y": 100
       },
-      "id": 26
+      "id": 27
     },
     {
       "type": "timeseries",
@@ -1475,7 +1516,7 @@
         "x": 8,
         "y": 100
       },
-      "id": 27
+      "id": 28
     },
     {
       "type": "timeseries",
@@ -1524,7 +1565,7 @@
         "x": 16,
         "y": 100
       },
-      "id": 28
+      "id": 29
     },
     {
       "type": "timeseries",
@@ -1567,7 +1608,7 @@
         "x": 0,
         "y": 112
       },
-      "id": 29
+      "id": 30
     },
     {
       "type": "timeseries",
@@ -1610,7 +1651,7 @@
         "x": 12,
         "y": 112
       },
-      "id": 30
+      "id": 31
     }
   ]
 }

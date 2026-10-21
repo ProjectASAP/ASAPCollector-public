@@ -59,6 +59,8 @@ def scaled_copy(directory, into):
         # The 5 s timeout for a missing source is not scaled: merges emit as
         # soon as both sources sent a window, and shared CI runners can be slow.
         text = re.sub(r"\n\s*- \{after_seconds: \d+, (signals_per_second|attribute: [^,]+, cardinality): \d+\}", "", text)
+        # A `changes:` left with no entries would read as null, not an empty list.
+        text = re.sub(r"\n\s*changes:[ \t]*(?=\n(?!\s*-))", "", text)
         text = re.sub(r"after_seconds: (\d+)", lambda m: f"after_seconds: {int(m[1]) // SCALE}", text)
         text = re.sub(r"growth_per_minute: ([0-9.]+)",
                       lambda m: f"growth_per_minute: {float(m[1]) * SCALE:g}", text)
@@ -197,16 +199,17 @@ def cardinality_checks(stack, t):
             for k in keys if (k, "sketch") in distinct and (k, "exact") in distinct}
     yield check("distinct-count error <= 2% for every key", errs and max(errs.values()) <= 0.02,
                 ", ".join(f"{k} {e:.2%}" for k, e in errs.items()))
-    # Store and query answers later than exact: compare the latest window it answered.
+    # Store and query answers later than exact: compare the latest window in
+    # which it answered every key exact did.
     raw = {m["attribute_key"]: series for m, series in stack.matrix('asap_distinct{method="raw"}')}
     exact = {m["attribute_key"]: series for m, series in stack.matrix('asap_distinct{method="exact"}')}
-    ends = set.intersection(*[set(v) for v in raw.values()]) if raw else set()
-    end = max(ends, default=None)
-    raw_errs = {k: abs(raw[k][end] - exact[k][end]) / exact[k][end]
-                for k in raw if end in exact.get(k, {})} if end else {}
+    end = max((e for e in set.intersection(*[set(v) for v in exact.values()])
+               if all(e in raw.get(k, {}) for k in exact)), default=None) if exact else None
+    raw_errs = {k: abs(raw[k][end] - exact[k][end]) / exact[k][end] for k in exact} if end else {}
     yield check("store and query: distinct counts from loki-raw, error <= 1% for every key",
-                raw_errs and len(raw_errs) == len(raw) and max(raw_errs.values()) <= 0.01,
-                ", ".join(f"{k} {e:.2%}" for k, e in sorted(raw_errs.items())) or "no raw distinct counts")
+                raw_errs and max(raw_errs.values()) <= 0.01,
+                ", ".join(f"{k} {e:.2%}" for k, e in sorted(raw_errs.items()))
+                or f"no window with every key answered; never answered: {sorted(set(exact) - set(raw))}")
     events = stack.events('| event_kind="cardinality" | method="sketch"')
     yield check("class events in Loki", any("identifier-like" in e for e in events),
                 f"{len(events)} sketch events")

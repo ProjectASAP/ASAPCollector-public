@@ -39,8 +39,8 @@
     },
     {
       "type": "table",
-      "title": "Distinct values per attribute key, latest window all three answered",
-      "description": "All from the latest window store and query has answered (query-job republishes sketch and exact for it). Error is (count - exact) / exact. Class: the detector's verdict from the last 10 windows (stable, growing, identifier-like). Store and query is empty for a key whose LogQL query failed.",
+      "title": "Distinct values per attribute key, latest window store and query answered",
+      "description": "All from the latest window store and query has answered (query-job republishes sketch and exact for it), which lags behind when the log store is slow; the panel on the right shows which window. Error is (count - exact) / exact. Class: the detector's verdict from the last 10 windows (stable, growing, identifier-like). Store+query refused: 1 when Loki refused or timed out the key's LogQL query, which leaves its count empty.",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
@@ -48,43 +48,49 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (attribute_key) (asap_compare_distinct{method=\"exact\"} and (timestamp(asap_compare_distinct{method=\"exact\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"exact\"})))))",
+          "expr": "max by (attribute_key) (asap_compare_distinct{method=\"exact\"})",
           "format": "table",
           "instant": true
         },
         {
           "refId": "B",
-          "expr": "max by (attribute_key) (asap_compare_distinct{method=\"sketch\"} and (timestamp(asap_compare_distinct{method=\"sketch\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"sketch\"})))))",
+          "expr": "max by (attribute_key) (asap_compare_distinct{method=\"sketch\"})",
           "format": "table",
           "instant": true
         },
         {
           "refId": "C",
-          "expr": "max by (attribute_key) (asap_compare_distinct{method=\"raw\"} and (timestamp(asap_compare_distinct{method=\"raw\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"raw\"})))))",
+          "expr": "max by (attribute_key) (asap_compare_distinct{method=\"raw\"})",
           "format": "table",
           "instant": true
         },
         {
           "refId": "D",
-          "expr": "100 * (max by (attribute_key) (asap_compare_distinct{method=\"sketch\"} and (timestamp(asap_compare_distinct{method=\"sketch\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"sketch\"}))))) - on (attribute_key) max by (attribute_key) (asap_compare_distinct{method=\"exact\"} and (timestamp(asap_compare_distinct{method=\"exact\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"exact\"})))))) / on (attribute_key) max by (attribute_key) (asap_compare_distinct{method=\"exact\"} and (timestamp(asap_compare_distinct{method=\"exact\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"exact\"})))))",
+          "expr": "100 * (max by (attribute_key) (asap_compare_distinct{method=\"sketch\"}) - on (attribute_key) max by (attribute_key) (asap_compare_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_compare_distinct{method=\"exact\"})",
           "format": "table",
           "instant": true
         },
         {
           "refId": "E",
-          "expr": "100 * (max by (attribute_key) (asap_compare_distinct{method=\"raw\"} and (timestamp(asap_compare_distinct{method=\"raw\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"raw\"}))))) - on (attribute_key) max by (attribute_key) (asap_compare_distinct{method=\"exact\"} and (timestamp(asap_compare_distinct{method=\"exact\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"exact\"})))))) / on (attribute_key) max by (attribute_key) (asap_compare_distinct{method=\"exact\"} and (timestamp(asap_compare_distinct{method=\"exact\"}) == scalar(max(timestamp(asap_compare_distinct{method=\"exact\"})))))",
+          "expr": "100 * (max by (attribute_key) (asap_compare_distinct{method=\"raw\"}) - on (attribute_key) max by (attribute_key) (asap_compare_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_compare_distinct{method=\"exact\"})",
           "format": "table",
           "instant": true
         },
         {
           "refId": "F",
-          "expr": "max by (attribute_key, exact_class) (label_replace(asap_compare_class{method=\"exact\"} and (timestamp(asap_compare_class{method=\"exact\"}) == scalar(max(timestamp(asap_compare_class{method=\"exact\"})))), \"exact_class\", \"$1\", \"state\", \"(.*)\"))",
+          "expr": "max by (attribute_key, exact_class) (label_replace(asap_compare_class{method=\"exact\"}, \"exact_class\", \"$1\", \"state\", \"(.*)\"))",
           "format": "table",
           "instant": true
         },
         {
           "refId": "G",
-          "expr": "max by (attribute_key, sketch_class) (label_replace(asap_compare_class{method=\"sketch\"} and (timestamp(asap_compare_class{method=\"sketch\"}) == scalar(max(timestamp(asap_compare_class{method=\"sketch\"})))), \"sketch_class\", \"$1\", \"state\", \"(.*)\"))",
+          "expr": "max by (attribute_key, sketch_class) (label_replace(asap_compare_class{method=\"sketch\"}, \"sketch_class\", \"$1\", \"state\", \"(.*)\"))",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "H",
+          "expr": "max by (attribute_key) (asap_compare_failed)",
           "format": "table",
           "instant": true
         }
@@ -110,7 +116,8 @@
               "Time 4": true,
               "Time 5": true,
               "Time 6": true,
-              "Time 7": true
+              "Time 7": true,
+              "Time 8": true
             },
             "indexByName": {
               "attribute_key": 0,
@@ -120,7 +127,8 @@
               "Value #D": 4,
               "sketch_class": 5,
               "Value #C": 6,
-              "Value #E": 7
+              "Value #E": 7,
+              "Value #H": 8
             },
             "renameByName": {
               "attribute_key": "Attribute key",
@@ -130,7 +138,8 @@
               "Value #D": "Sketch error",
               "sketch_class": "Sketch class",
               "Value #C": "Store+query",
-              "Value #E": "Store+query error"
+              "Value #E": "Store+query error",
+              "Value #H": "Store+query refused"
             }
           }
         }
@@ -251,11 +260,52 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 24,
+        "w": 20,
         "x": 0,
         "y": 11
       },
       "id": 3
+    },
+    {
+      "type": "stat",
+      "title": "Window compared (end)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus"
+      },
+      "description": "End of the window the table compares: the latest one store and query has answered.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "asap_compare_window_end",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIsoNoDateIfToday"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 4,
+        "x": 20,
+        "y": 11
+      },
+      "id": 4
     },
     {
       "type": "logs",
@@ -281,7 +331,7 @@
         "x": 0,
         "y": 18
       },
-      "id": 4
+      "id": 5
     },
     {
       "type": "row",
@@ -294,7 +344,7 @@
         "x": 0,
         "y": 26
       },
-      "id": 5
+      "id": 6
     },
     {
       "type": "timeseries",
@@ -307,7 +357,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "abs(max by (attribute_key) (asap_distinct{method=\"sketch\",bound=\"estimate\"}) - on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})",
+          "expr": "(abs(max by (attribute_key) (asap_distinct{method=\"sketch\",bound=\"estimate\"}) - on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) and on (attribute_key) (max by (attribute_key) (timestamp(asap_distinct{method=\"sketch\"})) == on (attribute_key) max by (attribute_key) (timestamp(asap_distinct{method=\"exact\"})))",
           "legendFormat": "{{attribute_key}}"
         }
       ],
@@ -337,7 +387,7 @@
         "x": 0,
         "y": 27
       },
-      "id": 6
+      "id": 7
     },
     {
       "type": "timeseries",
@@ -350,7 +400,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "abs(max by (attribute_key) (asap_distinct{method=\"raw\",bound=\"estimate\"}) - on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})",
+          "expr": "(abs(max by (attribute_key) (asap_distinct{method=\"raw\",bound=\"estimate\"}) - on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) and on (attribute_key) (max by (attribute_key) (timestamp(asap_distinct{method=\"raw\"})) == on (attribute_key) max by (attribute_key) (timestamp(asap_distinct{method=\"exact\"})))",
           "legendFormat": "{{attribute_key}}"
         }
       ],
@@ -380,7 +430,7 @@
         "x": 12,
         "y": 27
       },
-      "id": 7
+      "id": 8
     },
     {
       "type": "row",
@@ -393,7 +443,7 @@
         "x": 0,
         "y": 35
       },
-      "id": 8
+      "id": 9
     },
     {
       "type": "timeseries",
@@ -487,7 +537,7 @@
         "x": 0,
         "y": 36
       },
-      "id": 9
+      "id": 10
     },
     {
       "type": "timeseries",
@@ -533,7 +583,7 @@
         "x": 12,
         "y": 36
       },
-      "id": 10
+      "id": 11
     },
     {
       "type": "row",
@@ -546,7 +596,7 @@
         "x": 0,
         "y": 44
       },
-      "id": 11
+      "id": 12
     },
     {
       "type": "timeseries",
@@ -645,7 +695,7 @@
         "x": 0,
         "y": 45
       },
-      "id": 12
+      "id": 13
     },
     {
       "type": "timeseries",
@@ -719,7 +769,7 @@
         "x": 0,
         "y": 52
       },
-      "id": 13
+      "id": 14
     },
     {
       "type": "timeseries",
@@ -793,7 +843,7 @@
         "x": 8,
         "y": 52
       },
-      "id": 14
+      "id": 15
     },
     {
       "type": "timeseries",
@@ -802,7 +852,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus"
       },
-      "description": "",
+      "description": "Seconds per segment. into loki-raw: the window's end until loki-raw acknowledged its last point (or raw-sink's 50 s timeout). The query time includes refused and timed-out queries; with several queries per window it is their sum.",
       "targets": [
         {
           "refId": "A",
@@ -852,7 +902,7 @@
         "x": 16,
         "y": 52
       },
-      "id": 15
+      "id": 16
     },
     {
       "type": "row",
@@ -865,7 +915,7 @@
         "x": 0,
         "y": 60
       },
-      "id": 16
+      "id": 17
     },
     {
       "type": "timeseries",
@@ -916,7 +966,7 @@
         "x": 0,
         "y": 61
       },
-      "id": 17
+      "id": 18
     },
     {
       "type": "timeseries",
@@ -967,7 +1017,7 @@
         "x": 8,
         "y": 61
       },
-      "id": 18
+      "id": 19
     },
     {
       "type": "timeseries",
@@ -1018,7 +1068,7 @@
         "x": 16,
         "y": 61
       },
-      "id": 19
+      "id": 20
     },
     {
       "type": "timeseries",
@@ -1069,7 +1119,7 @@
         "x": 0,
         "y": 73
       },
-      "id": 20
+      "id": 21
     },
     {
       "type": "timeseries",
@@ -1120,7 +1170,7 @@
         "x": 8,
         "y": 73
       },
-      "id": 21
+      "id": 22
     },
     {
       "type": "timeseries",
@@ -1171,7 +1221,7 @@
         "x": 16,
         "y": 73
       },
-      "id": 22
+      "id": 23
     },
     {
       "type": "timeseries",
@@ -1220,7 +1270,7 @@
         "x": 0,
         "y": 85
       },
-      "id": 23
+      "id": 24
     },
     {
       "type": "timeseries",
@@ -1269,7 +1319,7 @@
         "x": 8,
         "y": 85
       },
-      "id": 24
+      "id": 25
     },
     {
       "type": "timeseries",
@@ -1318,7 +1368,7 @@
         "x": 16,
         "y": 85
       },
-      "id": 25
+      "id": 26
     },
     {
       "type": "timeseries",
@@ -1361,7 +1411,7 @@
         "x": 0,
         "y": 97
       },
-      "id": 26
+      "id": 27
     },
     {
       "type": "timeseries",
@@ -1404,7 +1454,7 @@
         "x": 12,
         "y": 97
       },
-      "id": 27
+      "id": 28
     }
   ]
 }
