@@ -22,3 +22,6 @@ target
 /otel-arrow/
 .cache/
 benchmark-results/
+
+# Python bytecode
+__pycache__/
