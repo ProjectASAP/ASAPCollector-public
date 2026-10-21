@@ -122,7 +122,7 @@ Every boundary and its true cost:
 | the windowed sketches | owned `asap_sketchlib` structs | **resident, never serialized while live** |
 | inbound sketch (merge) | Binary col → ASAPv1 decode → struct → `merge()` | **one deserialize** per envelope |
 | proc → next, **estimate mode** | small Arrow gauge batch (series × quantiles) | **one small alloc**, then zero-copy |
-| proc → next, **sketch mode** | `serialize_to_bytes()` → bytes in Binary col | **one serialize** (sketch isn't columnar) |
+| proc → next, **sketch mode** | `to_asapv1()` → bytes in Binary col | **one serialize** (sketch isn't columnar) |
 | edge → central (gRPC) | the envelope batch | the **only real network copy** |
 | control (`Wakeup`/`Config`/…) | tiny `NodeControlMsg` | negligible |
 
