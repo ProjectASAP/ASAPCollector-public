@@ -139,11 +139,12 @@ The first answers appear about
 `docker compose -p tf-<use case> -f deploy/telemetry-functions/compose.yaml down`.
 
 The shared Grafana joins each demo's network, so stopping a demo leaves that network in
-place until Grafana is stopped too
+place until Grafana is stopped too (`compose down` then warns that the network is in use)
 (`docker compose -p tf-grafana -f deploy/telemetry-functions/grafana-compose.yaml down`).
 A demo started before this change runs as project `telemetry-functions` with its own Grafana
 on :3000: stop it with `docker compose -p telemetry-functions -f deploy/telemetry-functions/compose.yaml down`
 first.
+Keep the default project name `tf-<use case>`: the data sources address `tf-<use case>-prometheus-1`.
 
 Several demos can run side by side, each a full stack of its own (they share
 no Prometheus, so their metrics do not mix). `DEMO_SLOT=N` gives the Nth demo
