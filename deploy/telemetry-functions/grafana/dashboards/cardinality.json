@@ -14,10 +14,10 @@
       "title": "Three approaches to the same question: how many distinct values does each attribute have?",
       "options": {
         "mode": "html",
-        "content": "<table style=\"width:100%;border-collapse:separate;border-spacing:0 6px;border:none\"><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>generator-a/b</b><br><small>sources A and B</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>branch-a/b</b><br><small>HLL per attribute key per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>merge</b><br><small>both sources&#39; HLLs per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>detector</b><br><small>distinct counts with bounds; class per key</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>query: method=&quot;sketch&quot;</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-branch-a/b</b><br><small>value &rarr; count map per key per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-merge</b><br><small>adds both sources&#39; maps: every value</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-detector</b><br><small>exact distinct counts and classes</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>query: method=&quot;exact&quot;</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>raw-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>raw-sink-a/b</b><br><small>the only stage: every point into the log store</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>loki-raw</b><br><small>stores every raw point</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>query-job</b><br><small>LogQL distinct count per key once per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>answer: method=&quot;raw&quot;</small></div></td></tr></table><p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Four attributes: <code>http.route</code> and <code>http.method</code> stable, <code>k8s.pod.name</code> growing 5%/min, <code>user.id</code> unique per point. Traffic grows over 30 minutes: the rate per source doubles every 5 minutes (5k to 80k points/s), and at minute 10 <code>http.route</code> explodes from 20 to 20,000 values. query-job compares store and query with exact and times every approach&#39;s backend query.</small></p>"
+        "content": "<table style=\"width:100%;border-collapse:separate;border-spacing:0 6px;border:none\"><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>generator-a/b</b><br><small>sources A and B</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>branch-a/b</b><br><small>HLL per attribute key per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>merge</b><br><small>both sources&#39; HLLs per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>detector</b><br><small>distinct counts with bounds; class per key</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>query: method=&quot;sketch&quot;</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-branch-a/b</b><br><small>value &rarr; count map per key per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-merge</b><br><small>adds both sources&#39; maps: every value</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-detector</b><br><small>exact distinct counts and classes</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>query: method=&quot;exact&quot;</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>raw-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>raw-sink-a/b</b><br><small>the only stage: every point into the log store</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>loki-raw</b><br><small>stores every raw point</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>query-job</b><br><small>LogQL distinct count per key once per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>Prometheus</b><br><small>answer: method=&quot;raw&quot;</small></div></td></tr></table><p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Four attributes: <code>http.route</code> and <code>http.method</code> stable, <code>k8s.pod.name</code> growing 5%/min, <code>user.id</code> unique per point. Traffic grows over 30 minutes: the rate per source doubles every 5 minutes (5k to 80k points/s), and at minute 10 <code>http.route</code> explodes from 20 to 20,000 values. query-job compares store and query with exact and times every approach&#39;s backend query.</small></p><p style=\"margin:4px 0 0 0\"><small><b>Class</b> (per key and window, from the last 10 windows; exact and sketch use the same rules on their own counts, so a different class means the sketch's error crossed a threshold): <b>identifier-like</b> when distinct / points is at least 0.9, i.e. nearly every point has a new value; else <b>growing</b> when distinct is more than 20% above the mean of the last 10 windows (needs 3); else <b>stable</b>. Not classified below 100 points.</small></p>"
       },
       "gridPos": {
-        "h": 10,
+        "h": 11,
         "w": 24,
         "x": 0,
         "y": 0
@@ -33,14 +33,14 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 10
+        "y": 11
       },
       "id": 2
     },
     {
       "type": "table",
       "title": "Distinct values per attribute key, latest window store and query answered",
-      "description": "All from the latest window store and query has answered (query-job republishes sketch and exact for it), which lags behind when the log store is slow; the panel on the right shows which window. Error is (count - exact) / exact. Class: the detector's verdict from the last 10 windows (stable, growing, identifier-like). Store+query refused: 1 when Loki refused or timed out the key's LogQL query, which leaves its count empty.",
+      "description": "All from the latest window store and query has answered (query-job republishes sketch and exact for it), which lags behind when the log store is slow; the panel on the right shows which window. Error is (count - exact) / exact; when one method's window holds more than 1% fewer points than the other's (a source missed its merge), that method's count and class are left empty, and so are the errors that compare with it. Class: the detector's verdict from the last 10 windows (stable, growing, identifier-like). Store+query refused because: why Loki refused, timed out or returned nothing for the key's LogQL query, which leaves its count empty.",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"
@@ -90,7 +90,7 @@
         },
         {
           "refId": "H",
-          "expr": "max by (attribute_key) (asap_compare_failed)",
+          "expr": "max by (attribute_key, reason) (asap_compare_failed)",
           "format": "table",
           "instant": true
         }
@@ -110,6 +110,7 @@
               "Time": true,
               "Value #F": true,
               "Value #G": true,
+              "Value #H": true,
               "Time 1": true,
               "Time 2": true,
               "Time 3": true,
@@ -128,7 +129,7 @@
               "sketch_class": 5,
               "Value #C": 6,
               "Value #E": 7,
-              "Value #H": 8
+              "reason": 8
             },
             "renameByName": {
               "attribute_key": "Attribute key",
@@ -139,7 +140,7 @@
               "sketch_class": "Sketch class",
               "Value #C": "Store+query",
               "Value #E": "Store+query error",
-              "Value #H": "Store+query refused"
+              "reason": "Store+query refused because"
             }
           }
         }
@@ -262,7 +263,7 @@
         "h": 7,
         "w": 20,
         "x": 0,
-        "y": 11
+        "y": 12
       },
       "id": 3
     },
@@ -303,7 +304,7 @@
         "h": 7,
         "w": 4,
         "x": 20,
-        "y": 11
+        "y": 12
       },
       "id": 4
     },
@@ -329,7 +330,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 19
       },
       "id": 5
     },
@@ -342,7 +343,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 27
       },
       "id": 6
     },
@@ -385,7 +386,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 27
+        "y": 28
       },
       "id": 7
     },
@@ -428,7 +429,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 28
       },
       "id": 8
     },
@@ -441,7 +442,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 36
       },
       "id": 9
     },
@@ -535,7 +536,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 37
       },
       "id": 10
     },
@@ -581,7 +582,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 37
       },
       "id": 11
     },
@@ -594,7 +595,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 44
+        "y": 45
       },
       "id": 12
     },
@@ -693,7 +694,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 46
       },
       "id": 13
     },
@@ -767,7 +768,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 52
+        "y": 53
       },
       "id": 14
     },
@@ -841,7 +842,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 52
+        "y": 53
       },
       "id": 15
     },
@@ -900,7 +901,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 52
+        "y": 53
       },
       "id": 16
     },
@@ -913,7 +914,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 61
       },
       "id": 17
     },
@@ -964,7 +965,7 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 61
+        "y": 62
       },
       "id": 18
     },
@@ -1015,7 +1016,7 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 61
+        "y": 62
       },
       "id": 19
     },
@@ -1066,7 +1067,7 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 61
+        "y": 62
       },
       "id": 20
     },
@@ -1117,7 +1118,7 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 73
+        "y": 74
       },
       "id": 21
     },
@@ -1168,7 +1169,7 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 73
+        "y": 74
       },
       "id": 22
     },
@@ -1219,7 +1220,7 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 73
+        "y": 74
       },
       "id": 23
     },
@@ -1268,7 +1269,7 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 85
+        "y": 86
       },
       "id": 24
     },
@@ -1317,7 +1318,7 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 85
+        "y": 86
       },
       "id": 25
     },
@@ -1366,7 +1367,7 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 85
+        "y": 86
       },
       "id": 26
     },
@@ -1409,7 +1410,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 97
+        "y": 98
       },
       "id": 27
     },
@@ -1452,7 +1453,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 97
+        "y": 98
       },
       "id": 28
     }
