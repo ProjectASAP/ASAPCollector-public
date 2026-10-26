@@ -32,6 +32,7 @@ slot=${DEMO_SLOT:-0}
 if [ "$slot" != 0 ]; then
   export COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-tf-$USE_CASE}
   [[ $slot =~ ^[0-9]+$ ]] || { echo "DEMO_SLOT=$slot is not a number" >&2; exit 1; }
+  slot=$((10#$slot))
   if [ $((18 * slot + 17)) -ge "$(nproc)" ]; then
     echo "DEMO_SLOT=$slot needs CPUs $((18 * slot))-$((18 * slot + 17)); this host has $(nproc) (slots 0-$(($(nproc) / 18 - 1)))" >&2
     exit 1
