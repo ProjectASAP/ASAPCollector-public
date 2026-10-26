@@ -125,6 +125,23 @@ Open `http://localhost:3000/d/asap-<use case>`. The first answers appear about
 65 seconds after the first full minute. Stop with
 `docker compose -f deploy/telemetry-functions/compose.yaml down`.
 
+Several demos can run side by side, each a full stack of its own (they share
+no Prometheus, so their metrics do not mix). `DEMO_SLOT=N` gives the Nth demo
+its own compose project (`tf-<use case>`), host ports shifted by N (Grafana
+3000+N, Prometheus 9090+N) and CPUs 18N to 18N+17; `NO_BUILD=1` reuses the
+built image:
+
+```sh
+USE_CASE=cardinality deploy/telemetry-functions/run.sh
+NO_BUILD=1 DEMO_SLOT=1 USE_CASE=topk deploy/telemetry-functions/run.sh   # Grafana on :3001
+docker compose -p tf-topk -f deploy/telemetry-functions/compose.yaml down
+```
+
+Each demo also needs its own `LOKI_RAW_MEMORY` (default 16g) and disk for
+`loki-raw`. Stages on different slots can share a physical core when the host
+has hyper-threads (CPU n and n+28 on a 56-CPU host), so run one demo at a time
+for capacity measurements.
+
 ## End-to-end acceptance
 
 ```sh
