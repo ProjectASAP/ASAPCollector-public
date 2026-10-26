@@ -20,7 +20,7 @@ Once per window, after the window is complete in each pipeline:
 With each raw answer it also republishes the sketch and exact answers of the
 same window (`asap_compare_topk`, `asap_compare_distinct`,
 `asap_compare_class`, labelled `method`; `asap_compare_failed` for refused
-keys) and that window's end (`asap_compare_window_end`, ms). These carry no
+keys; the cardinality exact answer is left out when its window holds more than 1% fewer or more points than the sketch's) and that window's end (`asap_compare_window_end`, ms). These carry no
 timestamp, so a dashboard always finds the latest compared window however far
 store and query lags behind.
 
@@ -52,6 +52,8 @@ USE_CASE = os.environ.get("USE_CASE", "topk")
 WINDOW_S = int(os.environ.get("WINDOW_SECONDS", "60"))
 K = int(os.environ.get("K", "20"))
 PHI = float(os.environ.get("PHI", "0.01"))
+# Largest relative difference between exact's and sketch's points per window for exact to count as the truth.
+POINTS_TOLERANCE = 0.01
 RAW_SOURCES = int(os.environ.get("RAW_SOURCES", "2"))
 PORT = int(os.environ.get("PORT", "9100"))
 ATTRIBUTE = "http.route"
@@ -157,6 +159,11 @@ def raw_distinct(end):
     failed = []
     compared = [({"method": m, "attribute_key": r["attribute_key"]}, v) for m in ("sketch", "exact")
                 for r, v in at_window(f'asap_distinct{{method="{m}",bound="estimate"}}', end)]
+    points = {m: max((v for _, v in at_window(f'asap_points{{method="{m}"}}', end)), default=0.0)
+              for m in ("sketch", "exact")}
+    if abs(points["exact"] - points["sketch"]) > POINTS_TOLERANCE * points["sketch"]:
+        # exact's window lost points (a source missed the merge): its counts are not the truth
+        compared = [(labels, v) for labels, v in compared if labels["method"] != "exact"]
     classes = [({"method": m, "attribute_key": r["attribute_key"], "state": r["state"]}, 1.0)
                for m in ("sketch", "exact")
                for r, v in at_window(f'asap_cardinality_state{{method="{m}"}}', end) if v == 1]
@@ -169,12 +176,12 @@ def raw_distinct(end):
         try:
             rows = loki_at_window_end(query, end)
             if not rows:
-                raise ValueError("no result")
+                raise ValueError("no result from loki-raw")
         except Exception as e:  # refused, timed out or empty: no answer for this key
             total += time.monotonic() - t0
             print(f"query_job: {key} at {end}: {e}", flush=True)
             put("asap_query_failed", labels, 1.0, end)
-            failed.append(({"attribute_key": key}, 1.0))
+            failed.append(({"attribute_key": key, "reason": str(e)}, 1.0))
             continue
         total += time.monotonic() - t0
         distinct = float(rows[0]["value"][1])

@@ -101,6 +101,15 @@ the JSON.
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
 | `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, freshness breakdown, CPU/memory per component and per approach, bits per second into each stage |
 
+**Cardinality classes.** Each detector classifies every attribute key per
+window from its last 10 windows (`cardinality:` in `detector.yaml`):
+`identifier-like` when distinct / points is at least `identifier_ratio` (0.9),
+that is nearly every point has a new value; otherwise `growing` when distinct
+is more than `growth` (20%) above the mean of the baseline windows (at least
+3); otherwise `stable`. Keys with fewer than 100 points are not classified.
+Exact and sketch apply the same rules to their own distinct counts, so
+differing classes show where the sketch's error crosses a threshold.
+
 Answers reach Prometheus over OTLP as `asap_quantile`, `asap_distinct`,
 `asap_topk`, `asap_points`, `asap_cardinality_state`, `asap_drift_ks`,
 `asap_drift`, `asap_topk_new` and `asap_answer_delay`, labelled

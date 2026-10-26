@@ -343,10 +343,15 @@ def cardinality():
             "<code>user.id</code> unique per point. Traffic grows over 30 minutes: the rate per source doubles every "
             "5 minutes (5k to 80k points/s), and at minute 10 <code>http.route</code> explodes from 20 to 20,000 "
             "values. query-job compares store and query with exact and times every approach&#39;s backend "
-            "query.</small></p>")
+            "query.</small></p>"
+            "<p style=\"margin:4px 0 0 0\"><small><b>Class</b> (per key and window, from the last 10 windows; "
+            "exact and sketch use the same rules on their own counts, so a different class means the sketch's error "
+            "crossed a threshold): <b>identifier-like</b> when distinct / points is at least 0.9, i.e. nearly every "
+            "point has a new value; else <b>growing</b> when distinct is more than 20% above the mean of the last "
+            "10 windows (needs 3); else <b>stable</b>. Not classified below 100 points.</small></p>")
     add({"type": "text", "title": "Three approaches to the same question: how many distinct values does each attribute have?",
-         "options": {"mode": "html", "content": html}}, 24, 10, 0)
-    y += 10
+         "options": {"mode": "html", "content": html}}, 24, 11, 0)
+    y += 11
 
     row("Answers")
 
@@ -363,17 +368,17 @@ def cardinality():
 
     compare = [distinct("exact"), distinct("sketch"), distinct("raw"), error("sketch"), error("raw"),
                state("exact", "exact_class"), state("sketch", "sketch_class"),
-               "max by (attribute_key) (asap_compare_failed)"]
+               "max by (attribute_key, reason) (asap_compare_failed)"]
     columns = {"attribute_key": "Attribute key", "Value #A": "Exact distinct", "exact_class": "Exact class",
                "Value #B": "Sketch estimate", "Value #D": "Sketch error", "sketch_class": "Sketch class",
-               "Value #C": "Store+query", "Value #E": "Store+query error", "Value #H": "Store+query refused"}
-    hidden = ["Time", "Value #F", "Value #G"] + [f"Time {i}" for i in range(1, 9)]
+               "Value #C": "Store+query", "Value #E": "Store+query error", "reason": "Store+query refused because"}
+    hidden = ["Time", "Value #F", "Value #G", "Value #H"] + [f"Time {i}" for i in range(1, 9)]
     add({"type": "table", "title": "Distinct values per attribute key, latest window store and query answered",
          "description": "All from the latest window store and query has answered (query-job republishes sketch and "
                         "exact for it), which lags behind when the log store is slow; the panel on the right shows "
-                        "which window. Error is (count - exact) / exact. Class: the detector's verdict from the last 10 windows "
-                        "(stable, growing, identifier-like). Store+query refused: 1 when Loki refused or timed out "
-                        "the key's LogQL query, which leaves its count empty.",
+                        "which window. Error is (count - exact) / exact; when exact's window holds more than 1% fewer or more points than the sketch's (a source missed the exact merge), exact and the errors are left empty. Class: the detector's verdict from the last 10 windows "
+                        "(stable, growing, identifier-like). Store+query refused because: why Loki refused, timed out "
+                        "or returned nothing for the key's LogQL query, which leaves its count empty.",
          "datasource": PROM,
          "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
                      for i, e in enumerate(compare)],
