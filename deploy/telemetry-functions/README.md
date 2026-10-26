@@ -133,9 +133,17 @@ USE_CASE=cardinality deploy/telemetry-functions/run.sh   # DOCKER_COMMAND="sudo 
 Open `http://localhost:3000/d/asap-<use case>`: one Grafana (`grafana-compose.yaml`,
 project `tf-grafana`) shows every demo, and each dashboard reads its own demo's
 Prometheus and Loki (`tf-<use case>-prometheus-1`), so a dashboard stays empty
-until its demo runs. The first answers appear about
+until its demo runs.
+The first answers appear about
 65 seconds after the first full minute. Stop with
 `docker compose -p tf-<use case> -f deploy/telemetry-functions/compose.yaml down`.
+
+The shared Grafana joins each demo's network, so stopping a demo leaves that network in
+place until Grafana is stopped too
+(`docker compose -p tf-grafana -f deploy/telemetry-functions/grafana-compose.yaml down`).
+A demo started before this change runs as project `telemetry-functions` with its own Grafana
+on :3000: stop it with `docker compose -p telemetry-functions -f deploy/telemetry-functions/compose.yaml down`
+first.
 
 Several demos can run side by side, each a full stack of its own (they share
 no Prometheus, so their metrics do not mix). `DEMO_SLOT=N` gives the Nth demo
