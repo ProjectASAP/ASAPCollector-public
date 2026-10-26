@@ -166,7 +166,7 @@ def incomplete_methods(points):
 def refusal_reason(error):
     """Why a query got no answer, as one line: the HTTP status and Loki's message, or the error."""
     if isinstance(error, urllib.error.HTTPError):
-        message = error.read().decode("utf-8", "replace").strip().splitlines()
+        message = error.read(1024).decode("utf-8", "replace").strip().splitlines()
         return f"HTTP {error.code} {error.reason}" + (f": {message[0][:200]}" if message else "")
     return f"{type(error).__name__}: {error}"
 
