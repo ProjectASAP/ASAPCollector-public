@@ -13,7 +13,7 @@
 # and SCENARIO_START, so all three pipelines get identical points.
 # PIPELINES is the use case's stage-config directory (run.sh sets it from
 # USE_CASE), COMMON the stages every use case shares; CPU_* variables move a
-# stage to another core. Prometheus, Grafana and Loki are the observers.
+# stage to another core. Prometheus and Loki are the observers; Grafana is shared (grafana-compose.yaml).
 x-collector: &collector
   image: asap-collector:local
   restart: "no"
@@ -159,15 +159,6 @@ services:
     ports: ["127.0.0.1:${LOKI_RAW_PORT:-3101}:3100"]
     volumes: ["./loki-raw.yaml:/etc/loki/loki-raw.yaml:ro"]
     mem_limit: "${LOKI_RAW_MEMORY:-16g}"
-  grafana:
-    image: grafana/grafana:12.1.0
-    ports: ["127.0.0.1:${GRAFANA_PORT:-3000}:3000"]
-    environment:
-      GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
-    volumes:
-      - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
   loki:
     image: grafana/loki:3.5.0
     command: ["-config.file=/etc/loki/local-config.yaml"]
