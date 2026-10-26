@@ -40,7 +40,7 @@
     {
       "type": "table",
       "title": "Distinct values per attribute key, latest window store and query answered",
-      "description": "All from the latest window store and query has answered (query-job republishes sketch and exact for it), which lags behind when the log store is slow; the panel on the right shows which window. Error is (count - exact) / exact; when exact's window holds more than 1% fewer or more points than the sketch's (a source missed the exact merge), exact and the errors are left empty. Class: the detector's verdict from the last 10 windows (stable, growing, identifier-like). Store+query refused because: why Loki refused, timed out or returned nothing for the key's LogQL query, which leaves its count empty.",
+      "description": "All from the latest window store and query has answered (query-job republishes sketch and exact for it), which lags behind when the log store is slow; the panel on the right shows which window. Error is (count - exact) / exact; when one method's window holds more than 1% fewer points than the other's (a source missed its merge), that method's count and class are left empty, and so are the errors that compare with it. Class: the detector's verdict from the last 10 windows (stable, growing, identifier-like). Store+query refused because: why Loki refused, timed out or returned nothing for the key's LogQL query, which leaves its count empty.",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus"

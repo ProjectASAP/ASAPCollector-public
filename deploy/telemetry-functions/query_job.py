@@ -20,7 +20,9 @@ Once per window, after the window is complete in each pipeline:
 With each raw answer it also republishes the sketch and exact answers of the
 same window (`asap_compare_topk`, `asap_compare_distinct`,
 `asap_compare_class`, labelled `method`; `asap_compare_failed` for refused
-keys; the cardinality exact answer is left out when its window holds more than 1% fewer or more points than the sketch's) and that window's end (`asap_compare_window_end`, ms). These carry no
+keys, with the reason; the cardinality answers of a method whose window holds more than 1% fewer
+points than the other's, because a source missed its merge, are left out) and that window's end
+(`asap_compare_window_end`, ms). These carry no
 timestamp, so a dashboard always finds the latest compared window however far
 store and query lags behind.
 
@@ -42,6 +44,7 @@ import os
 import resource
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,7 +55,7 @@ USE_CASE = os.environ.get("USE_CASE", "topk")
 WINDOW_S = int(os.environ.get("WINDOW_SECONDS", "60"))
 K = int(os.environ.get("K", "20"))
 PHI = float(os.environ.get("PHI", "0.01"))
-# Largest relative difference between exact's and sketch's points per window for exact to count as the truth.
+# Largest relative difference between sketch's and exact's points in a window for both to be compared.
 POINTS_TOLERANCE = 0.01
 RAW_SOURCES = int(os.environ.get("RAW_SOURCES", "2"))
 PORT = int(os.environ.get("PORT", "9100"))
@@ -150,6 +153,24 @@ def loki_at_window_end(query, end):
     return get(LOKI_RAW, "/loki/api/v1/query", {"query": query, "time": str(end * 1_000_000_000 - 1_000_000)})
 
 
+def incomplete_methods(points):
+    """Methods whose window holds more than POINTS_TOLERANCE fewer points than the other's: a
+    source missed their merge, so their counts are too small. Nothing is judged when a side
+    has no points yet."""
+    sketch, exact = points["sketch"], points["exact"]
+    if min(sketch, exact) <= 0 or abs(sketch - exact) <= POINTS_TOLERANCE * max(sketch, exact):
+        return set()
+    return {"sketch"} if sketch < exact else {"exact"}
+
+
+def refusal_reason(error):
+    """Why a query got no answer, as one line: the HTTP status and Loki's message, or the error."""
+    if isinstance(error, urllib.error.HTTPError):
+        message = error.read().decode("utf-8", "replace").strip().splitlines()
+        return f"HTTP {error.code} {error.reason}" + (f": {message[0][:200]}" if message else "")
+    return f"{type(error).__name__}: {error}"
+
+
 def raw_distinct(end):
     """Distinct values per attribute key of the window from loki-raw; True when done."""
     exact = at_window('asap_distinct{method="exact"}', end)
@@ -161,12 +182,12 @@ def raw_distinct(end):
                 for r, v in at_window(f'asap_distinct{{method="{m}",bound="estimate"}}', end)]
     points = {m: max((v for _, v in at_window(f'asap_points{{method="{m}"}}', end)), default=0.0)
               for m in ("sketch", "exact")}
-    if abs(points["exact"] - points["sketch"]) > POINTS_TOLERANCE * points["sketch"]:
-        # exact's window lost points (a source missed the merge): its counts are not the truth
-        compared = [(labels, v) for labels, v in compared if labels["method"] != "exact"]
+    incomplete = incomplete_methods(points)
+    compared = [(labels, v) for labels, v in compared if labels["method"] not in incomplete]
     classes = [({"method": m, "attribute_key": r["attribute_key"], "state": r["state"]}, 1.0)
                for m in ("sketch", "exact")
-               for r, v in at_window(f'asap_cardinality_state{{method="{m}"}}', end) if v == 1]
+               for r, v in at_window(f'asap_cardinality_state{{method="{m}"}}', end)
+               if v == 1 and m not in incomplete]
     total = 0.0
     for key in sorted({r["attribute_key"] for r, _ in exact}):
         label = key.replace(".", "_")
@@ -179,9 +200,10 @@ def raw_distinct(end):
                 raise ValueError("no result from loki-raw")
         except Exception as e:  # refused, timed out or empty: no answer for this key
             total += time.monotonic() - t0
-            print(f"query_job: {key} at {end}: {e}", flush=True)
+            reason = refusal_reason(e)
+            print(f"query_job: {key} at {end}: {reason}", flush=True)
             put("asap_query_failed", labels, 1.0, end)
-            failed.append(({"attribute_key": key, "reason": str(e)}, 1.0))
+            failed.append(({"attribute_key": key, "reason": reason}, 1.0))
             continue
         total += time.monotonic() - t0
         distinct = float(rows[0]["value"][1])

@@ -106,7 +106,7 @@ window from its last 10 windows (`cardinality:` in `detector.yaml`):
 `identifier-like` when distinct / points is at least `identifier_ratio` (0.9),
 that is nearly every point has a new value; otherwise `growing` when distinct
 is more than `growth` (20%) above the mean of the baseline windows (at least
-3); otherwise `stable`. Keys with fewer than 100 points are not classified.
+3); otherwise `stable`. Keys with fewer than `min_points` (default 100, not set in `detector.yaml`) points are not classified.
 Exact and sketch apply the same rules to their own distinct counts, so
 differing classes show where the sketch's error crosses a threshold.
 
