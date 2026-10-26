@@ -43,7 +43,7 @@
       "description": "All from the latest window store and query has answered (query-job republishes sketch and exact for it), which lags behind when the log store is slow; the panel on the right shows which window. Error is (count - exact) / exact; when one method's window holds more than 1% fewer points than the other's (a source missed its merge), that method's count and class are left empty, and so are the errors that compare with it. Class: the detector's verdict from the last 10 windows (stable, growing, identifier-like). Store+query refused because: why Loki refused, timed out or returned nothing for the key's LogQL query, which leaves its count empty.",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "targets": [
         {
@@ -272,7 +272,7 @@
       "title": "Window compared (end)",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "End of the window the table compares: the latest one store and query has answered.",
       "targets": [
@@ -313,7 +313,7 @@
       "title": "Class changes (Loki events from both detectors)",
       "datasource": {
         "type": "loki",
-        "uid": "asap-loki"
+        "uid": "asap-loki-cardinality"
       },
       "targets": [
         {
@@ -352,7 +352,7 @@
       "title": "Sketch (HLL): relative error of the distinct count per key",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "|estimate - exact| / exact per window.",
       "targets": [
@@ -395,7 +395,7 @@
       "title": "Store and query: relative error of the distinct count per key",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "|estimate - exact| / exact per window. Store and query is exact while every point reaches the log store.",
       "targets": [
@@ -451,7 +451,7 @@
       "title": "End-to-end throughput: points per second each window delivered to the end of its pipeline",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Both sources together. The generators skip batches a pipeline cannot take, so a pipeline that falls behind delivers less. Store and query: points loki-raw acknowledged within 50 s of the window's end. A pipeline that stops reporting shows a gap after 2 minutes.",
       "targets": [
@@ -545,7 +545,7 @@
       "title": "Data shape: distinct values per key per window (exact), log scale",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "",
       "targets": [
@@ -604,7 +604,7 @@
       "title": "Total freshness of a window's first sample",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Window wait (up to 60 s for the first sample) + the pipeline until the answer is stored + the backend query that returns it.",
       "targets": [
@@ -703,7 +703,7 @@
       "title": "Sketch: latency breakdown per window",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
       "targets": [
@@ -777,7 +777,7 @@
       "title": "Exact: latency breakdown per window",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
       "targets": [
@@ -851,7 +851,7 @@
       "title": "Store and query: latency breakdown per window",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Seconds per segment. into loki-raw: the window's end until loki-raw acknowledged its last point (or raw-sink's 50 s timeout). The query time includes refused and timed-out queries; with several queries per window it is their sum.",
       "targets": [
@@ -923,7 +923,7 @@
       "title": "Sketch: CPU cores per component",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Pipeline stages from the engine's CPU time; loki-raw and query-job from their process CPU time. total: the whole approach.",
       "targets": [
@@ -974,7 +974,7 @@
       "title": "Exact: CPU cores per component",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Pipeline stages from the engine's CPU time; loki-raw and query-job from their process CPU time. total: the whole approach.",
       "targets": [
@@ -1025,7 +1025,7 @@
       "title": "Store and query: CPU cores per component",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Pipeline stages from the engine's CPU time; loki-raw and query-job from their process CPU time. total: the whole approach.",
       "targets": [
@@ -1076,7 +1076,7 @@
       "title": "Sketch: resident memory per component",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "total: the whole approach.",
       "targets": [
@@ -1127,7 +1127,7 @@
       "title": "Exact: resident memory per component",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "total: the whole approach.",
       "targets": [
@@ -1178,7 +1178,7 @@
       "title": "Store and query: resident memory per component",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "total: the whole approach.",
       "targets": [
@@ -1229,7 +1229,7 @@
       "title": "Sketch: bits per second into each stage",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows. into loki-raw: raw log records.",
       "targets": [
@@ -1278,7 +1278,7 @@
       "title": "Exact: bits per second into each stage",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows. into loki-raw: raw log records.",
       "targets": [
@@ -1327,7 +1327,7 @@
       "title": "Store and query: bits per second into each stage",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows. into loki-raw: raw log records.",
       "targets": [
@@ -1376,7 +1376,7 @@
       "title": "Shared by all three: Prometheus CPU cores",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "Prometheus holds the answers of all three approaches and the monitoring data.",
       "targets": [
@@ -1419,7 +1419,7 @@
       "title": "Shared by all three: Prometheus resident memory",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-cardinality"
       },
       "description": "",
       "targets": [

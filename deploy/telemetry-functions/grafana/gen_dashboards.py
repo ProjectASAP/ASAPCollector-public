@@ -6,8 +6,8 @@ import json
 import sys
 
 USE_CASE, OUT = sys.argv[1], sys.argv[2]
-PROM = {"type": "prometheus", "uid": "asap-prometheus"}
-LOKI = {"type": "loki", "uid": "asap-loki"}
+PROM = {"type": "prometheus", "uid": f"asap-prometheus-{USE_CASE}"}
+LOKI = {"type": "loki", "uid": f"asap-loki-{USE_CASE}"}
 COLORS = {"sketch": "#5794f2", "exact": "#ff9830", "store and query": "#8e8e8e",
           "raw": "#8e8e8e", "Prometheus (shared)": "#73bf69"}
 panels = []

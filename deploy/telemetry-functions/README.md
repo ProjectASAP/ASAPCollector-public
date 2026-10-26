@@ -130,19 +130,22 @@ default 16g). From the repository root:
 USE_CASE=cardinality deploy/telemetry-functions/run.sh   # DOCKER_COMMAND="sudo docker" if needed
 ```
 
-Open `http://localhost:3000/d/asap-<use case>`. The first answers appear about
+Open `http://localhost:3000/d/asap-<use case>`: one Grafana (`grafana-compose.yaml`,
+project `tf-grafana`) shows every demo, and each dashboard reads its own demo's
+Prometheus and Loki (`tf-<use case>-prometheus-1`), so a dashboard stays empty
+until its demo runs. The first answers appear about
 65 seconds after the first full minute. Stop with
-`docker compose -f deploy/telemetry-functions/compose.yaml down`.
+`docker compose -p tf-<use case> -f deploy/telemetry-functions/compose.yaml down`.
 
 Several demos can run side by side, each a full stack of its own (they share
 no Prometheus, so their metrics do not mix). `DEMO_SLOT=N` gives the Nth demo
-its own compose project (`tf-<use case>`), host ports shifted by N (Grafana
-3000+N, Prometheus 9090+N) and CPUs 18N to 18N+17; `NO_BUILD=1` reuses the
-built image:
+host ports shifted by N (Prometheus 9090+N, Loki 3100+2N, loki-raw 3101+2N) and
+CPUs 18N to 18N+17; `NO_BUILD=1` reuses the built image. Grafana stays on
+`:3000` for all of them:
 
 ```sh
 USE_CASE=cardinality deploy/telemetry-functions/run.sh
-NO_BUILD=1 DEMO_SLOT=1 USE_CASE=topk deploy/telemetry-functions/run.sh   # Grafana on :3001
+NO_BUILD=1 DEMO_SLOT=1 USE_CASE=topk deploy/telemetry-functions/run.sh   # dashboard /d/asap-topk on the same Grafana
 docker compose -p tf-topk -f deploy/telemetry-functions/compose.yaml down
 ```
 

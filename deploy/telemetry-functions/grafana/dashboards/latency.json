@@ -15,7 +15,7 @@
         "type": "query",
         "datasource": {
           "type": "prometheus",
-          "uid": "asap-prometheus"
+          "uid": "asap-prometheus-latency"
         },
         "query": {
           "query": "label_values(asap_quantile, http_route)",
@@ -52,7 +52,7 @@
       "title": "p99 latency for $route: sketch with bound vs exact",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-latency"
       },
       "gridPos": {
         "h": 8,
@@ -185,7 +185,7 @@
       "title": "p50 latency for $route: sketch with bound vs exact",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-latency"
       },
       "gridPos": {
         "h": 8,
@@ -318,7 +318,7 @@
       "title": "Relative error of the sketch p99 vs exact (routes with > 20,000 points per window)",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-latency"
       },
       "gridPos": {
         "h": 8,
@@ -350,7 +350,7 @@
       "description": "Points in each 1-minute window that reached the end of the pipeline, divided by 60 s: for sketch and exact the points their detector answered for, for raw the points loki-raw acknowledged within 50 s of the window's end. Offered: 2 sources x 20,000 points/s. A pipeline below the offered line is dropping or falling behind.",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-latency"
       },
       "gridPos": {
         "h": 8,
@@ -430,7 +430,7 @@
       "title": "Window completion delay: seconds from a window's end until its result is complete",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-latency"
       },
       "gridPos": {
         "h": 8,
@@ -508,7 +508,7 @@
       "title": "CPU cores per pipeline (all stages but the generators)",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-latency"
       },
       "gridPos": {
         "h": 8,
@@ -585,7 +585,7 @@
       "title": "Bytes received per pipeline (all stages but the generators), log scale",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-latency"
       },
       "gridPos": {
         "h": 8,
@@ -666,7 +666,7 @@
       "title": "Resident memory per pipeline (all stages but the generators)",
       "datasource": {
         "type": "prometheus",
-        "uid": "asap-prometheus"
+        "uid": "asap-prometheus-latency"
       },
       "gridPos": {
         "h": 8,

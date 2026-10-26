@@ -2,7 +2,7 @@
 """End-to-end acceptance of the telemetry functions on real collector containers.
 
 For each use case: start the three pipelines (sketch, exact, raw) plus
-Prometheus, Loki and Grafana with `docker compose`, wait for the scenario to
+Prometheus and Loki with `docker compose`, wait for the scenario to
 play out, then check the sketch answers against the exact pipeline's ground
 truth through Prometheus and Loki, and that every pipeline reports its window
 completion delay. Prints one line per check and exits non-zero if any check
