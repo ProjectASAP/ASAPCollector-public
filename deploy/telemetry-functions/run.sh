@@ -4,6 +4,7 @@
 # DEMO_SLOT=N (default 0) runs another demo beside the others: its own compose
 # project (tf-<use case>), host ports +N and CPUs +18*N (18 per demo). Stop it with
 #   $DOCKER_COMMAND compose -p tf-<use case> -f deploy/telemetry-functions/compose.yaml down
+# One demo per use case (a second start of the same use case restarts it).
 # NO_BUILD=1 reuses the asap-collector:local image already built.
 # DOCKER_COMMAND="sudo -n docker" when Docker needs sudo. Stop with:
 #   $DOCKER_COMMAND compose -f deploy/telemetry-functions/compose.yaml down
@@ -12,7 +13,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 target=${CARGO_TARGET_DIR:-"$repo_root/asap-precompute-rs/target"}
 read -r -a docker <<< "${DOCKER_COMMAND:-docker}"
-if [ -z "${NO_BUILD:-}" ]; then
+if [ "${NO_BUILD:-}" != 1 ]; then
   cargo build --manifest-path asap-precompute-rs/Cargo.toml --release --features collector --bin asap-collector
   context=$(mktemp -d)
   trap 'rm -rf "$context"' EXIT
@@ -30,6 +31,11 @@ export SCENARIO_START=${SCENARIO_START:-$(($(date +%s) + 10))}
 slot=${DEMO_SLOT:-0}
 if [ "$slot" != 0 ]; then
   export COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-tf-$USE_CASE}
+  [[ $slot =~ ^[0-9]+$ ]] || { echo "DEMO_SLOT=$slot is not a number" >&2; exit 1; }
+  if [ $((18 * slot + 17)) -ge "$(nproc)" ]; then
+    echo "DEMO_SLOT=$slot needs CPUs $((18 * slot))-$((18 * slot + 17)); this host has $(nproc) (slots 0-$(($(nproc) / 18 - 1)))" >&2
+    exit 1
+  fi
   export GRAFANA_PORT=${GRAFANA_PORT:-$((3000 + slot))} PROMETHEUS_PORT=${PROMETHEUS_PORT:-$((9090 + slot))}
   export LOKI_PORT=${LOKI_PORT:-$((3100 + 2 * slot))} LOKI_RAW_PORT=${LOKI_RAW_PORT:-$((3101 + 2 * slot))}
   cpu=$((18 * slot))

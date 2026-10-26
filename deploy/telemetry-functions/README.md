@@ -137,6 +137,10 @@ NO_BUILD=1 DEMO_SLOT=1 USE_CASE=topk deploy/telemetry-functions/run.sh   # Grafa
 docker compose -p tf-topk -f deploy/telemetry-functions/compose.yaml down
 ```
 
+A demo is one compose project per use case, so a use case runs once at a time: starting it
+again restarts it. `acceptance.py` and `experiments.py` use the default project and ports, so stop
+the demos before running them. Slots must fit the host: slot N needs CPUs 18N to 18N+17.
+
 Each demo also needs its own `LOKI_RAW_MEMORY` (default 16g) and disk for
 `loki-raw`. Stages on different slots can share a physical core when the host
 has hyper-threads (CPU n and n+28 on a 56-CPU host), so run one demo at a time
