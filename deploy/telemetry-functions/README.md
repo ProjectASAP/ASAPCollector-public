@@ -52,7 +52,7 @@ back down every 40 minutes, again and again: 5k, 10k, 20k, 40k, 80k, 40k, 20k,
 
 | `USE_CASE` | Question | Traffic | Sketch |
 | --- | --- | --- | --- |
-| `topk` | Which client addresses sent the most requests (top talkers), and which are new? | client addresses drawn Zipf(1.0) over 20 million IPv4 addresses: about 1 million distinct per 5 minutes at the lowest rate, about 7 million at the highest; a new client, `203.0.113.7`, takes 15% of traffic at minute 10 | Count-Min (4 x 512) + top-20 list |
+| `topk` | Which client addresses sent the most requests (top talkers), and which are new? | client addresses drawn Zipf(1.0) over 20 million IPv4 addresses: about 1 million distinct per 5 minutes at the lowest rate, about 7 million at the highest; a new client, `203.0.113.7`, takes 15% of traffic at minute 10 | Count-Min (4 x 8192) + top-20 list |
 | `cardinality` | How many distinct values does each attribute have, and is it stable, growing or identifier-like? | `user.id` unique per point, `k8s.pod.name` growing 5% per minute, `http.route` and `http.method` fixed; `http.route` explodes from 20 to 20,000 values at minute 10 | one HyperLogLog per attribute |
 | `latency` | p50 / p99 latency per route | latency over 20 routes | KLL per route |
 | `drift` | Which route's latency distribution changed? | `http.route-3`'s median triples at minute 10 | KLL per route |
