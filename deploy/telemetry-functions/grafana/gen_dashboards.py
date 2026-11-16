@@ -13,12 +13,6 @@ panels = []
 y = 0
 
 
-def color_overrides(names):
-    return [{"matcher": {"id": "byName", "options": n},
-             "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS[n]}}]}
-            for n in names if n in COLORS]
-
-
 def add(panel, w, h, x):
     panel["gridPos"] = {"h": h, "w": w, "x": x, "y": y}
     panel["id"] = len(panels) + 1
@@ -29,27 +23,6 @@ def row(title):
     global y
     add({"type": "row", "title": title, "collapsed": False, "panels": []}, 24, 1, 0)
     y += 1
-
-
-def ts(title, targets, unit=None, desc="", stack=False, log=False, w=12, x=0, h=8,
-       min0=True, names=(), last=False):
-    custom = {"spanNulls": True}
-    if stack:
-        custom.update({"stacking": {"mode": "normal"}, "fillOpacity": 60,
-                       "lineInterpolation": "stepAfter", "lineWidth": 1})
-    if log:
-        custom["scaleDistribution"] = {"type": "log", "log": 10}
-    defaults = {"custom": custom}
-    if unit:
-        defaults["unit"] = unit
-    if min0 and not log:
-        defaults["min"] = 0
-    add({"type": "timeseries", "title": title, "datasource": PROM, "description": desc,
-         "targets": [dict(refId=chr(65 + i), expr=e, legendFormat=l) for i, (e, l) in enumerate(targets)],
-         "fieldConfig": {"defaults": defaults, "overrides": color_overrides(names)},
-         "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]}
-                     if last else {"displayMode": "list", "placement": "bottom"},
-                     "tooltip": {"mode": "multi", "sort": "none"}}}, w, h, x)
 
 
 def stat(title, expr, legend, desc, w, x, h=4):
@@ -248,51 +221,49 @@ def topk():
 
 
 def timing(raw_query):
+    """One stacked bar per approach: from a point's generation to the query result
+    (p50 over the window's points), split into window wait, delay after the
+    window's end, and the query."""
     global y
-    row("From data generated to query result, per window (the same definitions for all three)")
-    methods = (("sketch", "sketch"), ("exact", "exact"), ("raw", "store and query"))
-    names = tuple(n for _, n in methods)
-
-    def quantiles(metric):
-        return [(f'max({metric}{{method="{m}",quantile="{q}"}})', f"{n} p{int(float(q) * 100)}")
-                for m, n in methods for q in ("0.5", "0.99")]
-
-    ts("1. Delay before data is available for query (data generated -> available)",
-       quantiles("asap_data_available_seconds"), unit="s", w=8, x=0, h=9, last=True, log=True,
-       desc="Per point, p50 and p99 over the window's points: from its generation until its window's data can be "
-       "queried. Every point first waits for its window to end (up to 60 s). sketch and exact: then until the "
-       "detector sent the window's answer to its Prometheus. store and query: then until prometheus-raw "
-       "acknowledged the window's last raw point.")
-    ts("2. Query latency (the query that returns the window's answer)",
-       [(f'max(asap_query_seconds{{method="{m}"}})', n) for m, n in methods],
-       unit="s", w=8, x=8, h=9, log=True, names=names, last=True,
-       desc="Measured by query-job once per window against each approach's own Prometheus. sketch and exact read "
-       f"the stored answer (estimates only, so both read the same series); store and query computes it from every raw sample ({raw_query}). Includes refused and "
-       "timed-out queries.")
-    ts("3. Query result computed - data generated (1 + 2)",
-       quantiles("asap_result_age_seconds"), unit="s", w=8, x=16, h=9, last=True, log=True,
-       desc="Per point, p50 and p99: from its generation until the query result that includes it is computed, "
-       "i.e. data available plus query latency, as if the query ran as soon as the data was available.")
-    y += 9
-    for i, method in enumerate(("sketch", "exact")):
-        st = lambda metric, stage: f'max(asap_stage_{metric}{{method="{method}",stage="{stage}"}})'
-        ts(f"{'Sketch' if method == 'sketch' else 'Exact'}: where the delay after the window's end goes",
-           [(st("received", "merge"), "branch + to merge"),
-            (f'{st("emitted", "merge")} - {st("received", "merge")}', "merge (waits for both sources)"),
-            (f'{st("received", "detector")} - {st("emitted", "merge")}', "to detector"),
-            (f'{st("emitted", "detector")} - {st("received", "detector")}', "detector"),
-            (f'max(asap_query_seconds{{method="{method}"}})', "Prometheus query")],
-           unit="s", stack=True, w=8, x=8 * i,
-           desc="Seconds per segment after the window's end, until the answer goes to Prometheus, then the query "
-           "that reads it. branch + to merge: "
-           "the window's end until the last source's sketch reached the merge. merge: waiting for the other "
-           "source's sketch (5 s timeout).")
-    ts("Store and query: where the delay after the window's end goes",
-       [('max(asap_answer_delay{method="raw"})', "into prometheus-raw (last point acknowledged)"),
-        ('max(asap_query_seconds{method="raw"})', "PromQL query")],
-       unit="s", stack=True, w=8, x=16,
-       desc="The window's end until prometheus-raw acknowledged its last point (or raw-sink's 50 s timeout), "
-       "then the PromQL query that computes the answer from the raw samples.")
+    row("From data generated to query result (p50 over a window's points, latest window)")
+    named = lambda e: (f'label_replace(label_replace({e}, "approach", "$1", "method", "(.*)"), '
+                       f'"approach", "store and query", "method", "raw")')
+    wait = 0.5 * 60
+    segments = [
+        ("wait for the window to end", f'0 * max by (method) (last_over_time(asap_query_seconds[5m])) + {wait:g}'),
+        ("after the window's end until data is queryable",
+         f'max by (method) (last_over_time(asap_data_available_seconds{{quantile="0.5"}}[5m])) - {wait:g}'),
+        ("query", 'max by (method) (last_over_time(asap_query_seconds[5m]))'),
+    ]
+    add({"type": "barchart", "title": "Data generated -> query result: where the time goes", "datasource": PROM,
+         "description": "Per approach, p50 over the window's points (p99 adds 29.4 s of window wait). 1. Every point "
+                        "waits for its 1-minute window to end (30 s at p50, the same for all three). 2. After the "
+                        "window's end until the window's data is queryable: sketch and exact until the detector "
+                        "wrote the answer to their Prometheus; store and query until prometheus-raw acknowledged the "
+                        "window's last raw point. 3. The query that returns the window's answer on the approach's "
+                        "own Prometheus: sketch and exact read the stored answer (estimates only); store and query "
+                        f"computes it from every raw sample ({raw_query}).",
+         "targets": [{"refId": chr(65 + i), "expr": named(e), "format": "table", "instant": True}
+                     for i, (_, e) in enumerate(segments)],
+         "transformations": [
+             {"id": "joinByField", "options": {"byField": "approach", "mode": "outer"}},
+             {"id": "organize", "options": {
+                 "includeByName": {"approach": True, "Value #A": True, "Value #B": True, "Value #C": True},
+                 "indexByName": {"approach": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3},
+                 "renameByName": {"Value #A": segments[0][0], "Value #B": segments[1][0],
+                                  "Value #C": segments[2][0]}}},
+             {"id": "sortBy", "options": {"sort": [{"field": "approach"}]}}],
+         "options": {"orientation": "horizontal", "stacking": "normal", "xField": "approach", "showValue": "always",
+                     "barWidth": 0.6, "groupWidth": 0.7, "legend": {"displayMode": "list", "placement": "bottom",
+                                                                   "showLegend": True},
+                     "tooltip": {"mode": "multi", "sort": "none"}},
+         "fieldConfig": {"defaults": {"unit": "s", "decimals": 2, "min": 0,
+                                      "custom": {"fillOpacity": 85, "lineWidth": 0}},
+                         "overrides": [
+                             by_name(segments[0][0], {"id": "color", "value": {"mode": "fixed", "fixedColor": "#8e8e8e"}}),
+                             by_name(segments[1][0], {"id": "color", "value": {"mode": "fixed", "fixedColor": "#ff9830"}}),
+                             by_name(segments[2][0], {"id": "color", "value": {"mode": "fixed", "fixedColor": "#5794f2"}})]}},
+        24, 8, 0)
     y += 8
 
 

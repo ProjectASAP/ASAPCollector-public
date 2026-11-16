@@ -93,17 +93,17 @@ reporting shows a gap after 2 minutes rather than its last value.
 **Latency breakdown.** Merges and detectors report, per window, when they
 received its last input and when they emitted it, in seconds after the window's
 end (`asap_stage_received` and `asap_stage_emitted`, labelled `method` and
-`stage`); detectors pass the merge's timing on to Prometheus. The dashboards stack each
-approach's answer delay after the window's end: branch and transfer to the
-merge, the merge's wait for both sources, transfer to the detector and the
-detector; for store and query, ingestion into `prometheus-raw` (last point
-acknowledged).
+`stage`); detectors pass the merge's timing on to Prometheus. The dashboards
+show only each approach's total delay after the window's end (one stacked bar per
+approach: window wait, delay after the window's end, query); these gauges stay
+in Prometheus to find which stage the delay comes from.
 
 **Whole-system cost.** The monitoring Prometheus also scrapes the three
-pipeline Prometheus, itself and the query job, so the dashboards show CPU and
-memory per component and per approach: sketch and exact count their four stages
-and their Prometheus, store and query its sinks, `prometheus-raw` and the query
-job. The monitoring Prometheus belongs to no approach and is not shown.
+pipeline Prometheus, itself and the query job, so the dashboards show the CPU,
+memory and network of each approach as bars: sketch and exact count their four
+stages and their Prometheus, store and query its sinks, `prometheus-raw` and the
+query job. Network counts every hop of the approach, including the raw points
+raw-sink sends to `prometheus-raw` (`asap_raw_sent_bytes`). The monitoring Prometheus belongs to no approach and is not shown.
 
 The merges count a window's messages, not distinct sources: a source that sends
 a window twice (a retried request, or a branch restarted or reconfigured
@@ -136,9 +136,9 @@ the JSON.
 | `USE_CASE` | Sketch | Scenario | Dashboard |
 | --- | --- | --- | --- |
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
-| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, relative error over time, throughput and distinct values over time, data available / query latency / result age, delay breakdown, CPU/memory/bits per component of each approach |
+| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: input rate and distinct values per key (numbers), distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, the sketch's error per key (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
-| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, data available / query latency / result age, delay breakdown, CPU/memory per component and per approach, bits per second into each stage |
+| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: input rate and distinct routes (numbers), top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), the sketch's heavy-hitter precision/recall/F1/ARE (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
 
 **Cardinality classes.** Each detector classifies every attribute key per
 window from its last 10 windows (`cardinality:` in `detector.yaml`):

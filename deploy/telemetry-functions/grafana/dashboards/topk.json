@@ -552,7 +552,7 @@
     },
     {
       "type": "row",
-      "title": "From data generated to query result, per window (the same definitions for all three)",
+      "title": "From data generated to query result (p50 over a window's points, latest window)",
       "collapsed": false,
       "panels": [],
       "gridPos": {
@@ -564,127 +564,113 @@
       "id": 10
     },
     {
-      "type": "timeseries",
-      "title": "1. Delay before data is available for query (data generated -> available)",
+      "type": "barchart",
+      "title": "Data generated -> query result: where the time goes",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Per point, p50 and p99 over the window's points: from its generation until its window's data can be queried. Every point first waits for its window to end (up to 60 s). sketch and exact: then until the detector sent the window's answer to its Prometheus. store and query: then until prometheus-raw acknowledged the window's last raw point.",
+      "description": "Per approach, p50 over the window's points (p99 adds 29.4 s of window wait). 1. Every point waits for its 1-minute window to end (30 s at p50, the same for all three). 2. After the window's end until the window's data is queryable: sketch and exact until the detector wrote the answer to their Prometheus; store and query until prometheus-raw acknowledged the window's last raw point. 3. The query that returns the window's answer on the approach's own Prometheus: sketch and exact read the stored answer (estimates only); store and query computes it from every raw sample (one PromQL top-k query).",
       "targets": [
         {
           "refId": "A",
-          "expr": "max(asap_data_available_seconds{method=\"sketch\",quantile=\"0.5\"})",
-          "legendFormat": "sketch p50"
+          "expr": "label_replace(label_replace(0 * max by (method) (last_over_time(asap_query_seconds[5m])) + 30, \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "format": "table",
+          "instant": true
         },
         {
           "refId": "B",
-          "expr": "max(asap_data_available_seconds{method=\"sketch\",quantile=\"0.99\"})",
-          "legendFormat": "sketch p99"
+          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_data_available_seconds{quantile=\"0.5\"}[5m])) - 30, \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "format": "table",
+          "instant": true
         },
         {
           "refId": "C",
-          "expr": "max(asap_data_available_seconds{method=\"exact\",quantile=\"0.5\"})",
-          "legendFormat": "exact p50"
-        },
-        {
-          "refId": "D",
-          "expr": "max(asap_data_available_seconds{method=\"exact\",quantile=\"0.99\"})",
-          "legendFormat": "exact p99"
-        },
-        {
-          "refId": "E",
-          "expr": "max(asap_data_available_seconds{method=\"raw\",quantile=\"0.5\"})",
-          "legendFormat": "store and query p50"
-        },
-        {
-          "refId": "F",
-          "expr": "max(asap_data_available_seconds{method=\"raw\",quantile=\"0.99\"})",
-          "legendFormat": "store and query p99"
+          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_query_seconds[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "format": "table",
+          "instant": true
         }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "scaleDistribution": {
-              "type": "log",
-              "log": 10
-            }
-          },
-          "unit": "s"
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "approach",
+            "mode": "outer"
+          }
         },
-        "overrides": []
-      },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "approach": true,
+              "Value #A": true,
+              "Value #B": true,
+              "Value #C": true
+            },
+            "indexByName": {
+              "approach": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3
+            },
+            "renameByName": {
+              "Value #A": "wait for the window to end",
+              "Value #B": "after the window's end until data is queryable",
+              "Value #C": "query"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "approach"
+              }
+            ]
+          }
+        }
+      ],
       "options": {
+        "orientation": "horizontal",
+        "stacking": "normal",
+        "xField": "approach",
+        "showValue": "always",
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
         "legend": {
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
+          "showLegend": true
         },
         "tooltip": {
           "mode": "multi",
           "sort": "none"
         }
       },
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 0,
-        "y": 36
-      },
-      "id": 11
-    },
-    {
-      "type": "timeseries",
-      "title": "2. Query latency (the query that returns the window's answer)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Measured by query-job once per window against each approach's own Prometheus. sketch and exact read the stored answer (estimates only, so both read the same series); store and query computes it from every raw sample (one PromQL top-k query). Includes refused and timed-out queries.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(asap_query_seconds{method=\"sketch\"})",
-          "legendFormat": "sketch"
-        },
-        {
-          "refId": "B",
-          "expr": "max(asap_query_seconds{method=\"exact\"})",
-          "legendFormat": "exact"
-        },
-        {
-          "refId": "C",
-          "expr": "max(asap_query_seconds{method=\"raw\"})",
-          "legendFormat": "store and query"
-        }
-      ],
       "fieldConfig": {
         "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "min": 0,
           "custom": {
-            "spanNulls": true,
-            "scaleDistribution": {
-              "type": "log",
-              "log": 10
-            }
-          },
-          "unit": "s"
+            "fillOpacity": 85,
+            "lineWidth": 0
+          }
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "sketch"
+              "options": "wait for the window to end"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "#5794f2"
+                  "fixedColor": "#8e8e8e"
                 }
               }
             ]
@@ -692,7 +678,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "exact"
+              "options": "after the window's end until data is queryable"
             },
             "properties": [
               {
@@ -707,306 +693,27 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "store and query"
+              "options": "query"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
+                  "fixedColor": "#5794f2"
                 }
               }
             ]
           }
         ]
       },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 8,
-        "y": 36
-      },
-      "id": 12
-    },
-    {
-      "type": "timeseries",
-      "title": "3. Query result computed - data generated (1 + 2)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Per point, p50 and p99: from its generation until the query result that includes it is computed, i.e. data available plus query latency, as if the query ran as soon as the data was available.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(asap_result_age_seconds{method=\"sketch\",quantile=\"0.5\"})",
-          "legendFormat": "sketch p50"
-        },
-        {
-          "refId": "B",
-          "expr": "max(asap_result_age_seconds{method=\"sketch\",quantile=\"0.99\"})",
-          "legendFormat": "sketch p99"
-        },
-        {
-          "refId": "C",
-          "expr": "max(asap_result_age_seconds{method=\"exact\",quantile=\"0.5\"})",
-          "legendFormat": "exact p50"
-        },
-        {
-          "refId": "D",
-          "expr": "max(asap_result_age_seconds{method=\"exact\",quantile=\"0.99\"})",
-          "legendFormat": "exact p99"
-        },
-        {
-          "refId": "E",
-          "expr": "max(asap_result_age_seconds{method=\"raw\",quantile=\"0.5\"})",
-          "legendFormat": "store and query p50"
-        },
-        {
-          "refId": "F",
-          "expr": "max(asap_result_age_seconds{method=\"raw\",quantile=\"0.99\"})",
-          "legendFormat": "store and query p99"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "scaleDistribution": {
-              "type": "log",
-              "log": 10
-            }
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 8,
-        "x": 16,
-        "y": 36
-      },
-      "id": 13
-    },
-    {
-      "type": "timeseries",
-      "title": "Sketch: where the delay after the window's end goes",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Seconds per segment after the window's end, until the answer goes to Prometheus, then the query that reads it. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(asap_stage_received{method=\"sketch\",stage=\"merge\"})",
-          "legendFormat": "branch + to merge"
-        },
-        {
-          "refId": "B",
-          "expr": "max(asap_stage_emitted{method=\"sketch\",stage=\"merge\"}) - max(asap_stage_received{method=\"sketch\",stage=\"merge\"})",
-          "legendFormat": "merge (waits for both sources)"
-        },
-        {
-          "refId": "C",
-          "expr": "max(asap_stage_received{method=\"sketch\",stage=\"detector\"}) - max(asap_stage_emitted{method=\"sketch\",stage=\"merge\"})",
-          "legendFormat": "to detector"
-        },
-        {
-          "refId": "D",
-          "expr": "max(asap_stage_emitted{method=\"sketch\",stage=\"detector\"}) - max(asap_stage_received{method=\"sketch\",stage=\"detector\"})",
-          "legendFormat": "detector"
-        },
-        {
-          "refId": "E",
-          "expr": "max(asap_query_seconds{method=\"sketch\"})",
-          "legendFormat": "Prometheus query"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "fillOpacity": 60,
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 1
-          },
-          "unit": "s",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 24,
         "x": 0,
-        "y": 45
+        "y": 36
       },
-      "id": 14
-    },
-    {
-      "type": "timeseries",
-      "title": "Exact: where the delay after the window's end goes",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Seconds per segment after the window's end, until the answer goes to Prometheus, then the query that reads it. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(asap_stage_received{method=\"exact\",stage=\"merge\"})",
-          "legendFormat": "branch + to merge"
-        },
-        {
-          "refId": "B",
-          "expr": "max(asap_stage_emitted{method=\"exact\",stage=\"merge\"}) - max(asap_stage_received{method=\"exact\",stage=\"merge\"})",
-          "legendFormat": "merge (waits for both sources)"
-        },
-        {
-          "refId": "C",
-          "expr": "max(asap_stage_received{method=\"exact\",stage=\"detector\"}) - max(asap_stage_emitted{method=\"exact\",stage=\"merge\"})",
-          "legendFormat": "to detector"
-        },
-        {
-          "refId": "D",
-          "expr": "max(asap_stage_emitted{method=\"exact\",stage=\"detector\"}) - max(asap_stage_received{method=\"exact\",stage=\"detector\"})",
-          "legendFormat": "detector"
-        },
-        {
-          "refId": "E",
-          "expr": "max(asap_query_seconds{method=\"exact\"})",
-          "legendFormat": "Prometheus query"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "fillOpacity": 60,
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 1
-          },
-          "unit": "s",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 45
-      },
-      "id": 15
-    },
-    {
-      "type": "timeseries",
-      "title": "Store and query: where the delay after the window's end goes",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "The window's end until prometheus-raw acknowledged its last point (or raw-sink's 50 s timeout), then the PromQL query that computes the answer from the raw samples.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(asap_answer_delay{method=\"raw\"})",
-          "legendFormat": "into prometheus-raw (last point acknowledged)"
-        },
-        {
-          "refId": "B",
-          "expr": "max(asap_query_seconds{method=\"raw\"})",
-          "legendFormat": "PromQL query"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "stacking": {
-              "mode": "normal"
-            },
-            "fillOpacity": 60,
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 1
-          },
-          "unit": "s",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 45
-      },
-      "id": 16
+      "id": 11
     },
     {
       "type": "row",
@@ -1017,9 +724,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 53
+        "y": 44
       },
-      "id": 17
+      "id": 12
     },
     {
       "type": "bargauge",
@@ -1121,9 +828,9 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 54
+        "y": 45
       },
-      "id": 18
+      "id": 13
     },
     {
       "type": "bargauge",
@@ -1225,9 +932,9 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 54
+        "y": 45
       },
-      "id": 19
+      "id": 14
     },
     {
       "type": "bargauge",
@@ -1329,9 +1036,9 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 54
+        "y": 45
       },
-      "id": 20
+      "id": 15
     }
   ]
 }
