@@ -223,9 +223,9 @@ def topk():
 
 
 def timing(raw_query):
-    """One stacked bar per approach: from a point's generation to the query result
-    (p50 over the window's points), split into window wait, delay after the
-    window's end, and the query."""
+    """One stacked bar per approach, from data generated to the query result:
+    window wait (the configured window; none for store and query), time until
+    the data is queryable, and the query."""
     global y
     row("From data generated to query result (latest window)")
     named = lambda e: (f'label_replace(label_replace({e}, "approach", "$1", "method", "(.*)"), '
