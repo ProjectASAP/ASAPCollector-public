@@ -127,15 +127,15 @@ def topk():
                     box("exact-detector", "exact top-20; new heavy hitters", *orange),
                     box("prometheus-exact", "query: the stored top-20", *backend)])
             + flow([box("raw-generator-a/b", "same points", *grey),
-                    box("raw-sink-a/b", "the only stage: forwards every point", *grey),
+                    box("otlp-forwarder-a/b", "forwards each point immediately (no window)", *grey),
                     box("prometheus-raw", "stores every raw point, one sample each", *grey),
-                    box("query-job", "PromQL top-20 once per window; new heavy hitters", *grey)])
+                    box("query-job", "PromQL top-20 over the last 60 s; new heavy hitters", *grey)])
             + "</table>"
             "<p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Traffic grows over 30 minutes: "
             "the rate per source doubles every 5 minutes (5k to 80k points/s), <code>/new/hot-route</code> takes 15% "
             "of traffic at minute 10, and the number of routes grows from 100,000 to 1,000,000 at minute 15. "
-            "Each approach writes to its own Prometheus. raw-sink adds a <code>point_slot</code> label so points of one "
-            "series at the same millisecond stay separate samples. hh-accuracy compares the sketch with exact; "
+            "Each approach writes to its own Prometheus. otlp-forwarder adds a <code>point_slot</code> label so points of "
+            "one series at the same millisecond stay separate samples. hh-accuracy compares the sketch with exact; "
             "query-job compares store and query with exact and times every approach's query.</small></p>")
     add({"type": "text", "title": "Three approaches to the same question: which routes are heavy hitters, and which are new?",
          "options": {"mode": "html", "content": html}}, 24, 10, 0)
@@ -228,19 +228,19 @@ def timing(raw_query):
     row("From data generated to query result (p50 over a window's points, latest window)")
     named = lambda e: (f'label_replace(label_replace({e}, "approach", "$1", "method", "(.*)"), '
                        f'"approach", "store and query", "method", "raw")')
-    wait = 0.5 * 60
+    latest = lambda m: f'max by (method) (last_over_time({m}{{quantile="0.5"}}[5m]))'
     segments = [
-        ("wait for the window to end", f'0 * max by (method) (last_over_time(asap_query_seconds[5m])) + {wait:g}'),
-        ("after the window's end until data is queryable",
-         f'max by (method) (last_over_time(asap_data_available_seconds{{quantile="0.5"}}[5m])) - {wait:g}'),
+        ("wait for the window to end", latest("asap_window_wait_seconds")),
+        ("then until data is queryable",
+         f'{latest("asap_data_available_seconds")} - on (method) {latest("asap_window_wait_seconds")}'),
         ("query", 'max by (method) (last_over_time(asap_query_seconds[5m]))'),
     ]
     add({"type": "barchart", "title": "Data generated -> query result: where the time goes", "datasource": PROM,
-         "description": "Per approach, p50 over the window's points (p99 adds 29.4 s of window wait). 1. Every point "
-                        "waits for its 1-minute window to end (30 s at p50, the same for all three). 2. After the "
-                        "window's end until the window's data is queryable: sketch and exact until the detector "
-                        "wrote the answer to their Prometheus; store and query until prometheus-raw acknowledged the "
-                        "window's last raw point. 3. The query that returns the window's answer on the approach's "
+         "description": "Per approach, p50 over the window's points. 1. sketch and exact compute per 1-minute "
+                        "window, so a point waits for its window to end (30 s at p50, 59.4 s at p99); store and query "
+                        "has no window. 2. Then until the data is queryable: sketch and exact until the detector "
+                        "wrote the window's answer to their Prometheus; store and query until prometheus-raw "
+                        "acknowledged the point (otlp-forwarder forwards each point as it arrives). 3. The query that returns the window's answer on the approach's "
                         "own Prometheus: sketch and exact read the stored answer (estimates only); store and query "
                         f"computes it from every raw sample ({raw_query}).",
          "targets": [{"refId": chr(65 + i), "expr": named(e), "format": "table", "instant": True}
@@ -311,7 +311,7 @@ def resources():
     whole = lambda ingest, after: f"{ingest}|{after}" if after else ingest
     bars("CPU cores: whole approach",
          [(name, cpu(whole(ingest, after), procs)) for name, _, ingest, after, procs in APPROACHES], "short",
-         "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, raw-sink-a/b), merge and "
+         "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, otlp-forwarder-a/b), merge and "
          "detector, its Prometheus, and for store and query the query job.", 8, 0)
     bars("Memory: whole approach",
          [(name, mem(whole(ingest, after), procs)) for name, _, ingest, after, procs in APPROACHES],
@@ -324,7 +324,7 @@ def resources():
           for name, _, ingest, after, _ in APPROACHES],
          "bps", "Every hop of the approach: the raw points from the generators into its first stage, then "
          "sketch and exact: sketches / exact maps into merge and merged windows into detector; store and query: "
-         "every raw point from raw-sink into prometheus-raw. The answers into the approach's Prometheus (a few "
+         "every raw point from otlp-forwarder into prometheus-raw. The answers into the approach's Prometheus (a few "
          "kilobytes per window) are not counted.", 8, 16)
     y += 7
 
@@ -346,9 +346,9 @@ def cardinality():
                     box("exact-detector", "exact distinct counts and classes", *orange),
                     box("prometheus-exact", "query: the stored counts", *backend)])
             + flow([box("raw-generator-a/b", "same points", *grey),
-                    box("raw-sink-a/b", "the only stage: forwards every point", *grey),
+                    box("otlp-forwarder-a/b", "forwards each point immediately (no window)", *grey),
                     box("prometheus-raw", "stores every raw point, one sample each", *grey),
-                    box("query-job", "PromQL distinct count per key once per window; classes", *grey)])
+                    box("query-job", "PromQL distinct count per key over the last 60 s; classes", *grey)])
             + "</table>"
             "<p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Four attributes: "
             "<code>http.route</code> and <code>http.method</code> stable, <code>k8s.pod.name</code> growing 5%/min, "

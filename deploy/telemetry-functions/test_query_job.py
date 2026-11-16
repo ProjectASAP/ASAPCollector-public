@@ -76,7 +76,7 @@ class RawEvents(unittest.TestCase):
 class Timing(unittest.TestCase):
     def test_points_wait_for_their_window_then_the_query(self):
         query_job.samples.clear()
-        query_job.report_timing("exact", 120, 11.0, 2.0)
+        query_job.report_timing("exact", 120, {0.5: 11.0, 0.99: 11.0}, 2.0)
         got = {(name, dict(labels)["quantile"]): v for (name, labels), (v, _) in query_job.samples.items()}
         self.assertEqual(got[("asap_data_available_seconds", "0.5")], 41.0)
         self.assertAlmostEqual(got[("asap_data_available_seconds", "0.99")], 70.4)
@@ -84,8 +84,16 @@ class Timing(unittest.TestCase):
 
     def test_no_query_no_result_age(self):
         query_job.samples.clear()
-        query_job.report_timing("raw", 120, 0.01, None)
-        self.assertEqual({name for name, _ in query_job.samples}, {"asap_data_available_seconds"})
+        query_job.report_timing("raw", 120, {0.5: 0.01, 0.99: 0.02}, None, window_wait=False)
+        self.assertEqual({name for name, _ in query_job.samples},
+                         {"asap_window_wait_seconds", "asap_data_available_seconds"})
+
+    def test_raw_has_no_window_wait(self):
+        query_job.samples.clear()
+        query_job.report_timing("raw", 120, {0.5: 0.005, 0.99: 0.03}, 17.0, window_wait=False)
+        got = {(name, dict(labels)["quantile"]): v for (name, labels), (v, _) in query_job.samples.items()}
+        self.assertEqual(got[("asap_window_wait_seconds", "0.5")], 0.0)
+        self.assertEqual(got[("asap_result_age_seconds", "0.5")], 17.005)
 
 
 class RulesMatchDetectorConfigs(unittest.TestCase):

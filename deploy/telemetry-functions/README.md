@@ -70,13 +70,14 @@ stops answering.
 definitions for all three approaches (p50 and p99 over the window's points
 where per point):
 
-1. Delay before data is available for query (`asap_data_available_seconds`):
-   from a point's generation until its window's data can be queried. Every point
-   first waits for its window to end; then sketch and exact wait until the
-   detector sent the window's answer to its Prometheus (Prometheus stores it
-   milliseconds later), raw until `prometheus-raw` acknowledged the window's last
-   raw point (the later source). Points arrive evenly over a window, so
-   quantile q is the delay after the window's end plus q x 60 s.
+1. Window wait (`asap_window_wait_seconds`) and delay before data is
+   available for query (`asap_data_available_seconds`, which includes the
+   wait): sketch and exact compute per 1-minute window, so a point first waits
+   for its window to end (points arrive evenly, so quantile q waits q x 60 s),
+   then until the detector sent the window's answer to its Prometheus
+   (Prometheus stores it milliseconds later). Store and query has no window:
+   raw-sink (shown as "otlp-forwarder") forwards each point as it arrives, and a
+   point is available once `prometheus-raw` acknowledged it.
 2. Query latency (`asap_query_seconds`): the query that returns the window's
    answer from the approach's own Prometheus; sketch and exact read the stored
    answer (estimates only, so both read the same series; sketch's lower and

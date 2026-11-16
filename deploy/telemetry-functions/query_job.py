@@ -25,16 +25,19 @@ complete in each pipeline:
   detectors do (`asap_event{method="raw"}`, `asap_topk_new`,
   `asap_cardinality_state`).
 
-Timing, per window and approach, from the window's points to its answer
-(labels `method`; `quantile` 0.5 and 0.99 over the window's points):
+Timing, per window and approach, from a point's generation to the query
+result that includes it (labels `method`; `quantile` 0.5 and 0.99 over the
+window's points):
 
-* `asap_data_available_seconds`: point generated -> the window's data is
-  available for query: for sketch and exact when the detector sent the
-  window's answer to its Prometheus (Prometheus stores it milliseconds later),
-  for raw when prometheus-raw acknowledged the window's last raw point (the
-  later of the two sources). A point also waits for the rest of its window:
-  points arrive evenly over a window, so the q-quantile over the window's
-  points is the delay after the window's end plus q * WINDOW_SECONDS.
+* `asap_window_wait_seconds`: the point's wait for its 1-minute window to end
+  (sketch and exact compute per window; points arrive evenly over a window, so
+  quantile q waits q * WINDOW_SECONDS). 0 for raw, which has no window: each
+  point is queryable once stored.
+* `asap_data_available_seconds`: point generated -> data available for query.
+  sketch and exact: the window wait plus the time until the detector sent the
+  window's answer to its Prometheus (Prometheus stores it milliseconds later).
+  raw: until prometheus-raw acknowledged the point (raw-sink's per-point
+  measurement, the larger of the two sources).
 * `asap_query_seconds`: the query that returns the window's answer, on the
   approach's own Prometheus (for sketch and exact only the estimates, so both
   read the same series; sketch's bounds are extra).
@@ -42,6 +45,9 @@ Timing, per window and approach, from the window's points to its answer
   data available plus query latency, as if the query ran as soon as the data
   was available (the query job runs raw only after exact answered, which would
   add a wait that is not raw's).
+
+raw-sink is shown as "otlp-forwarder" on the dashboards: it forwards each point
+as it arrives, with no window.
 
 Events (`asap_event`) carry the window's end in seconds as their value.
 
@@ -177,13 +183,15 @@ def heavy_hitter_accuracy(points, exact, reported_list):
             "reported": len(reported), "are": sum(errors) / tp if tp else None}
 
 
-def report_timing(method, end, after_end_s, query_s):
-    """Data available, and query result computed, minus each point's generation:
-    `after_end_s` after the window's end plus the point's wait to the window's
-    end (quantile q of the window's points waits q * WINDOW_S)."""
+def report_timing(method, end, available_by_quantile, query_s, window_wait=True):
+    """Window wait, data available and query result computed, minus each point's
+    generation. `available_by_quantile` maps a quantile to the delay after the
+    window's end (windowed approaches) or to the point's own delay (raw)."""
     for q in QUANTILES:
-        available = after_end_s + q * WINDOW_S
+        wait = q * WINDOW_S if window_wait else 0.0
+        available = available_by_quantile[q] + wait
         labels = {"method": method, "quantile": f"{q:g}"}
+        put("asap_window_wait_seconds", labels, wait, end)
         put("asap_data_available_seconds", labels, available, end)
         if query_s is not None:
             put("asap_result_age_seconds", labels, available + query_s, end)
@@ -201,7 +209,7 @@ def time_prometheus_answer(method, end):
     put("asap_query_seconds", {"method": method}, query_s, end)
     delays = [v for _, v in at_window(f'asap_answer_delay{{method="{method}"}}', end)]
     if delays:
-        report_timing(method, end, max(delays), query_s)
+        report_timing(method, end, {q: max(delays) for q in QUANTILES}, query_s)
 
 
 def raw_points(end):
@@ -425,8 +433,10 @@ def raw_step():
         query_s = raw_answer(end) if raw_answer else None
         if raw_answer is None or query_s is not None:
             done["raw"].add(end)
-            stored = [v for _, v in at_window('asap_answer_delay{method="raw"}', end)]
-            report_timing("raw", end, max(stored), query_s)
+            # No window: each point's own time until prometheus-raw acknowledged it.
+            lags = {q: max((v for _, v in at_window(f'asap_raw_transit{{method="raw",quantile="{q:g}"}}', end)),
+                           default=0.0) for q in QUANTILES}
+            report_timing("raw", end, lags, query_s, window_wait=False)
 
 
 def escape(value):
