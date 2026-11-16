@@ -97,9 +97,9 @@ def events(kind, title):
     global y
     add({"type": "table", "title": title, "datasource": PROM,
          "description": "Detectors (sketch, exact) and the query job (store and query) write each event as an "
-                        "asap_event gauge at its window's end. Newest first.",
+                        "asap_event gauge whose value is its window's end. Newest first.",
          "targets": [{"refId": "A", "format": "table", "instant": True,
-                      "expr": f'timestamp(last_over_time(asap_event{{kind="{kind}"}}[$__range])) * 1000'}],
+                      "expr": f'last_over_time(asap_event{{kind="{kind}"}}[$__range]) * 1000'}],
          "transformations": [{"id": "organize", "options": {
              "includeByName": {"Value": True, "method": True, "message": True},
              "indexByName": {"Value": 0, "method": 1, "message": 2},
@@ -261,6 +261,7 @@ def latency_and_freshness(raw_query):
        "window's points. store and query: Prometheus's acknowledgement of the point minus its event time, measured "
        "for every point by raw-sink. sketch and exact: a point is in Prometheus once its window's answer is, so its "
        "lag is the time to the window's end plus the window's answer delay (points arrive evenly over the window). "
+       "The answer delay is when the detector sent the answer; Prometheus stores it milliseconds later. "
        "Query latency is not included.")
     y += 8
     for i, method in enumerate(("sketch", "exact")):
@@ -299,7 +300,7 @@ def mem(sel, jobs):
             + (f' or max by (stage) (process_resident_memory_bytes{{stage=~"{jobs}"}})' if jobs else ""))
 
 
-def bits(sel, jobs):
+def bits(sel, _jobs):
     return (f'sum by (stage) (rate(payload_size_bytes_total{{job="collectors",stage=~"{sel}",'
             f'otel_scope_node_type="receiver"}}[2m])) * 8')
 

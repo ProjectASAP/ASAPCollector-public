@@ -245,7 +245,8 @@ pub(super) fn gauges_pdata(envs: &[SketchEnvelope]) -> Result<OtapPdata, String>
     Ok(OtapPdata::new_todo_context(payload))
 }
 
-/// Detection events as `asap.event` gauges (value 1 at the window's end),
+/// Detection events as `asap.event` gauges at the window's end, whose value is
+/// the window's end in seconds (a dashboard lists events by it),
 /// labelled `method`, `kind`, the event's attributes and `message` (one
 /// readable sentence), so the metrics store that holds the answers holds the
 /// events too.
@@ -264,7 +265,7 @@ pub(super) fn event_gauges(events: &[Event]) -> Vec<SketchEnvelope> {
                 metric_name: "asap.event".into(),
                 window_start_ms: e.window_end_ms,
                 window_end_ms: e.window_end_ms,
-                value: 1.0,
+                value: e.window_end_ms as f64 / 1000.0,
                 ..Default::default()
             }
         })

@@ -315,13 +315,13 @@
         "type": "prometheus",
         "uid": "asap-prometheus-cardinality"
       },
-      "description": "Detectors (sketch, exact) and the query job (store and query) write each event as an asap_event gauge at its window's end. Newest first.",
+      "description": "Detectors (sketch, exact) and the query job (store and query) write each event as an asap_event gauge whose value is its window's end. Newest first.",
       "targets": [
         {
           "refId": "A",
           "format": "table",
           "instant": true,
-          "expr": "timestamp(last_over_time(asap_event{kind=\"cardinality\"}[$__range])) * 1000"
+          "expr": "last_over_time(asap_event{kind=\"cardinality\"}[$__range]) * 1000"
         }
       ],
       "transformations": [
@@ -777,7 +777,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus-cardinality"
       },
-      "description": "How long a point takes from its creation to being in its approach's Prometheus, p50 and p99 over the window's points. store and query: Prometheus's acknowledgement of the point minus its event time, measured for every point by raw-sink. sketch and exact: a point is in Prometheus once its window's answer is, so its lag is the time to the window's end plus the window's answer delay (points arrive evenly over the window). Query latency is not included.",
+      "description": "How long a point takes from its creation to being in its approach's Prometheus, p50 and p99 over the window's points. store and query: Prometheus's acknowledgement of the point minus its event time, measured for every point by raw-sink. sketch and exact: a point is in Prometheus once its window's answer is, so its lag is the time to the window's end plus the window's answer delay (points arrive evenly over the window). The answer delay is when the detector sent the answer; Prometheus stores it milliseconds later. Query latency is not included.",
       "targets": [
         {
           "refId": "A",

@@ -42,7 +42,9 @@
 //!   outputs: [metrics, latency]
 //!   config: {window: 60s, grace: 5s}
 //! ```
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -99,7 +101,7 @@ pub const RAW_SINK_URN: &str = "urn:asap:processor:raw_sink";
 /// `raw_sink` output with the raw points for the store.
 const METRICS_PORT: &str = "metrics";
 /// Label telling apart the points of one series at the same millisecond.
-pub const POINT_SLOT_LABEL: &str = "point_slot";
+const POINT_SLOT_LABEL: &str = "point_slot";
 /// `raw_sink` output with the latency gauges.
 const LATENCY_PORT: &str = "latency";
 
@@ -567,9 +569,10 @@ struct RawSink {
     emitted_until: u64,
     /// Latest event time (ms) the source has sent.
     sent_until_ms: u64,
-    /// Points already sent per (millisecond, series), for `point_slot`; only
-    /// the last few seconds are kept.
-    slots: HashMap<(u64, String), u32>,
+    /// Points already sent per millisecond and series hash, for
+    /// `point_slot`; milliseconds older than `grace` before the latest are
+    /// dropped.
+    slots: BTreeMap<u64, HashMap<u64, u32>>,
     timer_started: bool,
 }
 
@@ -637,17 +640,32 @@ fn metrics_pdata(points: &[Observation], slots: &[u32]) -> Result<OtapPdata, Str
     Ok(OtapPdata::new_todo_context(payload))
 }
 
-/// Identity of a point's series in the store: metric, resource and attributes.
-fn raw_series(p: &Observation) -> String {
-    let mut resource: Vec<_> = p
-        .resource_labels
-        .iter()
-        .map(|kv| (&kv.key, &kv.value))
-        .collect();
-    let mut labels: Vec<_> = p.labels.iter().map(|kv| (&kv.key, &kv.value)).collect();
-    resource.sort();
-    labels.sort();
-    format!("{}|{resource:?}|{labels:?}", p.metric)
+/// Hash of a point's series in the store (metric, resource and attributes),
+/// independent of attribute order. Two series with the same hash only share a
+/// slot count: their points get distinct slots, and none is lost.
+fn raw_series_hash(p: &Observation) -> u64 {
+    let hash = |x: &dyn Fn(&mut DefaultHasher)| {
+        let mut h = DefaultHasher::new();
+        x(&mut h);
+        h.finish()
+    };
+    let resource = p.resource_labels.iter().map(|kv| {
+        hash(&|h| {
+            0u8.hash(h);
+            kv.key.hash(h);
+            kv.value.hash(h);
+        })
+    });
+    let labels = p.labels.iter().map(|kv| {
+        hash(&|h| {
+            1u8.hash(h);
+            kv.key.hash(h);
+            kv.value.hash(h);
+        })
+    });
+    resource
+        .chain(labels)
+        .fold(hash(&|h| p.metric.hash(h)), u64::wrapping_add)
 }
 
 impl RawSink {
@@ -659,15 +677,19 @@ impl RawSink {
             .map(|p| {
                 let next = self
                     .slots
-                    .entry((p.timestamp_ms, raw_series(p)))
+                    .entry(p.timestamp_ms)
+                    .or_default()
+                    .entry(raw_series_hash(p))
                     .or_insert(0);
                 *next += 1;
                 *next - 1
             })
             .collect();
-        // Points arrive in time order: older milliseconds get no more points.
-        let horizon = self.sent_until_ms.saturating_sub(10_000);
-        self.slots.retain(|(ms, _), _| *ms >= horizon);
+        // Points arrive in time order: forget milliseconds a grace before the latest.
+        if let Some(&latest) = self.slots.keys().next_back() {
+            let horizon = latest.saturating_sub(self.config.grace.as_millis() as u64);
+            self.slots = self.slots.split_off(&horizon);
+        }
         slots
     }
 
@@ -967,7 +989,7 @@ static RAW_SINK: ProcessorFactory<OtapPdata> = ProcessorFactory {
                 next_id: 0,
                 emitted_until: 0,
                 sent_until_ms: 0,
-                slots: HashMap::new(),
+                slots: BTreeMap::new(),
                 timer_started: false,
             },
             node,
@@ -1137,7 +1159,7 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
-            slots: HashMap::new(),
+            slots: BTreeMap::new(),
             timer_started: false,
         };
         let stored = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
@@ -1168,7 +1190,7 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
-            slots: HashMap::new(),
+            slots: BTreeMap::new(),
             timer_started: false,
         };
         let last = raw.send(&[point(59_900, "/a", "u1", 1.0)]);
@@ -1201,7 +1223,7 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
-            slots: HashMap::new(),
+            slots: BTreeMap::new(),
             timer_started: false,
         };
         let first = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
@@ -1234,7 +1256,7 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
-            slots: HashMap::new(),
+            slots: BTreeMap::new(),
             timer_started: false,
         };
         let batch = [
@@ -1247,6 +1269,13 @@ mod tests {
         // A later message at the same millisecond continues the count.
         assert_eq!(raw.assign_slots(&batch[..1]), vec![3]);
         assert_eq!(raw.assign_slots(&[point(1_001, "/a", "u0", 1.0)]), vec![0]);
+        // Attribute order does not change the series.
+        let mut reordered = point(1_001, "/a", "u0", 1.0);
+        reordered.labels.reverse();
+        assert_eq!(raw.assign_slots(&[reordered]), vec![1]);
+        // Milliseconds a grace (5 s) before the latest are forgotten.
+        let _ = raw.assign_slots(&[point(7_000, "/a", "u0", 1.0)]);
+        assert_eq!(raw.slots.keys().copied().collect::<Vec<_>>(), vec![7_000]);
         assert!(metrics_pdata(&batch, &[0, 1, 0, 2]).is_ok());
     }
 }

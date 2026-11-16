@@ -7,7 +7,7 @@ prometheus-exact, prometheus-raw). Once per window, after the window is
 complete in each pipeline:
 
 * sketch and exact: times the PromQL query that reads the window's answer
-  from that pipeline's Prometheus (`asap_query_seconds{backend="prometheus"}`).
+  from that pipeline's Prometheus (`asap_query_seconds`).
 * raw (store and query): once both raw sinks report the window stored in
   prometheus-raw and the exact answer is in, computes the answer from the raw
   samples with PromQL and times it (`asap_query_seconds`; the whole answer
@@ -31,6 +31,10 @@ every point (Prometheus acknowledgement minus event time, the larger of the two
 sources). sketch and exact: a point is loaded when its window's answer is, so its
 lag is the window's answer delay plus the time from the point to the window's
 end; points arrive evenly over a window, so quantile q adds q * WINDOW_SECONDS.
+The answer delay is when the detector sent the answer; Prometheus stores it a
+few milliseconds later.
+
+Events (`asap_event`) carry the window's end in seconds as their value.
 
 With each raw answer it also republishes the sketch and exact answers of the
 same window (`asap_compare_topk`, `asap_compare_distinct`,
@@ -52,8 +56,7 @@ its own CPU time and resident memory. Only the top-k and cardinality use cases
 have a raw answer here; for the others it only times the backend queries.
 
 Configuration (environment): USE_CASE, WINDOW_SECONDS (60), K (20), PHI (0.01),
-RAW_SOURCES (2), PROMETHEUS (monitoring), PROMETHEUS_SKETCH, PROMETHEUS_EXACT,
-PROMETHEUS_RAW, RAW_METRIC, NOVELTY_WINDOWS (10), PORT (9100).
+RAW_SOURCES (2), PROMETHEUS (monitoring), PORT (9100).
 """
 import json
 import os
@@ -66,12 +69,12 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PROMETHEUS = os.environ.get("PROMETHEUS", "http://prometheus:9090")
-PIPELINE_PROMETHEUS = {m: os.environ.get(f"PROMETHEUS_{m.upper()}", f"http://prometheus-{m}:9090")
-                       for m in ("sketch", "exact", "raw")}
+PIPELINE_PROMETHEUS = {m: f"http://prometheus-{m}:9090" for m in ("sketch", "exact", "raw")}
 # The raw points' metric in prometheus-raw (OTLP name with dots as underscores).
-RAW_METRIC = os.environ.get("RAW_METRIC", "http_server_request_duration")
-NOVELTY_WINDOWS = int(os.environ.get("NOVELTY_WINDOWS", "10"))
-# Cardinality classes, as `cardinality:` in the detectors' configs.
+RAW_METRIC = "http_server_request_duration"
+# The detectors' event rules (`novelty_windows`, `cardinality:` in their
+# configs; test_query_job.py checks they match).
+NOVELTY_WINDOWS = 10
 IDENTIFIER_RATIO, GROWTH, CLASS_BASELINE_WINDOWS, MIN_POINTS = 0.9, 0.2, 10, 100
 FRESHNESS_QUANTILES = (0.5, 0.99)
 USE_CASE = os.environ.get("USE_CASE", "topk")
@@ -132,6 +135,13 @@ def put(name, labels, value, end_s):
         samples[(name, tuple(sorted(labels.items())))] = (value, None if end_s is None else end_s * 1000)
 
 
+def forget_before(ms):
+    """Drops stamped samples older than `ms`: Prometheus would refuse them anyway."""
+    with lock:
+        for key in [k for k, (_, ts) in samples.items() if ts is not None and ts < ms]:
+            del samples[key]
+
+
 def replace(name, rows, end_s):
     """Replaces every sample of `name` with `rows` ((labels, value) pairs)."""
     with lock:
@@ -163,7 +173,7 @@ def time_prometheus_answer(method, end):
     and reports the window's freshness."""
     t0 = time.monotonic()
     at_window(f'{ANSWER_METRIC}{{method="{method}"}}', end, base=PIPELINE_PROMETHEUS[method])
-    put("asap_query_seconds", {"method": method, "backend": "prometheus"}, time.monotonic() - t0, end)
+    put("asap_query_seconds", {"method": method}, time.monotonic() - t0, end)
     delays = [v for _, v in at_window(f'asap_answer_delay{{method="{method}"}}', end)]
     if delays:
         for q in FRESHNESS_QUANTILES:
@@ -217,7 +227,7 @@ class RawEvents:
                 put("asap_event", dict(labels, kind="novelty", rank=str(rank), count=f"{count:.0f}",
                                        message=f"new heavy hitter {ATTRIBUTE}={key}: rank {rank} with "
                                                f"{count:.0f} points, absent from the top {len(top)} of "
-                                               f"the previous {len(self.tops)} windows"), 1.0, end)
+                                               f"the previous {len(self.tops)} windows"), end, end)
         self.tops.append({k for k, _ in top})
         del self.tops[:-NOVELTY_WINDOWS]
         return new
@@ -245,7 +255,7 @@ class RawEvents:
             put("asap_event", dict(labels, kind="cardinality", state=state, distinct=f"{distinct:.0f}",
                                    points=f"{points:.0f}",
                                    message=f"attribute {key} is {state}: {distinct:.0f} distinct values "
-                                           f"in {points:.0f} points ({ratio:.0%})"), 1.0, end)
+                                           f"in {points:.0f} points ({ratio:.0%})"), end, end)
         self.state[key] = state
         return state
 
@@ -314,7 +324,7 @@ def raw_distinct(end):
         state = raw_events.cardinality(key, distinct, window_points, end)
         if state is not None:
             classes.append(({"method": "raw", "attribute_key": key, "state": state}, 1.0))
-    put("asap_query_seconds", {"method": "raw", "backend": "prometheus"}, total, end)
+    put("asap_query_seconds", {"method": "raw"}, total, end)
     replace("asap_compare_distinct", compared, None)
     replace("asap_compare_class", classes, None)
     replace("asap_compare_failed", failed, None)
@@ -335,7 +345,7 @@ def raw_topk(end):
     t0 = time.monotonic()
     rows = raw_at_window_end(query, end)
     latency = time.monotonic() - t0
-    put("asap_query_seconds", {"method": "raw", "backend": "prometheus"}, latency, end)
+    put("asap_query_seconds", {"method": "raw"}, latency, end)
     top = sorted(((r["metric"].get(RAW_LABEL, ""), float(r["value"][1])) for r in rows),
                  key=lambda kc: -kc[1])
     raw_events.novelty(top, end)
@@ -371,20 +381,15 @@ def loop():
                         time_prometheus_answer(method, end)
                         done[method].add(end)
             raw_answer = {"topk": raw_topk, "cardinality": raw_distinct}.get(USE_CASE)
-            if raw_answer:
-                ready = window_ends('asap_answer_delay{method="raw"}')
-                for end in sorted(e for e, n in ready.items() if n >= RAW_SOURCES):
-                    # Accuracy is against the exact answer of the same window.
-                    if (end not in done["raw"] and end in done["exact"]
-                            and end > started - 2 * WINDOW_S and raw_answer(end)):
-                        done["raw"].add(end)
-                        raw_freshness(end)
-            else:
-                ready = window_ends('asap_answer_delay{method="raw"}')
-                for end in sorted(e for e, n in ready.items() if n >= RAW_SOURCES):
-                    if end not in done["raw"] and end > started - 2 * WINDOW_S:
-                        done["raw"].add(end)
-                        raw_freshness(end)
+            ready = window_ends('asap_answer_delay{method="raw"}')
+            for end in sorted(e for e, n in ready.items() if n >= RAW_SOURCES):
+                if end in done["raw"] or end <= started - 2 * WINDOW_S:
+                    continue
+                # Accuracy is against the exact answer of the same window.
+                if raw_answer is None or (end in done["exact"] and raw_answer(end)):
+                    done["raw"].add(end)
+                    raw_freshness(end)
+            forget_before((time.time() - 15 * WINDOW_S) * 1000)
         except Exception as e:  # keep serving; the next round retries
             print(f"query_job: {e}", flush=True)
         time.sleep(1)

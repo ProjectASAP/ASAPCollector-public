@@ -121,7 +121,7 @@
           "refId": "A",
           "format": "table",
           "instant": true,
-          "expr": "timestamp(last_over_time(asap_event{kind=\"drift\"}[$__range])) * 1000"
+          "expr": "last_over_time(asap_event{kind=\"drift\"}[$__range]) * 1000"
         }
       ],
       "transformations": [

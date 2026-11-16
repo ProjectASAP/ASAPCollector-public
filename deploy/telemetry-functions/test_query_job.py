@@ -1,5 +1,6 @@
 """Unit tests for query_job's comparison rules: python3 -m unittest deploy/telemetry-functions/test_query_job.py"""
 import io
+import re
 import os
 import sys
 import unittest
@@ -70,6 +71,17 @@ class RawEvents(unittest.TestCase):
         changes = sorted((e["attribute_key"], e["state"]) for e in self.events())
         self.assertEqual(changes, [("k8s.pod.name", "growing"), ("k8s.pod.name", "stable"),
                                    ("user.id", "identifier-like")])
+
+
+class RulesMatchDetectorConfigs(unittest.TestCase):
+    def test_raw_event_rules_are_the_detectors(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        card = open(os.path.join(here, "cardinality", "detector.yaml")).read()
+        rules = dict(re.findall(r"(\w+): ([\d.]+)", re.search(r"cardinality: \{([^}]*)\}", card)[1]))
+        self.assertEqual((float(rules["identifier_ratio"]), float(rules["growth"]), int(rules["baseline_windows"])),
+                         (query_job.IDENTIFIER_RATIO, query_job.GROWTH, query_job.CLASS_BASELINE_WINDOWS))
+        topk = open(os.path.join(here, "topk", "detector.yaml")).read()
+        self.assertEqual(int(re.search(r"novelty_windows: (\d+)", topk)[1]), query_job.NOVELTY_WINDOWS)
 
 
 if __name__ == "__main__":

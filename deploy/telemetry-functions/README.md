@@ -61,7 +61,10 @@ queries sum over `point_slot` (for example
 `topk(20, sum by (http_route) (count_over_time(http_server_request_duration[60s])))`).
 The two sources are kept apart by their resource attribute `source`, which
 `prometheus-raw` promotes to a label. In the cardinality use case `user.id`
-is unique per point, so every point is a new series.
+is unique per point, so every point is a new series: about 9.6 million new
+series per minute at the top rate, which `prometheus-raw` is not built for
+(its memory is capped by `PROMETHEUS_RAW_MEMORY`); the demo shows where it
+stops answering.
 
 **Query latency and data freshness**, reported separately. Query latency
 (`asap_query_seconds`) is the time of the query that returns a window's answer
@@ -72,7 +75,8 @@ approach's Prometheus minus its event time. For raw, raw-sink measures it for
 every point (Prometheus acknowledgement minus event time, the larger of the two
 sources). For sketch and exact a point is loaded when its window's answer is, so
 its lag is the time from the point to the window's end plus the window's answer
-delay; points arrive evenly over a window, so quantile q adds q x 60 s.
+delay (when the detector sent the answer; Prometheus stores it milliseconds
+later); points arrive evenly over a window, so quantile q adds q x 60 s.
 
 Each dashboard also shows every pipeline's throughput: the points per window
 that reached the end of the pipeline (`asap_points`; for raw, the points
@@ -126,9 +130,9 @@ the JSON.
 | `USE_CASE` | Sketch | Scenario | Dashboard |
 | --- | --- | --- | --- |
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
-| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, relative error over time, throughput and distinct values over time, freshness breakdown, CPU/memory/bits per component of each approach |
+| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, relative error over time, throughput and distinct values over time, query latency and data freshness (separate panels), answer delay breakdown, CPU/memory/bits per component of each approach |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
-| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, freshness breakdown, CPU/memory per component and per approach, bits per second into each stage |
+| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, query latency and data freshness (separate panels), answer delay breakdown, CPU/memory per component and per approach, bits per second into each stage |
 
 **Cardinality classes.** Each detector classifies every attribute key per
 window from its last 10 windows (`cardinality:` in `detector.yaml`):
@@ -146,7 +150,8 @@ Answers reach Prometheus over OTLP as `asap_quantile`, `asap_distinct`,
 `asap_raw_transit` also `"raw"`; the query job's raw answers and events are
 `"raw"` too). Each event (class change, drift start/end, new heavy hitter) is an
 `asap_event` gauge at its window's end, labelled `kind`, the event's fields and
-`message` (one sentence); the dashboards list them. The monitoring Prometheus
+`message` (one sentence), whose value is the window's end in seconds; the
+dashboards list them. The monitoring Prometheus
 also scrapes each engine's telemetry
 (`/api/v1/metrics?format=prometheus`): CPU time per pipeline, resident memory
 and payload bytes per receiver, labelled with the stage.
@@ -179,7 +184,7 @@ Keep the default project name `tf-<use case>`: the data sources address `tf-<use
 
 Several demos can run side by side, each a full stack of its own (they share
 no Prometheus, so their metrics do not mix). `DEMO_SLOT=N` gives the Nth demo
-host ports shifted by N (monitoring Prometheus 9090+N, prometheus-raw 9190+N) and
+host ports shifted by N (monitoring Prometheus 9090+N, prometheus-raw 9190+N for querying the raw samples by hand) and
 CPUs 18N to 18N+17; `NO_BUILD=1` reuses the built image. Grafana stays on
 `:3000` for all of them:
 
