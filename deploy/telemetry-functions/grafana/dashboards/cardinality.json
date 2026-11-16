@@ -25,6 +25,94 @@
       "id": 1
     },
     {
+      "type": "stat",
+      "title": "Input: points per second (both sources)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-cardinality"
+      },
+      "description": "Points per second of the latest window, both sources together.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(sum by (method) (last_over_time(asap_points{method=~\"sketch|exact\",attribute_key=\"http.route\"}[2m]))) / 60",
+          "legendFormat": "points/s",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 11
+      },
+      "id": 2
+    },
+    {
+      "type": "stat",
+      "title": "Data shape: distinct values per key in the latest window",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-cardinality"
+      },
+      "description": "From the exact pipeline; the sketch's estimate for a key exact has not answered recently.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (attribute_key) (last_over_time(asap_distinct{method=\"exact\"}[2m])) or max by (attribute_key) (last_over_time(asap_distinct{method=\"sketch\",bound=\"estimate\"}[2m]))",
+          "legendFormat": "{{attribute_key}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 16,
+        "x": 8,
+        "y": 11
+      },
+      "id": 3
+    },
+    {
       "type": "row",
       "title": "Answers",
       "collapsed": false,
@@ -33,9 +121,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 11
+        "y": 15
       },
-      "id": 2
+      "id": 4
     },
     {
       "type": "table",
@@ -263,9 +351,9 @@
         "h": 7,
         "w": 20,
         "x": 0,
-        "y": 12
+        "y": 16
       },
-      "id": 3
+      "id": 5
     },
     {
       "type": "stat",
@@ -304,9 +392,9 @@
         "h": 7,
         "w": 4,
         "x": 20,
-        "y": 12
+        "y": 16
       },
-      "id": 4
+      "id": 6
     },
     {
       "type": "table",
@@ -396,9 +484,9 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 19
+        "y": 23
       },
-      "id": 5
+      "id": 7
     },
     {
       "type": "row",
@@ -409,9 +497,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 27
+        "y": 31
       },
-      "id": 6
+      "id": 8
     },
     {
       "type": "timeseries",
@@ -452,162 +540,9 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 28
-      },
-      "id": 7
-    },
-    {
-      "type": "row",
-      "title": "Traffic over time: volume and shape",
-      "collapsed": false,
-      "panels": [],
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 36
-      },
-      "id": 8
-    },
-    {
-      "type": "timeseries",
-      "title": "End-to-end throughput: points per second each window delivered to the end of its pipeline",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-cardinality"
-      },
-      "description": "Both sources together. The generators skip batches a pipeline cannot take, so a pipeline that falls behind delivers less. Store and query: points prometheus-raw acknowledged within 50 s of the window's end. A pipeline that stops reporting shows a gap after 2 minutes.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (method) (last_over_time(asap_points{method=~\"sketch|exact\",attribute_key=\"http.route\"}[2m])) / 60",
-          "legendFormat": "{{method}}"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(last_over_time(asap_points{method=\"raw\"}[2m])) / 60",
-          "legendFormat": "store and query"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 37
+        "y": 32
       },
       "id": 9
-    },
-    {
-      "type": "timeseries",
-      "title": "Data shape: distinct values per key per window (exact), log scale",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-cardinality"
-      },
-      "description": "",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (attribute_key) (asap_distinct{method=\"exact\"})",
-          "legendFormat": "{{attribute_key}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "scaleDistribution": {
-              "type": "log",
-              "log": 10
-            }
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 37
-      },
-      "id": 10
     },
     {
       "type": "row",
@@ -618,9 +553,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 40
       },
-      "id": 11
+      "id": 10
     },
     {
       "type": "timeseries",
@@ -692,9 +627,9 @@
         "h": 9,
         "w": 8,
         "x": 0,
-        "y": 46
+        "y": 41
       },
-      "id": 12
+      "id": 11
     },
     {
       "type": "timeseries",
@@ -797,9 +732,9 @@
         "h": 9,
         "w": 8,
         "x": 8,
-        "y": 46
+        "y": 41
       },
-      "id": 13
+      "id": 12
     },
     {
       "type": "timeseries",
@@ -871,9 +806,9 @@
         "h": 9,
         "w": 8,
         "x": 16,
-        "y": 46
+        "y": 41
       },
-      "id": 14
+      "id": 13
     },
     {
       "type": "timeseries",
@@ -940,9 +875,9 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 55
+        "y": 50
       },
-      "id": 15
+      "id": 14
     },
     {
       "type": "timeseries",
@@ -1009,9 +944,9 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 55
+        "y": 50
       },
-      "id": 16
+      "id": 15
     },
     {
       "type": "timeseries",
@@ -1063,9 +998,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 55
+        "y": 50
       },
-      "id": 17
+      "id": 16
     },
     {
       "type": "row",
@@ -1076,9 +1011,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 63
+        "y": 58
       },
-      "id": 18
+      "id": 17
     },
     {
       "type": "timeseries",
@@ -1127,9 +1062,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 64
+        "y": 59
       },
-      "id": 19
+      "id": 18
     },
     {
       "type": "timeseries",
@@ -1178,9 +1113,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 64
+        "y": 59
       },
-      "id": 20
+      "id": 19
     },
     {
       "type": "timeseries",
@@ -1229,9 +1164,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 64
+        "y": 59
       },
-      "id": 21
+      "id": 20
     },
     {
       "type": "timeseries",
@@ -1280,9 +1215,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 76
+        "y": 71
       },
-      "id": 22
+      "id": 21
     },
     {
       "type": "timeseries",
@@ -1331,9 +1266,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 76
+        "y": 71
       },
-      "id": 23
+      "id": 22
     },
     {
       "type": "timeseries",
@@ -1382,9 +1317,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 76
+        "y": 71
       },
-      "id": 24
+      "id": 23
     },
     {
       "type": "timeseries",
@@ -1431,9 +1366,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 88
+        "y": 83
       },
-      "id": 25
+      "id": 24
     },
     {
       "type": "timeseries",
@@ -1480,9 +1415,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 88
+        "y": 83
       },
-      "id": 26
+      "id": 25
     },
     {
       "type": "timeseries",
@@ -1529,9 +1464,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 88
+        "y": 83
       },
-      "id": 27
+      "id": 26
     }
   ]
 }

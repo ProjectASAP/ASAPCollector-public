@@ -52,6 +52,24 @@ def ts(title, targets, unit=None, desc="", stack=False, log=False, w=12, x=0, h=
                      "tooltip": {"mode": "multi", "sort": "none"}}}, w, h, x)
 
 
+def stat(title, expr, legend, desc, w, x, h=4):
+    add({"type": "stat", "title": title, "datasource": PROM, "description": desc,
+         "targets": [{"refId": "A", "expr": expr, "legendFormat": legend, "instant": True}],
+         "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+                     "colorMode": "none", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center"},
+         "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []}}, w, h, x)
+
+
+def traffic(shape_title, shape_expr, shape_legend, shape_desc):
+    """The current volume and shape of the input, as numbers."""
+    global y
+    stat("Input: points per second (both sources)",
+         'max(sum by (method) (last_over_time(asap_points{method=~"sketch|exact",attribute_key="http.route"}[2m]))) / 60',
+         "points/s", "Points per second of the latest window, both sources together.", 8, 0)
+    stat(shape_title, shape_expr, shape_legend, shape_desc, 16, 8)
+    y += 4
+
+
 def box(name, small, color, bg):
     return (f'<td style="border:none;padding:0"><div style="border:1px solid {color};border-radius:6px;'
             f'padding:5px 8px;text-align:center;background:{bg}"><b>{name}</b><br><small>{small}</small></div></td>')
@@ -133,6 +151,9 @@ def topk():
     add({"type": "text", "title": "Three approaches to the same question: which routes are heavy hitters, and which are new?",
          "options": {"mode": "html", "content": html}}, 24, 10, 0)
     y += 10
+    traffic("Data shape: distinct routes in the latest window",
+            'max(last_over_time(asap_distinct{method="exact",attribute_key="http.route"}[2m]))', "distinct routes",
+            "From the exact pipeline.")
 
     row("Answers")
     TOP10 = 'rank=~"[1-9]|10"'
@@ -207,17 +228,6 @@ def topk():
        [('asap_hh_are{method="sketch"}', "sketch")], unit="percentunit", x=12, names=("sketch",))
     y += 8
 
-    row("Traffic over time: volume and shape")
-    ts("End-to-end throughput: points per second each window delivered to the end of its pipeline",
-       [('sum by (method) (last_over_time(asap_points{method=~"sketch|exact",attribute_key="http.route"}[2m])) / 60',
-         "{{method}}"),
-        ('sum(last_over_time(asap_points{method="raw"}[2m])) / 60', "store and query")],
-       unit="short", desc="Both sources together. The generators skip batches a pipeline cannot take, so a "
-       "pipeline that falls behind delivers less. Store and query: points prometheus-raw acknowledged within 50 s of "
-       "the window's end. A pipeline that stops reporting shows a gap after 2 minutes.", names=("sketch", "exact", "store and query"))
-    ts("Data shape: distinct routes per window (exact)",
-       [('asap_distinct{method="exact",attribute_key="http.route"}', "distinct routes")], unit="short", x=12)
-    y += 8
 
 
 
@@ -352,6 +362,10 @@ def cardinality():
     add({"type": "text", "title": "Three approaches to the same question: how many distinct values does each attribute have?",
          "options": {"mode": "html", "content": html}}, 24, 11, 0)
     y += 11
+    traffic("Data shape: distinct values per key in the latest window",
+            'max by (attribute_key) (last_over_time(asap_distinct{method="exact"}[2m])) or max by (attribute_key) '
+            '(last_over_time(asap_distinct{method="sketch",bound="estimate"}[2m]))', "{{attribute_key}}",
+            "From the exact pipeline; the sketch's estimate for a key exact has not answered recently.")
 
     row("Answers")
 
@@ -421,18 +435,6 @@ def cardinality():
        "than 1% (a source missed a merge).")
     y += 8
 
-    row("Traffic over time: volume and shape")
-    ts("End-to-end throughput: points per second each window delivered to the end of its pipeline",
-       [('sum by (method) (last_over_time(asap_points{method=~"sketch|exact",attribute_key="http.route"}[2m])) / 60',
-         "{{method}}"),
-        ('sum(last_over_time(asap_points{method="raw"}[2m])) / 60', "store and query")],
-       unit="short", desc="Both sources together. The generators skip batches a pipeline cannot take, so a "
-       "pipeline that falls behind delivers less. Store and query: points prometheus-raw acknowledged within 50 s of "
-       "the window's end. A pipeline that stops reporting shows a gap after 2 minutes.", names=("sketch", "exact", "store and query"))
-    ts("Data shape: distinct values per key per window (exact), log scale",
-       [('max by (attribute_key) (asap_distinct{method="exact"})', "{{attribute_key}}")], unit="short", x=12,
-       log=True)
-    y += 8
 
 
 {"topk": topk, "cardinality": cardinality}[USE_CASE]()
