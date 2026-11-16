@@ -427,7 +427,12 @@ def cardinality():
     def same_window(expr, method):
         # Prometheus's lookback would otherwise pair a stale answer with a newer exact window.
         stamp = lambda m: f'max by (attribute_key) (timestamp(asap_distinct{{method="{m}"}}))'
-        return f"({expr}) and on (attribute_key) ({stamp(method)} == on (attribute_key) {stamp('exact')})"
+        # A window whose points differ by more than 1% from exact's lost a source: no error for it.
+        points = lambda m: ('sum(asap_points{method="raw"})' if m == "raw"
+                            else f'max(asap_points{{method="{m}",attribute_key="http.route"}})')
+        complete = f"abs({points(method)} - {points('exact')}) <= 0.01 * {points(method)}"
+        return (f"({expr}) and on (attribute_key) ({stamp(method)} == on (attribute_key) {stamp('exact')})"
+                f" and on () ({complete})")
 
     for i, method in enumerate(("sketch", "raw")):
         est = f'max by (attribute_key) (asap_distinct{{method="{method}",bound="estimate"}})'
@@ -435,7 +440,8 @@ def cardinality():
            [(same_window(f'abs({est} - on (attribute_key) {ex}) / on (attribute_key) {ex}', method),
              "{{attribute_key}}")],
            unit="percentunit", x=12 * i,
-           desc="|estimate - exact| / exact per window." + (
+           desc="|estimate - exact| / exact per window; left out when the two windows' points differ by more "
+           "than 1% (a source missed a merge)." + (
                " Store and query is exact while every point reaches prometheus-raw." if method == "raw" else ""))
     y += 8
 

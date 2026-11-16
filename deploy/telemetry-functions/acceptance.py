@@ -56,6 +56,7 @@ def scaled_copy(directory, into):
         text = src.read_text()
         text = text.replace("window_size: 60s", f"window_size: {WINDOW_S}s")
         text = text.replace("window: 60s", f"window: {WINDOW_S}s")
+        text = text.replace("grace: 60s", f"grace: {60 // SCALE}s")
         # The 5 s timeout for a missing source is not scaled: merges emit as
         # soon as both sources sent a window, and shared CI runners can be slow.
         text = re.sub(r"\n\s*- \{after_seconds: \d+, (signals_per_second|attribute: [^,]+, cardinality): \d+\}", "", text)

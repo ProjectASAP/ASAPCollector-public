@@ -420,11 +420,11 @@
         "type": "prometheus",
         "uid": "asap-prometheus-cardinality"
       },
-      "description": "|estimate - exact| / exact per window.",
+      "description": "|estimate - exact| / exact per window; left out when the two windows' points differ by more than 1% (a source missed a merge).",
       "targets": [
         {
           "refId": "A",
-          "expr": "(abs(max by (attribute_key) (asap_distinct{method=\"sketch\",bound=\"estimate\"}) - on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) and on (attribute_key) (max by (attribute_key) (timestamp(asap_distinct{method=\"sketch\"})) == on (attribute_key) max by (attribute_key) (timestamp(asap_distinct{method=\"exact\"})))",
+          "expr": "(abs(max by (attribute_key) (asap_distinct{method=\"sketch\",bound=\"estimate\"}) - on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) and on (attribute_key) (max by (attribute_key) (timestamp(asap_distinct{method=\"sketch\"})) == on (attribute_key) max by (attribute_key) (timestamp(asap_distinct{method=\"exact\"}))) and on () (abs(max(asap_points{method=\"sketch\",attribute_key=\"http.route\"}) - max(asap_points{method=\"exact\",attribute_key=\"http.route\"})) <= 0.01 * max(asap_points{method=\"sketch\",attribute_key=\"http.route\"}))",
           "legendFormat": "{{attribute_key}}"
         }
       ],
@@ -463,11 +463,11 @@
         "type": "prometheus",
         "uid": "asap-prometheus-cardinality"
       },
-      "description": "|estimate - exact| / exact per window. Store and query is exact while every point reaches prometheus-raw.",
+      "description": "|estimate - exact| / exact per window; left out when the two windows' points differ by more than 1% (a source missed a merge). Store and query is exact while every point reaches prometheus-raw.",
       "targets": [
         {
           "refId": "A",
-          "expr": "(abs(max by (attribute_key) (asap_distinct{method=\"raw\",bound=\"estimate\"}) - on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) and on (attribute_key) (max by (attribute_key) (timestamp(asap_distinct{method=\"raw\"})) == on (attribute_key) max by (attribute_key) (timestamp(asap_distinct{method=\"exact\"})))",
+          "expr": "(abs(max by (attribute_key) (asap_distinct{method=\"raw\",bound=\"estimate\"}) - on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) / on (attribute_key) max by (attribute_key) (asap_distinct{method=\"exact\"})) and on (attribute_key) (max by (attribute_key) (timestamp(asap_distinct{method=\"raw\"})) == on (attribute_key) max by (attribute_key) (timestamp(asap_distinct{method=\"exact\"}))) and on () (abs(sum(asap_points{method=\"raw\"}) - max(asap_points{method=\"exact\",attribute_key=\"http.route\"})) <= 0.01 * sum(asap_points{method=\"raw\"}))",
           "legendFormat": "{{attribute_key}}"
         }
       ],

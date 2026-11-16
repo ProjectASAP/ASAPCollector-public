@@ -1,5 +1,7 @@
 # Exact pipeline, stage 2: add up both sources' exact windows as soon as both
-# sent a window (5 s timeout).
+# sent a window (60 s timeout: at the top rate a source's exact window takes
+# more than 5 s to arrive, and a window emitted without it would halve the
+# ground truth).
 version: otel_dataflow/v1
 engine:
   http_admin:
@@ -21,7 +23,7 @@ groups:
                 http: {listening_addr: "0.0.0.0:4318", wait_for_result: false, max_request_body_size: 1GiB}
           merge:
             type: urn:asap:processor:exact_merge
-            config: {sources: 2, grace: 5s}
+            config: {sources: 2, grace: 60s}
           to_detector:
             type: exporter:otlp_http
             config:
