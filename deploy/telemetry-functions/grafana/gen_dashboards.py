@@ -7,8 +7,9 @@ import sys
 
 USE_CASE, OUT = sys.argv[1], sys.argv[2]
 PROM = {"type": "prometheus", "uid": f"asap-prometheus-{USE_CASE}"}
-COLORS = {"sketch": "#5794f2", "exact": "#ff9830", "store and query": "#8e8e8e",
-          "raw": "#8e8e8e"}
+COLORS = {"sketch": "#5794f2", "exact": "#ff9830", "raw": "#8e8e8e"}
+# What each approach is called on the dashboards (method label -> name).
+NAMES = {"sketch": "Sketch", "exact": "Exact", "raw": "Raw"}
 panels = []
 y = 0
 
@@ -67,11 +68,19 @@ def box(name, small, color, bg):
 ARROW = '<td style="border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap">&rarr;</td>'
 
 
-def flow(cells):
-    return "<tr>" + ARROW.join(cells) + "</tr>"
+def approaches(rows, notes):
+    """The three approaches, one row each: name and idea on the left, then each
+    step as a box (what it does, and its container in small grey)."""
+    def label(name, idea, color):
+        return (f'<td style="border:none;padding:0 10px 0 0;white-space:nowrap;vertical-align:middle">'
+                f'<b style="color:{color}">{name}</b><br><small>{idea}</small></td>')
+    html = '<table style="width:100%;border-collapse:separate;border-spacing:0 6px;border:none">'
+    for name, idea, (color, bg), steps in rows:
+        cells = [box(what, f'<span style="color:#8e8e8e">{container}</span>', color, bg) for what, container in steps]
+        html += "<tr>" + label(name, idea, color) + ARROW.join(cells) + "</tr>"
+    return html + "</table>" + "".join(f'<p style="margin:4px 0 0 0"><small>{n}</small></p>' for n in notes)
 
 
-backend = ("#6e7681", "none")
 blue, orange, grey = ("#5794f2", "rgba(87,148,242,0.12)"), ("#ff9830", "rgba(255,152,48,0.10)"), ("#8e8e8e", "rgba(142,142,142,0.12)")
 
 
@@ -86,7 +95,7 @@ def colored(name, method):
 
 def window_compared(h):
     add({"type": "stat", "title": "Window compared (end)", "datasource": PROM,
-         "description": "End of the window the table compares: the latest one store and query has answered.",
+         "description": "End of the window the table compares: the latest one Raw has answered.",
          "targets": [{"refId": "A", "expr": "asap_compare_window_end", "instant": True}],
          "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
                      "colorMode": "none", "graphMode": "none", "textMode": "value"},
@@ -97,7 +106,7 @@ def events(kind, title):
     """Table of the `asap_event` gauges of `kind` in the dashboard's time range."""
     global y
     add({"type": "table", "title": title, "datasource": PROM,
-         "description": "Detectors (sketch, exact) and the query job (store and query) write each event as an "
+         "description": "Detectors (sketch, exact) and the query job (Raw) write each event as an "
                         "asap_event gauge whose value is its window's end. Newest first.",
          "targets": [{"refId": "A", "format": "table", "instant": True,
                       "expr": f'last_over_time(asap_event{{kind="{kind}"}}[$__range]) * 1000'}],
@@ -115,29 +124,34 @@ def events(kind, title):
 
 def topk():
     global y
-    html = ('<table style="width:100%;border-collapse:separate;border-spacing:0 6px;border:none">'
-            + flow([box("generator-a/b", "sources A and B", *blue),
-                    box("branch-a/b", "Count-Min 4&times;512 + top-20 heap per 1-min window", *blue),
-                    box("merge", "both sources&#39; sketches per window", *blue),
-                    box("detector", "top-20 with bounds; new heavy hitters", *blue),
-                    box("prometheus-sketch", "query: the stored top-20", *backend)])
-            + flow([box("exact-generator-a/b", "same points", *orange),
-                    box("exact-branch-a/b", "route &rarr; count map per 1-min window", *orange),
-                    box("exact-merge", "adds both sources&#39; maps: every key", *orange),
-                    box("exact-detector", "exact top-20; new heavy hitters", *orange),
-                    box("prometheus-exact", "query: the stored top-20", *backend)])
-            + flow([box("raw-generator-a/b", "same points", *grey),
-                    box("otlp-forwarder-a/b", "forwards each point immediately (no window)", *grey),
-                    box("prometheus-raw", "stores every raw point, one sample each", *grey),
-                    box("query-job", "PromQL top-20 over the last 60 s; new heavy hitters", *grey)])
-            + "</table>"
-            "<p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Traffic grows over 30 minutes: "
-            "the rate per source doubles every 5 minutes (5k to 80k points/s), <code>/new/hot-route</code> takes 15% "
-            "of traffic at minute 10, and the number of routes grows from 100,000 to 1,000,000 at minute 15. "
-            "Each approach writes to its own Prometheus. otlp-forwarder adds a <code>point_slot</code> label so points of "
-            "one series at the same millisecond stay separate samples. hh-accuracy compares the sketch with exact; "
-            "query-job compares store and query with exact and times every approach's query.</small></p>")
-    add({"type": "text", "title": "Three approaches to the same question: which routes are heavy hitters, and which are new?",
+    html = approaches([
+        ("Sketch", "summarize each minute at the source", blue, [
+            ("Sources A and B", "generator-a/b"),
+            ("Summarize each minute: Count-Min sketch + top-20 list", "branch-a/b"),
+            ("Combine A and B", "merge"),
+            ("Top routes, and which are new", "detector"),
+            ("Store the answer", "prometheus-sketch"),
+            ("Query: read the answer", "query-job")]),
+        ("Exact", "count every route each minute", orange, [
+            ("Sources A and B (same points)", "exact-generator-a/b"),
+            ("Count every route each minute", "exact-branch-a/b"),
+            ("Add up A and B", "exact-merge"),
+            ("Top routes, and which are new", "exact-detector"),
+            ("Store the answer", "prometheus-exact"),
+            ("Query: read the answer", "query-job")]),
+        ("Raw", "store every point, compute when asked", grey, [
+            ("Sources A and B (same points)", "raw-generator-a/b"),
+            ("Forward each point as it arrives (OTLP forwarder, no window)", "raw-sink-a/b"),
+            ("Store every point", "prometheus-raw"),
+            ("Query: compute the top 20 of the last 60 s", "query-job")]),
+    ], ["Same input for all three. Traffic grows over 30 minutes: the rate per source doubles every 5 minutes "
+        "(5k to 80k points/s), <code>/new/hot-route</code> takes 15% of traffic at minute 10, and the number of "
+        "routes grows from 100,000 to 1,000,000 at minute 15. Every step is one container pinned to one CPU; each "
+        "approach has its own Prometheus.",
+        "Raw adds a <code>point_slot</code> label so points of one route in the same millisecond stay separate "
+        "samples (Prometheus keeps one sample per series and millisecond). hh-accuracy compares Sketch with Exact; "
+        "query-job compares Raw with Exact and times every approach&#39;s query."])
+    add({"type": "text", "title": "Three ways to answer: which routes get the most requests each minute, and which are new?",
          "options": {"mode": "html", "content": html}}, 24, 10, 0)
     y += 10
     traffic("Data shape: distinct routes in the latest window",
@@ -179,14 +193,14 @@ def topk():
                    (top10("raw", "raw_rank"), "raw"), (error("sketch"), "sketch_error"), (error("raw"), "raw_error")]
         columns = {"key": "Route", "exact_rank": "Exact rank", "Value #A": "Exact count",
                    "sketch_rank": "Sketch rank", "Value #B": "Sketch count", "Value #D": "Sketch error",
-                   "raw_rank": "Store+query rank", "Value #C": "Store+query count",
-                   "Value #E": "Store+query error"}
+                   "raw_rank": "Raw rank", "Value #C": "Raw count",
+                   "Value #E": "Raw error"}
 
 
 
 
-        add({"type": "table", "title": "Top-10 routes of the three approaches, latest window store and query answered (union of their top-10s)",
-             "description": "One row per route in any approach's top-10, all from the latest window store and query has "
+        add({"type": "table", "title": "Top-10 routes of the three approaches, latest window Raw answered (union of their top-10s)",
+             "description": "One row per route in any approach's top-10, all from the latest window Raw has "
                             "answered (query-job republishes sketch and exact for it), which lags behind when "
                             "prometheus-raw is slow; the panel on the right shows which window. Error is (count - exact) / exact; "
                             "empty when the route is outside that approach's reported top-20.",
@@ -201,7 +215,7 @@ def topk():
                      "renameByName": columns}},
                  {"id": "convertFieldType", "options": {"conversions": [
                      {"targetField": c, "destinationType": "number"}
-                     for c in ["Exact rank", "Sketch rank", "Store+query rank"]]}}],
+                     for c in ["Exact rank", "Sketch rank", "Raw rank"]]}}],
              "options": {"showHeader": True, "sortBy": [{"displayName": "Exact count", "desc": True}]},
              "fieldConfig": {"defaults": {"decimals": 0, "custom": {"align": "auto"}},
                              "overrides": [
@@ -209,12 +223,12 @@ def topk():
                                          {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
                                  by_name("Exact count", {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["exact"]}},
                                          {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
-                                 by_name("Store+query count",
+                                 by_name("Raw count",
                                          {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["raw"]}},
                                          {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
                                  by_name("Route", {"id": "custom.width", "value": 150}),
                                  by_name("Sketch error", {"id": "unit", "value": "percent"}, {"id": "decimals", "value": 1}),
-                                 by_name("Store+query error", {"id": "unit", "value": "percent"},
+                                 by_name("Raw error", {"id": "unit", "value": "percent"},
                                          {"id": "decimals", "value": 1})]}}, 20, 12, 0)
         window_compared(12)
         y += 12
@@ -224,12 +238,14 @@ def topk():
 
 def timing(raw_query):
     """One stacked bar per approach, from data generated to the query result:
-    window wait (the configured window; none for store and query), time until
+    window wait (the configured window; none for Raw), time until
     the data is queryable, and the query."""
     global y
     row("From data generated to query result (latest window)")
-    named = lambda e: (f'label_replace(label_replace({e}, "approach", "$1", "method", "(.*)"), '
-                       f'"approach", "store and query", "method", "raw")')
+    def named(e):
+        for method, name in NAMES.items():
+            e = f'label_replace({e}, "approach", "{name}", "method", "{method}")'
+        return e
     latest = lambda m: f'max by (method) (last_over_time({m}[5m]))'
     segments = [
         ("wait for the window to end", latest("asap_window_wait_seconds")),
@@ -239,12 +255,12 @@ def timing(raw_query):
     ]
     add({"type": "barchart", "title": "Data generated -> query result: where the time goes", "datasource": PROM,
          "description": "1. Window wait: sketch and exact compute per 1-minute window (the configured window), "
-                        "so a window's answer exists only after the window ends; store and query has no window. "
+                        "so a window's answer exists only after the window ends; Raw has no window. "
                         "2. Then until the data is queryable: sketch and exact until the detector wrote the window's "
-                        "answer to their Prometheus; store and query until prometheus-raw acknowledged the window's "
+                        "answer to their Prometheus; Raw until prometheus-raw acknowledged the window's "
                         "last point (otlp-forwarder forwards each point as it arrives). 3. The query that returns "
                         "the answer on the approach's own Prometheus: sketch and exact read the stored answer "
-                        f"(estimates only); store and query computes it from every raw sample ({raw_query}).",
+                        f"(estimates only); Raw computes it from every raw sample ({raw_query}).",
          "targets": [{"refId": chr(65 + i), "expr": named(e), "format": "table", "instant": True}
                      for i, (_, e) in enumerate(segments)],
          "transformations": [
@@ -271,9 +287,9 @@ def timing(raw_query):
 
 APPROACHES = [
     # (name, color key, ingest stages, collector stages after ingest, processes after ingest)
-    ("sketch", "sketch", "branch-.", "merge|detector", "prometheus-sketch"),
-    ("exact", "exact", "exact-branch-.", "exact-merge|exact-detector", "prometheus-exact"),
-    ("store and query", "raw", "raw-sink-.", None, "prometheus-raw|query-job"),
+    ("Sketch", "sketch", "branch-.", "merge|detector", "prometheus-sketch"),
+    ("Exact", "exact", "exact-branch-.", "exact-merge|exact-detector", "prometheus-exact"),
+    ("Raw", "raw", "raw-sink-.", None, "prometheus-raw|query-job"),
 ]
 
 
@@ -314,7 +330,7 @@ def resources():
     bars("CPU cores: whole approach",
          [(name, cpu(whole(ingest, after), procs)) for name, _, ingest, after, procs in APPROACHES], "short",
          "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, otlp-forwarder-a/b), merge and "
-         "detector, its Prometheus, and for store and query the query job.", 8, 0)
+         "detector, its Prometheus, and for Raw the query job.", 8, 0)
     bars("Memory: whole approach",
          [(name, mem(whole(ingest, after), procs)) for name, _, ingest, after, procs in APPROACHES],
          "bytes", "Resident memory of every component of the approach, its Prometheus included.", 8, 8)
@@ -322,10 +338,10 @@ def resources():
                                f'otel_scope_node_type="receiver"}}[2m])) * 8')
     bars("Network: total bits per second of the whole approach",
          [(name, total(received(whole(ingest, after)),
-                       *(['sum(rate(asap_raw_sent_bytes{method="raw"}[3m])) * 8'] if name == "store and query" else [])))
-          for name, _, ingest, after, _ in APPROACHES],
+                       *(['sum(rate(asap_raw_sent_bytes{method="raw"}[3m])) * 8'] if key == "raw" else [])))
+          for name, key, ingest, after, _ in APPROACHES],
          "bps", "Every hop of the approach: the raw points from the generators into its first stage, then "
-         "sketch and exact: sketches / exact maps into merge and merged windows into detector; store and query: "
+         "sketch and exact: sketches / exact maps into merge and merged windows into detector; Raw: "
          "every raw point from otlp-forwarder into prometheus-raw. The answers into the approach's Prometheus (a few "
          "kilobytes per window) are not counted.", 8, 16)
     y += 7
@@ -336,34 +352,36 @@ KEYS = ("http.route", "http.method", "k8s.pod.name", "user.id")
 
 def cardinality():
     global y
-    html = ('<table style="width:100%;border-collapse:separate;border-spacing:0 6px;border:none">'
-            + flow([box("generator-a/b", "sources A and B", *blue),
-                    box("branch-a/b", "HLL per attribute key per 1-min window", *blue),
-                    box("merge", "both sources&#39; HLLs per window", *blue),
-                    box("detector", "distinct counts with bounds; class per key", *blue),
-                    box("prometheus-sketch", "query: the stored counts", *backend)])
-            + flow([box("exact-generator-a/b", "same points", *orange),
-                    box("exact-branch-a/b", "value &rarr; count map per key per 1-min window", *orange),
-                    box("exact-merge", "adds both sources&#39; maps: every value", *orange),
-                    box("exact-detector", "exact distinct counts and classes", *orange),
-                    box("prometheus-exact", "query: the stored counts", *backend)])
-            + flow([box("raw-generator-a/b", "same points", *grey),
-                    box("otlp-forwarder-a/b", "forwards each point immediately (no window)", *grey),
-                    box("prometheus-raw", "stores every raw point, one sample each", *grey),
-                    box("query-job", "PromQL distinct count per key over the last 60 s; classes", *grey)])
-            + "</table>"
-            "<p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Four attributes: "
-            "<code>http.route</code> and <code>http.method</code> stable, <code>k8s.pod.name</code> growing 5%/min, "
-            "<code>user.id</code> unique per point. Traffic grows over 30 minutes: the rate per source doubles every "
-            "5 minutes (5k to 80k points/s), and at minute 10 <code>http.route</code> explodes from 20 to 20,000 "
-            "values. Each approach writes to its own Prometheus; query-job compares store and query with exact "
-            "and times every approach&#39;s query.</small></p>"
-            "<p style=\"margin:4px 0 0 0\"><small><b>Class</b> (per key and window, from the last 10 windows; "
-            "exact and sketch use the same rules on their own counts, so a different class means the sketch's error "
-            "crossed a threshold): <b>identifier-like</b> when distinct / points is at least 0.9, i.e. nearly every "
-            "point has a new value; else <b>growing</b> when distinct is more than 20% above the mean of the last "
-            "10 windows (needs 3); else <b>stable</b>. Not classified below 100 points.</small></p>")
-    add({"type": "text", "title": "Three approaches to the same question: how many distinct values does each attribute have?",
+    html = approaches([
+        ("Sketch", "summarize each minute at the source", blue, [
+            ("Sources A and B", "generator-a/b"),
+            ("Summarize each minute: one HyperLogLog per attribute", "branch-a/b"),
+            ("Combine A and B", "merge"),
+            ("Distinct counts, and each attribute&#39;s class", "detector"),
+            ("Store the answer", "prometheus-sketch"),
+            ("Query: read the answer", "query-job")]),
+        ("Exact", "keep every value each minute", orange, [
+            ("Sources A and B (same points)", "exact-generator-a/b"),
+            ("Keep every value of every attribute each minute", "exact-branch-a/b"),
+            ("Add up A and B", "exact-merge"),
+            ("Distinct counts, and each attribute&#39;s class", "exact-detector"),
+            ("Store the answer", "prometheus-exact"),
+            ("Query: read the answer", "query-job")]),
+        ("Raw", "store every point, compute when asked", grey, [
+            ("Sources A and B (same points)", "raw-generator-a/b"),
+            ("Forward each point as it arrives (OTLP forwarder, no window)", "raw-sink-a/b"),
+            ("Store every point", "prometheus-raw"),
+            ("Query: count distinct values per attribute over the last 60 s", "query-job")]),
+    ], ["Same input for all three. Four attributes: <code>http.route</code> and <code>http.method</code> stable, "
+        "<code>k8s.pod.name</code> growing 5%/min, <code>user.id</code> unique per point. Traffic grows over 30 "
+        "minutes: the rate per source doubles every 5 minutes (5k to 80k points/s), and at minute 10 "
+        "<code>http.route</code> explodes from 20 to 20,000 values. Every step is one container pinned to one CPU; "
+        "each approach has its own Prometheus.",
+        "<b>Class</b> (per attribute and minute, from the last 10 minutes; every approach applies the same rules to "
+        "its own counts): <b>identifier-like</b> when distinct / points is at least 0.9, i.e. nearly every point has "
+        "a new value; else <b>growing</b> when distinct is more than 20% above the mean of the last 10 minutes "
+        "(needs 3); else <b>stable</b>. Not classified below 100 points."])
+    add({"type": "text", "title": "Three ways to answer: how many distinct values does each attribute have each minute?",
          "options": {"mode": "html", "content": html}}, 24, 11, 0)
     y += 11
     traffic("Data shape: distinct values per key in the latest window",
@@ -411,13 +429,13 @@ def cardinality():
                    "max by (attribute_key, reason) (asap_compare_failed)"]
         columns = {"attribute_key": "Attribute key", "Value #A": "Exact distinct", "exact_class": "Exact class",
                    "Value #B": "Sketch estimate", "Value #D": "Sketch error", "sketch_class": "Sketch class",
-                   "Value #C": "Store+query", "Value #E": "Store+query error", "reason": "Store+query refused because"}
+                   "Value #C": "Raw", "Value #E": "Raw error", "reason": "Raw refused because"}
         hidden = ["Time", "Value #F", "Value #G", "Value #H"] + [f"Time {i}" for i in range(1, 9)]
-        add({"type": "table", "title": "Distinct values per attribute key, latest window store and query answered",
-             "description": "All from the latest window store and query has answered (query-job republishes sketch and "
+        add({"type": "table", "title": "Distinct values per attribute key, latest window Raw answered",
+             "description": "All from the latest window Raw has answered (query-job republishes sketch and "
                             "exact for it), which lags behind when prometheus-raw is slow; the panel on the right shows "
                             "which window. Error is (count - exact) / exact; when one method's window holds more than 1% fewer points than the other's (a source missed its merge), that method's count and class are left empty, and so are the errors that compare with it. Class: the detector's verdict from the last 10 windows "
-                            "(stable, growing, identifier-like). Store+query refused because: why prometheus-raw refused, "
+                            "(stable, growing, identifier-like). Raw refused because: why prometheus-raw refused, "
                             "timed out or returned nothing for the key's PromQL query, which leaves its count empty.",
              "datasource": PROM,
              "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
@@ -431,10 +449,10 @@ def cardinality():
              "options": {"showHeader": True, "sortBy": [{"displayName": "Exact distinct", "desc": True}]},
              "fieldConfig": {"defaults": {"decimals": 0, "custom": {"align": "auto"}},
                              "overrides": [colored("Exact distinct", "exact"), colored("Sketch estimate", "sketch"),
-                                           colored("Store+query", "raw"),
+                                           colored("Raw", "raw"),
                                            by_name("Sketch error", {"id": "unit", "value": "percent"},
                                                    {"id": "decimals", "value": 2}),
-                                           by_name("Store+query error", {"id": "unit", "value": "percent"},
+                                           by_name("Raw error", {"id": "unit", "value": "percent"},
                                                    {"id": "decimals", "value": 2})]}}, 20, 7, 0)
         window_compared(7)
         y += 7
@@ -448,8 +466,8 @@ timing({"topk": "one PromQL top-k query",
        "cardinality": "one PromQL distinct count per key, summed"}[USE_CASE])
 resources()
 answers()
-TITLES = {"topk": "Heavy hitters: sketch vs exact vs store and query (real collector containers)",
-          "cardinality": "Cardinality: sketch vs exact vs store and query (real collector containers)"}
+TITLES = {"topk": "Heavy hitters: sketch vs exact vs Raw (real collector containers)",
+          "cardinality": "Cardinality: sketch vs exact vs Raw (real collector containers)"}
 json.dump({"uid": f"asap-{USE_CASE}", "title": TITLES[USE_CASE],
            "schemaVersion": 39, "version": 1, "refresh": "10s", "time": {"from": "now-35m", "to": "now"},
            "panels": panels}, open(OUT, "w"), indent=2)

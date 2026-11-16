@@ -7,12 +7,15 @@ each pinned to its own CPU, connected by OTLP/HTTP over the compose network.
 Three approaches run side by side over the same input and share no processor:
 
 ```text
-sketch:          generator-a/b -> branch-a/b (sketch per window) -> merge -> detector -> prometheus-sketch
-exact:           exact-generator-a/b -> exact-branch-a/b (exact window) -> exact-merge -> exact-detector -> prometheus-exact
-store and query: raw-generator-a/b -> raw-sink-a/b -> prometheus-raw; query-job runs the answer query (PromQL) over prometheus-raw
+Sketch (summarize each minute at the source):
+  generator-a/b -> branch-a/b (sketch per minute) -> merge -> detector -> prometheus-sketch
+Exact (count every value each minute):
+  exact-generator-a/b -> exact-branch-a/b (exact counts per minute) -> exact-merge -> exact-detector -> prometheus-exact
+Raw (store every point, compute when asked):
+  raw-generator-a/b -> raw-sink-a/b (forwards each point, no window) -> prometheus-raw; query-job computes the answer with PromQL
 ```
 
-The store-and-query pipeline (`method="raw"`) keeps every raw point and
+The raw pipeline (`method="raw"`) keeps every raw point and
 computes the answer later, the way Prometheus is used without inline
 functions: every raw point is one sample in `prometheus-raw`.
 
@@ -74,7 +77,7 @@ definitions for all three approaches:
    wait): sketch and exact compute per 1-minute window, so a window's answer
    exists only after the window (60 s, the configured window) ends and then
    the detector sent it to its Prometheus (Prometheus stores it milliseconds
-   later). Store and query has no window: raw-sink (shown as
+   later). Raw has no window: raw-sink (shown as
    "otlp-forwarder") forwards each point as it arrives; its delay is until
    `prometheus-raw` acknowledged the window's last point.
 2. Query latency (`asap_query_seconds`): the query that returns the window's
@@ -101,7 +104,7 @@ in Prometheus to find which stage the delay comes from.
 **Whole-system cost.** The monitoring Prometheus also scrapes the three
 pipeline Prometheus, itself and the query job, so the dashboards show the CPU,
 memory and network of each approach as bars: sketch and exact count their four
-stages and their Prometheus, store and query its sinks, `prometheus-raw` and the
+stages and their Prometheus, raw its sinks, `prometheus-raw` and the
 query job. Network counts every hop of the approach, including the raw points
 raw-sink sends to `prometheus-raw` (`asap_raw_sent_bytes`). The monitoring Prometheus belongs to no approach and is not shown.
 
@@ -226,9 +229,9 @@ fails. The checks:
 | --- | --- |
 | all | every stage up; points per window equal the offered rate (no backpressure); sketch and exact windows hold the same points; every pipeline reports its window completion delay (the raw pipeline's points per window are reported, not required); merges and detectors report their timing; the query job times the sketch and exact backend queries |
 | latency | exact p50/p99 inside the sketch's bound (routes with at least 2,000 points) |
-| cardinality | sketch and exact give every key the same class; the generated classes are found; distinct-count error at most 2%; store and query answers every key from `prometheus-raw` within 1% of exact; class events in Prometheus |
+| cardinality | sketch and exact give every key the same class; the generated classes are found; distinct-count error at most 2%; raw answers every key from `prometheus-raw` within 1% of exact; class events in Prometheus |
 | drift | the changed route drifts in both methods; no other route does; drift event in Prometheus |
-| topk | the new route enters both top-10s; sketch recall@10 at least 0.9; heavy-hitter precision and recall at least 0.9; store and query answers from `prometheus-raw` with heavy-hitter recall at least 0.9; novelty event in Prometheus |
+| topk | the new route enters both top-10s; sketch recall@10 at least 0.9; heavy-hitter precision and recall at least 0.9; raw answers from `prometheus-raw` with heavy-hitter recall at least 0.9; novelty event in Prometheus |
 
 CI runs it on every PR (`.github/workflows/ci.yml`) with the stages sharing
 the runner's CPUs: a correctness check, not a capacity measurement.

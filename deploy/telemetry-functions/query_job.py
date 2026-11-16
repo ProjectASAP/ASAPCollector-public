@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Query job: the answer step of the store-and-query (raw) baseline, and each
+"""Query job: the answer step of the Raw baseline (store every point, compute when asked), and each
 approach's timing per window: data available for query, query latency, and
 query result computed minus data generated.
 
@@ -9,7 +9,7 @@ complete in each pipeline:
 
 * sketch and exact: times the PromQL query that reads the window's answer
   from that pipeline's Prometheus (`asap_query_seconds`).
-* raw (store and query): once both raw sinks report the window stored in
+* raw: once both raw sinks report the window stored in
   prometheus-raw and the exact answer is in, computes the answer from the raw
   samples with PromQL and times it (`asap_query_seconds`; the whole answer
   when it takes several queries).
@@ -54,7 +54,7 @@ keys, with the reason; the cardinality answers of a method whose window holds mo
 points than the other's, because a source missed its merge, are left out) and that window's end
 (`asap_compare_window_end`, ms). These carry no
 timestamp, so a dashboard always finds the latest compared window however far
-store and query lags behind.
+raw lags behind.
 
 The raw answer runs once exact has answered the same window, so a slow exact
 pipeline delays it; the timing gauges come from the pipelines' own gauges and is not

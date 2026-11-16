@@ -198,14 +198,14 @@ def cardinality_checks(stack, t):
             for k in keys if (k, "sketch") in distinct and (k, "exact") in distinct}
     yield check("distinct-count error <= 2% for every key", errs and max(errs.values()) <= 0.02,
                 ", ".join(f"{k} {e:.2%}" for k, e in errs.items()))
-    # Store and query answers later than exact: compare the latest window in
+    # Raw answers later than exact: compare the latest window in
     # which it answered every key exact did.
     raw = {m["attribute_key"]: series for m, series in stack.matrix('asap_distinct{method="raw"}')}
     exact = {m["attribute_key"]: series for m, series in stack.matrix('asap_distinct{method="exact"}')}
     end = max((e for e in set.intersection(*[set(v) for v in exact.values()])
                if all(e in raw.get(k, {}) for k in exact)), default=None) if exact else None
     raw_errs = {k: abs(raw[k][end] - exact[k][end]) / exact[k][end] for k in exact} if end else {}
-    yield check("store and query: distinct counts from prometheus-raw, error <= 1% for every key",
+    yield check("raw: distinct counts from prometheus-raw, error <= 1% for every key",
                 raw_errs and max(raw_errs.values()) <= 0.01,
                 ", ".join(f"{k} {e:.2%}" for k, e in sorted(raw_errs.items()))
                 or f"no window with every key answered; never answered: {sorted(set(exact) - set(raw))}")
@@ -243,7 +243,7 @@ def topk_checks(stack, t):
     raw = {m["__name__"]: v for m, v in stack.vector(
         '{__name__=~"asap_hh_(precision|recall)",method="raw"}')}
     query = stack.vector('max_over_time(asap_query_seconds{method="raw"}[5m])')
-    yield check("store and query: top-k from prometheus-raw, heavy-hitter recall >= 0.9",
+    yield check("raw: top-k from prometheus-raw, heavy-hitter recall >= 0.9",
                 query and raw.get("asap_hh_recall", 0) >= 0.9,
                 ", ".join(f"{k.removeprefix('asap_hh_')} {v:.3f}" for k, v in sorted(raw.items()))
                 + (f"; PromQL query {query[0][1]:.2f} s" if query else "; no raw query timed"))

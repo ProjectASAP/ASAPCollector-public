@@ -1,6 +1,6 @@
 {
   "uid": "asap-topk",
-  "title": "Heavy hitters: sketch vs exact vs store and query (real collector containers)",
+  "title": "Heavy hitters: sketch vs exact vs Raw (real collector containers)",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "10s",
@@ -11,10 +11,10 @@
   "panels": [
     {
       "type": "text",
-      "title": "Three approaches to the same question: which routes are heavy hitters, and which are new?",
+      "title": "Three ways to answer: which routes get the most requests each minute, and which are new?",
       "options": {
         "mode": "html",
-        "content": "<table style=\"width:100%;border-collapse:separate;border-spacing:0 6px;border:none\"><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>generator-a/b</b><br><small>sources A and B</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>branch-a/b</b><br><small>Count-Min 4&times;512 + top-20 heap per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>merge</b><br><small>both sources&#39; sketches per window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>detector</b><br><small>top-20 with bounds; new heavy hitters</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>prometheus-sketch</b><br><small>query: the stored top-20</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-branch-a/b</b><br><small>route &rarr; count map per 1-min window</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-merge</b><br><small>adds both sources&#39; maps: every key</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>exact-detector</b><br><small>exact top-20; new heavy hitters</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #6e7681;border-radius:6px;padding:5px 8px;text-align:center;background:none\"><b>prometheus-exact</b><br><small>query: the stored top-20</small></div></td></tr><tr><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>raw-generator-a/b</b><br><small>same points</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>otlp-forwarder-a/b</b><br><small>forwards each point immediately (no window)</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>prometheus-raw</b><br><small>stores every raw point, one sample each</small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>query-job</b><br><small>PromQL top-20 over the last 60 s; new heavy hitters</small></div></td></tr></table><p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Traffic grows over 30 minutes: the rate per source doubles every 5 minutes (5k to 80k points/s), <code>/new/hot-route</code> takes 15% of traffic at minute 10, and the number of routes grows from 100,000 to 1,000,000 at minute 15. Each approach writes to its own Prometheus. otlp-forwarder adds a <code>point_slot</code> label so points of one series at the same millisecond stay separate samples. hh-accuracy compares the sketch with exact; query-job compares store and query with exact and times every approach's query.</small></p>"
+        "content": "<table style=\"width:100%;border-collapse:separate;border-spacing:0 6px;border:none\"><tr><td style=\"border:none;padding:0 10px 0 0;white-space:nowrap;vertical-align:middle\"><b style=\"color:#5794f2\">Sketch</b><br><small>summarize each minute at the source</small></td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>Sources A and B</b><br><small><span style=\"color:#8e8e8e\">generator-a/b</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>Summarize each minute: Count-Min sketch + top-20 list</b><br><small><span style=\"color:#8e8e8e\">branch-a/b</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>Combine A and B</b><br><small><span style=\"color:#8e8e8e\">merge</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>Top routes, and which are new</b><br><small><span style=\"color:#8e8e8e\">detector</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>Store the answer</b><br><small><span style=\"color:#8e8e8e\">prometheus-sketch</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #5794f2;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(87,148,242,0.12)\"><b>Query: read the answer</b><br><small><span style=\"color:#8e8e8e\">query-job</span></small></div></td></tr><tr><td style=\"border:none;padding:0 10px 0 0;white-space:nowrap;vertical-align:middle\"><b style=\"color:#ff9830\">Exact</b><br><small>count every route each minute</small></td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>Sources A and B (same points)</b><br><small><span style=\"color:#8e8e8e\">exact-generator-a/b</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>Count every route each minute</b><br><small><span style=\"color:#8e8e8e\">exact-branch-a/b</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>Add up A and B</b><br><small><span style=\"color:#8e8e8e\">exact-merge</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>Top routes, and which are new</b><br><small><span style=\"color:#8e8e8e\">exact-detector</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>Store the answer</b><br><small><span style=\"color:#8e8e8e\">prometheus-exact</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #ff9830;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(255,152,48,0.10)\"><b>Query: read the answer</b><br><small><span style=\"color:#8e8e8e\">query-job</span></small></div></td></tr><tr><td style=\"border:none;padding:0 10px 0 0;white-space:nowrap;vertical-align:middle\"><b style=\"color:#8e8e8e\">Raw</b><br><small>store every point, compute when asked</small></td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>Sources A and B (same points)</b><br><small><span style=\"color:#8e8e8e\">raw-generator-a/b</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>Forward each point as it arrives (OTLP forwarder, no window)</b><br><small><span style=\"color:#8e8e8e\">raw-sink-a/b</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>Store every point</b><br><small><span style=\"color:#8e8e8e\">prometheus-raw</span></small></div></td><td style=\"border:none;padding:0 6px;color:#8e8e8e;text-align:center;white-space:nowrap\">&rarr;</td><td style=\"border:none;padding:0\"><div style=\"border:1px solid #8e8e8e;border-radius:6px;padding:5px 8px;text-align:center;background:rgba(142,142,142,0.12)\"><b>Query: compute the top 20 of the last 60 s</b><br><small><span style=\"color:#8e8e8e\">query-job</span></small></div></td></tr></table><p style=\"margin:4px 0 0 0\"><small>Same input for all three. Traffic grows over 30 minutes: the rate per source doubles every 5 minutes (5k to 80k points/s), <code>/new/hot-route</code> takes 15% of traffic at minute 10, and the number of routes grows from 100,000 to 1,000,000 at minute 15. Every step is one container pinned to one CPU; each approach has its own Prometheus.</small></p><p style=\"margin:4px 0 0 0\"><small>Raw adds a <code>point_slot</code> label so points of one route in the same millisecond stay separate samples (Prometheus keeps one sample per series and millisecond). hh-accuracy compares Sketch with Exact; query-job compares Raw with Exact and times every approach&#39;s query.</small></p>"
       },
       "gridPos": {
         "h": 10,
@@ -279,23 +279,23 @@
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "1. Window wait: sketch and exact compute per 1-minute window (the configured window), so a window's answer exists only after the window ends; store and query has no window. 2. Then until the data is queryable: sketch and exact until the detector wrote the window's answer to their Prometheus; store and query until prometheus-raw acknowledged the window's last point (otlp-forwarder forwards each point as it arrives). 3. The query that returns the answer on the approach's own Prometheus: sketch and exact read the stored answer (estimates only); store and query computes it from every raw sample (one PromQL top-k query).",
+      "description": "1. Window wait: sketch and exact compute per 1-minute window (the configured window), so a window's answer exists only after the window ends; Raw has no window. 2. Then until the data is queryable: sketch and exact until the detector wrote the window's answer to their Prometheus; Raw until prometheus-raw acknowledged the window's last point (otlp-forwarder forwards each point as it arrives). 3. The query that returns the answer on the approach's own Prometheus: sketch and exact read the stored answer (estimates only); Raw computes it from every raw sample (one PromQL top-k query).",
       "targets": [
         {
           "refId": "A",
-          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_window_wait_seconds[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "expr": "label_replace(label_replace(label_replace(max by (method) (last_over_time(asap_window_wait_seconds[5m])), \"approach\", \"Sketch\", \"method\", \"sketch\"), \"approach\", \"Exact\", \"method\", \"exact\"), \"approach\", \"Raw\", \"method\", \"raw\")",
           "format": "table",
           "instant": true
         },
         {
           "refId": "B",
-          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_data_available_seconds[5m])) - on (method) max by (method) (last_over_time(asap_window_wait_seconds[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "expr": "label_replace(label_replace(label_replace(max by (method) (last_over_time(asap_data_available_seconds[5m])) - on (method) max by (method) (last_over_time(asap_window_wait_seconds[5m])), \"approach\", \"Sketch\", \"method\", \"sketch\"), \"approach\", \"Exact\", \"method\", \"exact\"), \"approach\", \"Raw\", \"method\", \"raw\")",
           "format": "table",
           "instant": true
         },
         {
           "refId": "C",
-          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_query_seconds[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "expr": "label_replace(label_replace(label_replace(max by (method) (last_over_time(asap_query_seconds[5m])), \"approach\", \"Sketch\", \"method\", \"sketch\"), \"approach\", \"Exact\", \"method\", \"exact\"), \"approach\", \"Raw\", \"method\", \"raw\")",
           "format": "table",
           "instant": true
         }
@@ -444,24 +444,24 @@
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, otlp-forwarder-a/b), merge and detector, its Prometheus, and for store and query the query job.",
+      "description": "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, otlp-forwarder-a/b), merge and detector, its Prometheus, and for Raw the query job.",
       "targets": [
         {
           "refId": "A",
           "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
-          "legendFormat": "sketch",
+          "legendFormat": "Sketch",
           "instant": true
         },
         {
           "refId": "B",
           "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
-          "legendFormat": "exact",
+          "legendFormat": "Exact",
           "instant": true
         },
         {
           "refId": "C",
           "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
-          "legendFormat": "store and query",
+          "legendFormat": "Raw",
           "instant": true
         }
       ],
@@ -489,7 +489,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "sketch"
+              "options": "Sketch"
             },
             "properties": [
               {
@@ -504,7 +504,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "exact"
+              "options": "Exact"
             },
             "properties": [
               {
@@ -519,7 +519,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "store and query"
+              "options": "Raw"
             },
             "properties": [
               {
@@ -553,19 +553,19 @@
         {
           "refId": "A",
           "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"branch-.|merge|detector\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-sketch\"})) or vector(0))",
-          "legendFormat": "sketch",
+          "legendFormat": "Sketch",
           "instant": true
         },
         {
           "refId": "B",
           "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-exact\"})) or vector(0))",
-          "legendFormat": "exact",
+          "legendFormat": "Exact",
           "instant": true
         },
         {
           "refId": "C",
           "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"raw-sink-.\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-raw|query-job\"})) or vector(0))",
-          "legendFormat": "store and query",
+          "legendFormat": "Raw",
           "instant": true
         }
       ],
@@ -593,7 +593,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "sketch"
+              "options": "Sketch"
             },
             "properties": [
               {
@@ -608,7 +608,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "exact"
+              "options": "Exact"
             },
             "properties": [
               {
@@ -623,7 +623,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "store and query"
+              "options": "Raw"
             },
             "properties": [
               {
@@ -652,24 +652,24 @@
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Every hop of the approach: the raw points from the generators into its first stage, then sketch and exact: sketches / exact maps into merge and merged windows into detector; store and query: every raw point from otlp-forwarder into prometheus-raw. The answers into the approach's Prometheus (a few kilobytes per window) are not counted.",
+      "description": "Every hop of the approach: the raw points from the generators into its first stage, then sketch and exact: sketches / exact maps into merge and merged windows into detector; Raw: every raw point from otlp-forwarder into prometheus-raw. The answers into the approach's Prometheus (a few kilobytes per window) are not counted.",
       "targets": [
         {
           "refId": "A",
           "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0))",
-          "legendFormat": "sketch",
+          "legendFormat": "Sketch",
           "instant": true
         },
         {
           "refId": "B",
           "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0))",
-          "legendFormat": "exact",
+          "legendFormat": "Exact",
           "instant": true
         },
         {
           "refId": "C",
           "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0)) + (sum(rate(asap_raw_sent_bytes{method=\"raw\"}[3m])) * 8 or vector(0))",
-          "legendFormat": "store and query",
+          "legendFormat": "Raw",
           "instant": true
         }
       ],
@@ -697,7 +697,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "sketch"
+              "options": "Sketch"
             },
             "properties": [
               {
@@ -712,7 +712,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "exact"
+              "options": "Exact"
             },
             "properties": [
               {
@@ -727,7 +727,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "store and query"
+              "options": "Raw"
             },
             "properties": [
               {
@@ -764,8 +764,8 @@
     },
     {
       "type": "table",
-      "title": "Top-10 routes of the three approaches, latest window store and query answered (union of their top-10s)",
-      "description": "One row per route in any approach's top-10, all from the latest window store and query has answered (query-job republishes sketch and exact for it), which lags behind when prometheus-raw is slow; the panel on the right shows which window. Error is (count - exact) / exact; empty when the route is outside that approach's reported top-20.",
+      "title": "Top-10 routes of the three approaches, latest window Raw answered (union of their top-10s)",
+      "description": "One row per route in any approach's top-10, all from the latest window Raw has answered (query-job republishes sketch and exact for it), which lags behind when prometheus-raw is slow; the panel on the right shows which window. Error is (count - exact) / exact; empty when the route is outside that approach's reported top-20.",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
@@ -839,9 +839,9 @@
               "sketch_rank": "Sketch rank",
               "Value #B": "Sketch count",
               "Value #D": "Sketch error",
-              "raw_rank": "Store+query rank",
-              "Value #C": "Store+query count",
-              "Value #E": "Store+query error"
+              "raw_rank": "Raw rank",
+              "Value #C": "Raw count",
+              "Value #E": "Raw error"
             }
           }
         },
@@ -858,7 +858,7 @@
                 "destinationType": "number"
               },
               {
-                "targetField": "Store+query rank",
+                "targetField": "Raw rank",
                 "destinationType": "number"
               }
             ]
@@ -927,7 +927,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Store+query count"
+              "options": "Raw count"
             },
             "properties": [
               {
@@ -976,7 +976,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Store+query error"
+              "options": "Raw error"
             },
             "properties": [
               {
@@ -1006,7 +1006,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "End of the window the table compares: the latest one store and query has answered.",
+      "description": "End of the window the table compares: the latest one Raw has answered.",
       "targets": [
         {
           "refId": "A",
