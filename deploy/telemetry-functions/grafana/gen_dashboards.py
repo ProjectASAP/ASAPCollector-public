@@ -52,12 +52,6 @@ def ts(title, targets, unit=None, desc="", stack=False, log=False, w=12, x=0, h=
                      "tooltip": {"mode": "multi", "sort": "none"}}}, w, h, x)
 
 
-def latest(sel):
-    """Only the series of the latest window (older keys stay within the
-    lookback otherwise)."""
-    return f"{sel} and (timestamp({sel}) == scalar(max(timestamp({sel}))))"
-
-
 def box(name, small, color, bg):
     return (f'<td style="border:none;padding:0"><div style="border:1px solid {color};border-radius:6px;'
             f'padding:5px 8px;text-align:center;background:{bg}"><b>{name}</b><br><small>{small}</small></div></td>')
@@ -202,18 +196,6 @@ def topk():
                                      {"id": "decimals", "value": 1})]}}, 20, 12, 0)
     window_compared(12)
     y += 12
-    for i, (method, title) in enumerate([("sketch", "Sketch (CMS + heap): top-10 routes, latest window"),
-                                         ("exact", "Exact: top-10 routes, latest window"),
-                                         ("raw", "Store and query (PromQL over prometheus-raw): top-10 routes, latest window")]):
-        sel = f'asap_topk{{method="{method}",bound="estimate",rank=~"[1-9]|10"}}'
-        add({"type": "bargauge", "title": title, "datasource": PROM,
-             "targets": [{"refId": "A", "expr": f"sort_desc({latest(sel)})", "legendFormat": "#{{rank}} {{key}}",
-                          "instant": True}],
-             "options": {"orientation": "horizontal", "displayMode": "basic",
-                         "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}},
-             "fieldConfig": {"defaults": {"decimals": 0, "color": {"mode": "fixed", "fixedColor": COLORS[method]}},
-                             "overrides": []}}, 8, 10, 8 * i)
-    y += 10
 
     row("Accuracy against exact")
     ts("Heavy hitters (routes with >= 1% of the window's points): precision, recall, F1",

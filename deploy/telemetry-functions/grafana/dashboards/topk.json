@@ -316,138 +316,6 @@
       "id": 4
     },
     {
-      "type": "bargauge",
-      "title": "Sketch (CMS + heap): top-10 routes, latest window",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sort_desc(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"sketch\",bound=\"estimate\",rank=~\"[1-9]|10\"})))))",
-          "legendFormat": "#{{rank}} {{key}}",
-          "instant": true
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "#5794f2"
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 8,
-        "x": 0,
-        "y": 23
-      },
-      "id": 5
-    },
-    {
-      "type": "bargauge",
-      "title": "Exact: top-10 routes, latest window",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sort_desc(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"exact\",bound=\"estimate\",rank=~\"[1-9]|10\"})))))",
-          "legendFormat": "#{{rank}} {{key}}",
-          "instant": true
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "#ff9830"
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 8,
-        "x": 8,
-        "y": 23
-      },
-      "id": 6
-    },
-    {
-      "type": "bargauge",
-      "title": "Store and query (PromQL over prometheus-raw): top-10 routes, latest window",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sort_desc(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"} and (timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"}) == scalar(max(timestamp(asap_topk{method=\"raw\",bound=\"estimate\",rank=~\"[1-9]|10\"})))))",
-          "legendFormat": "#{{rank}} {{key}}",
-          "instant": true
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0,
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "#8e8e8e"
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 8,
-        "x": 16,
-        "y": 23
-      },
-      "id": 7
-    },
-    {
       "type": "row",
       "title": "Accuracy against exact",
       "collapsed": false,
@@ -456,9 +324,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 33
+        "y": 23
       },
-      "id": 8
+      "id": 5
     },
     {
       "type": "timeseries",
@@ -523,9 +391,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 34
+        "y": 24
       },
-      "id": 9
+      "id": 6
     },
     {
       "type": "timeseries",
@@ -602,9 +470,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 34
+        "y": 24
       },
-      "id": 10
+      "id": 7
     },
     {
       "type": "row",
@@ -615,9 +483,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 42
+        "y": 32
       },
-      "id": 11
+      "id": 8
     },
     {
       "type": "timeseries",
@@ -709,9 +577,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 43
+        "y": 33
       },
-      "id": 12
+      "id": 9
     },
     {
       "type": "timeseries",
@@ -752,9 +620,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 43
+        "y": 33
       },
-      "id": 13
+      "id": 10
     },
     {
       "type": "row",
@@ -765,9 +633,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 41
       },
-      "id": 14
+      "id": 11
     },
     {
       "type": "timeseries",
@@ -839,9 +707,9 @@
         "h": 9,
         "w": 8,
         "x": 0,
-        "y": 52
+        "y": 42
       },
-      "id": 15
+      "id": 12
     },
     {
       "type": "timeseries",
@@ -944,9 +812,9 @@
         "h": 9,
         "w": 8,
         "x": 8,
-        "y": 52
+        "y": 42
       },
-      "id": 16
+      "id": 13
     },
     {
       "type": "timeseries",
@@ -1018,9 +886,9 @@
         "h": 9,
         "w": 8,
         "x": 16,
-        "y": 52
+        "y": 42
       },
-      "id": 17
+      "id": 14
     },
     {
       "type": "timeseries",
@@ -1087,9 +955,9 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 61
+        "y": 51
       },
-      "id": 18
+      "id": 15
     },
     {
       "type": "timeseries",
@@ -1156,9 +1024,9 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 61
+        "y": 51
       },
-      "id": 19
+      "id": 16
     },
     {
       "type": "timeseries",
@@ -1210,9 +1078,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 61
+        "y": 51
       },
-      "id": 20
+      "id": 17
     },
     {
       "type": "row",
@@ -1223,9 +1091,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 69
+        "y": 59
       },
-      "id": 21
+      "id": 18
     },
     {
       "type": "timeseries",
@@ -1274,9 +1142,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 70
+        "y": 60
       },
-      "id": 22
+      "id": 19
     },
     {
       "type": "timeseries",
@@ -1325,9 +1193,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 70
+        "y": 60
       },
-      "id": 23
+      "id": 20
     },
     {
       "type": "timeseries",
@@ -1376,9 +1244,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 70
+        "y": 60
       },
-      "id": 24
+      "id": 21
     },
     {
       "type": "timeseries",
@@ -1427,9 +1295,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 82
+        "y": 72
       },
-      "id": 25
+      "id": 22
     },
     {
       "type": "timeseries",
@@ -1478,9 +1346,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 82
+        "y": 72
       },
-      "id": 26
+      "id": 23
     },
     {
       "type": "timeseries",
@@ -1529,9 +1397,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 82
+        "y": 72
       },
-      "id": 27
+      "id": 24
     },
     {
       "type": "timeseries",
@@ -1578,9 +1446,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 94
+        "y": 84
       },
-      "id": 28
+      "id": 25
     },
     {
       "type": "timeseries",
@@ -1627,9 +1495,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 94
+        "y": 84
       },
-      "id": 29
+      "id": 26
     },
     {
       "type": "timeseries",
@@ -1676,9 +1544,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 94
+        "y": 84
       },
-      "id": 30
+      "id": 27
     }
   ]
 }
