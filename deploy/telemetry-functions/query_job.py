@@ -381,33 +381,48 @@ def raw_topk(end):
     return latency
 
 
-def loop():
-    done = {"sketch": set(), "exact": set(), "raw": set()}
-    started = time.time()
+# Windows each method has finished, shared by the two loops.
+done = {"sketch": set(), "exact": set(), "raw": set()}
+STARTED = time.time()
+
+
+def recent(end):
+    return end > STARTED - 2 * WINDOW_S
+
+
+def every_second(step):
+    """Runs `step` once a second for ever; an error is printed and retried."""
     while True:
         try:
-            for method in ("sketch", "exact"):
-                for end in sorted(window_ends(f'asap_answer_delay{{method="{method}"}}')):
-                    if end not in done[method] and end > started - 2 * WINDOW_S:
-                        time_prometheus_answer(method, end)
-                        done[method].add(end)
-            raw_answer = {"topk": raw_topk, "cardinality": raw_distinct}.get(USE_CASE)
-            ready = window_ends('asap_answer_delay{method="raw"}')
-            for end in sorted(e for e, n in ready.items() if n >= RAW_SOURCES):
-                if end in done["raw"] or end <= started - 2 * WINDOW_S:
-                    continue
-                # Accuracy is against the exact answer of the same window.
-                if raw_answer is not None and end not in done["exact"]:
-                    continue
-                query_s = raw_answer(end) if raw_answer else None
-                if raw_answer is None or query_s is not None:
-                    done["raw"].add(end)
-                    stored = [v for _, v in at_window('asap_answer_delay{method="raw"}', end)]
-                    report_timing("raw", end, max(stored), query_s)
-            forget_before((time.time() - 15 * WINDOW_S) * 1000)
+            step()
         except Exception as e:  # keep serving; the next round retries
             print(f"query_job: {e}", flush=True)
         time.sleep(1)
+
+
+def sketch_and_exact_step():
+    for method in ("sketch", "exact"):
+        for end in sorted(window_ends(f'asap_answer_delay{{method="{method}"}}')):
+            if end not in done[method] and recent(end):
+                time_prometheus_answer(method, end)
+                done[method].add(end)
+    forget_before((time.time() - 15 * WINDOW_S) * 1000)
+
+
+def raw_step():
+    """Raw answers run in their own loop: a raw query that takes minutes or
+    hangs must not stop sketch and exact from being measured."""
+    raw_answer = {"topk": raw_topk, "cardinality": raw_distinct}.get(USE_CASE)
+    ready = window_ends('asap_answer_delay{method="raw"}')
+    for end in sorted(e for e, n in ready.items() if n >= RAW_SOURCES):
+        # Accuracy is against the exact answer of the same window.
+        if end in done["raw"] or not recent(end) or (raw_answer and end not in done["exact"]):
+            continue
+        query_s = raw_answer(end) if raw_answer else None
+        if raw_answer is None or query_s is not None:
+            done["raw"].add(end)
+            stored = [v for _, v in at_window('asap_answer_delay{method="raw"}', end)]
+            report_timing("raw", end, max(stored), query_s)
 
 
 def escape(value):
@@ -440,5 +455,6 @@ class Metrics(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    threading.Thread(target=loop, daemon=True).start()
+    threading.Thread(target=every_second, args=(sketch_and_exact_step,), daemon=True).start()
+    threading.Thread(target=every_second, args=(raw_step,), daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Metrics).serve_forever()
