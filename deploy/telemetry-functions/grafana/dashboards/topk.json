@@ -335,7 +335,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Truth: exact counts >= 1% of the window's points. Store and query loses accuracy only when points never reached prometheus-raw.",
+      "description": "Sketch against exact. Truth: exact counts >= 1% of the window's points.",
       "targets": [
         {
           "refId": "A",
@@ -351,21 +351,6 @@
           "refId": "C",
           "expr": "asap_hh_f1{method=\"sketch\"}",
           "legendFormat": "sketch F1"
-        },
-        {
-          "refId": "D",
-          "expr": "asap_hh_precision{method=\"raw\"}",
-          "legendFormat": "store and query precision"
-        },
-        {
-          "refId": "E",
-          "expr": "asap_hh_recall{method=\"raw\"}",
-          "legendFormat": "store and query recall"
-        },
-        {
-          "refId": "F",
-          "expr": "asap_hh_f1{method=\"raw\"}",
-          "legendFormat": "store and query F1"
         }
       ],
       "fieldConfig": {
@@ -408,11 +393,6 @@
           "refId": "A",
           "expr": "asap_hh_are{method=\"sketch\"}",
           "legendFormat": "sketch"
-        },
-        {
-          "refId": "B",
-          "expr": "asap_hh_are{method=\"raw\"}",
-          "legendFormat": "store and query"
         }
       ],
       "fieldConfig": {
@@ -435,21 +415,6 @@
                 "value": {
                   "mode": "fixed",
                   "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
                 }
               }
             ]

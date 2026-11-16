@@ -200,13 +200,11 @@ def topk():
     row("Accuracy against exact")
     ts("Heavy hitters (routes with >= 1% of the window's points): precision, recall, F1",
        [('asap_hh_precision{method="sketch"}', "sketch precision"), ('asap_hh_recall{method="sketch"}', "sketch recall"),
-        ('asap_hh_f1{method="sketch"}', "sketch F1"), ('asap_hh_precision{method="raw"}', "store and query precision"),
-        ('asap_hh_recall{method="raw"}', "store and query recall"), ('asap_hh_f1{method="raw"}', "store and query F1")],
-       unit="percentunit", desc="Truth: exact counts >= 1% of the window's points. Store and query loses accuracy "
-       "only when points never reached prometheus-raw.", min0=False)
+        ('asap_hh_f1{method="sketch"}', "sketch F1")],
+       unit="percentunit", desc="Sketch against exact. Truth: exact counts >= 1% of the window's points.",
+       min0=False)
     ts("Average relative count error of the heavy hitters found (ARE)",
-       [('asap_hh_are{method="sketch"}', "sketch"), ('asap_hh_are{method="raw"}', "store and query")],
-       unit="percentunit", x=12, names=("sketch", "store and query"))
+       [('asap_hh_are{method="sketch"}', "sketch")], unit="percentunit", x=12, names=("sketch",))
     y += 8
 
     row("Traffic over time: volume and shape")
@@ -409,21 +407,18 @@ def cardinality():
         # Prometheus's lookback would otherwise pair a stale answer with a newer exact window.
         stamp = lambda m: f'max by (attribute_key) (timestamp(asap_distinct{{method="{m}"}}))'
         # A window whose points differ by more than 1% from exact's lost a source: no error for it.
-        points = lambda m: ('sum(asap_points{method="raw"})' if m == "raw"
-                            else f'max(asap_points{{method="{m}",attribute_key="http.route"}})')
+        points = lambda m: f'max(asap_points{{method="{m}",attribute_key="http.route"}})'
         complete = f"abs({points(method)} - {points('exact')}) <= 0.01 * {points(method)}"
         return (f"({expr}) and on (attribute_key) ({stamp(method)} == on (attribute_key) {stamp('exact')})"
                 f" and on () ({complete})")
 
-    for i, method in enumerate(("sketch", "raw")):
-        est = f'max by (attribute_key) (asap_distinct{{method="{method}",bound="estimate"}})'
-        ts(f"{'Sketch (HLL)' if method == 'sketch' else 'Store and query'}: relative error of the distinct count per key",
-           [(same_window(f'abs({est} - on (attribute_key) {ex}) / on (attribute_key) {ex}', method),
-             "{{attribute_key}}")],
-           unit="percentunit", x=12 * i,
-           desc="|estimate - exact| / exact per window; left out when the two windows' points differ by more "
-           "than 1% (a source missed a merge)." + (
-               " Store and query is exact while every point reaches prometheus-raw." if method == "raw" else ""))
+    est = 'max by (attribute_key) (asap_distinct{method="sketch",bound="estimate"})'
+    ts("Sketch (HLL): relative error of the distinct count per key",
+       [(same_window(f'abs({est} - on (attribute_key) {ex}) / on (attribute_key) {ex}', "sketch"),
+         "{{attribute_key}}")],
+       unit="percentunit", w=24,
+       desc="|estimate - exact| / exact per window; left out when the two windows' points differ by more "
+       "than 1% (a source missed a merge).")
     y += 8
 
     row("Traffic over time: volume and shape")
