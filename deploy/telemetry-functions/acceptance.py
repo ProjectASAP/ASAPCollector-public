@@ -231,8 +231,8 @@ def drift_checks(stack, t):
 
 
 def topk_checks(stack, t):
-    new = stack.vector('max_over_time(asap_topk{key="/new/hot-route",bound=~"estimate|"}[10m])')
-    yield check("new route in the sketch and exact top-10s", {m["method"] for m, _ in new} >= {"sketch", "exact"},
+    new = stack.vector('max_over_time(asap_topk{key="203.0.113.7",bound=~"estimate|"}[10m])')
+    yield check("new client in the sketch and exact top-10s", {m["method"] for m, _ in new} >= {"sketch", "exact"},
                 str(sorted(m["method"] for m, _ in new)))
     top10 = 'rank=~"[1-9]|10"'
     top = {m: {r["key"] for r, _ in stack.vector(f'asap_topk{{method="{m}",bound=~"estimate|",{top10}}} @ {t}')}
@@ -252,9 +252,9 @@ def topk_checks(stack, t):
                 ", ".join(f"{k.removeprefix('asap_hh_')} {v:.3f}" for k, v in sorted(raw.items()))
                 + (f"; PromQL query {query[0][1]:.2f} s" if query else "; no raw query timed"))
     events = stack.events("novelty", "sketch")
-    flagged = stack.vector('max_over_time(asap_topk_new{key="/new/hot-route"}[10m])')
-    yield check("novelty event in Prometheus", any("/new/hot-route" in e for e in events),
-                next((e for e in events if "/new/hot-route" in e),
+    flagged = stack.vector('max_over_time(asap_topk_new{key="203.0.113.7"}[10m])')
+    yield check("novelty event in Prometheus", any("203.0.113.7" in e for e in events),
+                next((e for e in events if "203.0.113.7" in e),
                      f"none; {len(events)} sketch novelty events, "
                      f"asap_topk_new gauge from {sorted(m['method'] for m, _ in flagged)}"))
 
@@ -264,7 +264,7 @@ CASES = {
     "latency": ('attribute_key=""', latency_checks, 5 * WINDOW_S + 40),
     "cardinality": ('attribute_key="http.route"', cardinality_checks, 600 // SCALE + 6 * WINDOW_S + 40),
     "drift": ('attribute_key=""', drift_checks, 600 // SCALE + 3 * WINDOW_S + 40),
-    "topk": ('attribute_key="http.route"', topk_checks, 600 // SCALE + 3 * WINDOW_S + 40),
+    "topk": ('attribute_key="client.address"', topk_checks, 600 // SCALE + 3 * WINDOW_S + 40),
 }
 
 

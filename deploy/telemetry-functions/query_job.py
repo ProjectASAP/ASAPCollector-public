@@ -98,7 +98,8 @@ PHI = float(os.environ.get("PHI", "0.01"))
 POINTS_TOLERANCE = 0.01
 RAW_SOURCES = int(os.environ.get("RAW_SOURCES", "2"))
 PORT = int(os.environ.get("PORT", "9100"))
-ATTRIBUTE = "http.route"
+# The attribute whose top-k the top-k use case answers.
+ATTRIBUTE = "client.address"
 # Prometheus stores OTLP attributes as labels with dots replaced.
 RAW_LABEL = ATTRIBUTE.replace(".", "_")
 TOPK_SELECTOR = f'attribute_key="{ATTRIBUTE}",bound="estimate"'

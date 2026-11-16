@@ -43,20 +43,20 @@ of scenario time, so all three pipelines receive identical points.
 | query-job | `query_job.py`: once per window, times each approach's query on its own Prometheus (`asap_query_seconds`, labelled `method`) and reports each window's timing (`asap_data_available_seconds`, `asap_result_age_seconds`); it also answers from `prometheus-raw` with PromQL (`method="raw"`): in the top-k use case the top-20 and its heavy-hitter accuracy against exact, in the cardinality use case the distinct count of every attribute key (`asap_query_failed` when Prometheus refuses a query), and applies the detectors' event rules to these answers (new heavy hitters, cardinality classes) |
 | hh-accuracy | `heavy_hitter_accuracy`, outside the pipelines: in the top-k use case both detectors send it a copy of their answers; per window it reports heavy-hitter precision, recall, F1 and average relative count error |
 
-**Heavy-hitter accuracy** (top-k use case). A heavy hitter is a route with at
-least 1% of the window's points by the exact counts; the sketch reports a
-route when its estimate reaches 1%. Per window, `hh-accuracy` emits
-`asap_hh_precision` (reported routes that are heavy hitters / reported),
+**Heavy-hitter accuracy** (top-k use case). A heavy hitter is a client address with
+at least 1% of the window's points by the exact counts; the sketch reports an
+address when its estimate reaches 1%. Per window, `hh-accuracy` emits
+`asap_hh_precision` (reported addresses that are heavy hitters / reported),
 `asap_hh_recall` (heavy hitters reported / heavy hitters), `asap_hh_f1`,
 `asap_hh_are` (mean |estimate - exact| / exact over the heavy hitters found),
 `asap_hh_truth` and `asap_hh_reported`. Both detectors report their top 20 so
-that every heavy hitter is in the exact list (about 10 routes reach 1% here);
+that every heavy hitter is in the exact list (about 6 addresses reach 1% here);
 a window whose exact top 20 is all above the threshold only gets
 `asap_hh_incomplete`.
 
 **Every raw point in Prometheus.** Prometheus keeps one sample per series and
 millisecond, and the generators stamp all points of a batch (up to 1,024) with
-the batch's time, so the same route twice in a batch would be two samples of one
+the batch's time, so the same client address twice in a batch would be two samples of one
 series at one millisecond, and Prometheus would keep only the first. raw-sink
 therefore labels each point `point_slot`: 0 for the first point of its series at
 that millisecond, 1 for the second, and so on. Every point stays a sample, and
@@ -148,7 +148,7 @@ the JSON.
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
 | `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source ramps up and back down every 40 minutes, again and again (5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each), and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: input rate and distinct values per key (numbers), distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, the sketch's error per key (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
-| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source ramps up and back down every 40 minutes, again and again (5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: input rate and distinct routes (numbers), top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), the sketch's heavy-hitter precision/recall/F1/ARE (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
+| `topk` | Count-Min (4 x 512) + top-20 heap of `client.address` | top talkers: requests from client addresses drawn Zipf(1.0) over 20 million IPv4 addresses (about 1 million distinct per 5 minutes at the lowest rate, about 7 million at the highest); the rate per source ramps up and back down every 40 minutes, again and again (5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each); a new client (`203.0.113.7`) takes 15% of traffic at minute 10 | `/d/asap-topk`: input rate and distinct routes (numbers), top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), the sketch's heavy-hitter precision/recall/F1/ARE (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
 
 **Cardinality classes.** Each detector classifies every attribute key per
 window from its last 10 windows (`cardinality:` in `detector.yaml`):
@@ -238,7 +238,7 @@ fails. The checks:
 | latency | exact p50/p99 inside the sketch's bound (routes with at least 2,000 points) |
 | cardinality | sketch and exact give every key the same class; the generated classes are found; distinct-count error at most 2%; raw answers every key from `prometheus-raw` within 1% of exact; class events in Prometheus |
 | drift | the changed route drifts in both methods; no other route does; drift event in Prometheus |
-| topk | the new route enters both top-10s; sketch recall@10 at least 0.9; heavy-hitter precision and recall at least 0.9; raw answers from `prometheus-raw` with heavy-hitter recall at least 0.9; novelty event in Prometheus |
+| topk | the new client (`203.0.113.7`) enters both top-10s; sketch recall@10 at least 0.9; heavy-hitter precision and recall at least 0.9; raw answers from `prometheus-raw` with heavy-hitter recall at least 0.9; novelty event in Prometheus |
 
 CI runs it on every PR (`.github/workflows/ci.yml`) with the stages sharing
 the runner's CPUs: a correctness check, not a capacity measurement.

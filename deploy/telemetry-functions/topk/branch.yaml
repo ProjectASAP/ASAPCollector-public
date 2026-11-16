@@ -1,5 +1,5 @@
 # Sketch pipeline, stage 1 at each source: one Count-Min sketch (4 x 512) +
-# top-20 heap of routes per 1-minute window goes to merge.
+# top-20 heap of client addresses per 1-minute window goes to merge.
 version: otel_dataflow/v1
 engine:
   http_admin:
@@ -25,7 +25,7 @@ groups:
               sketch_type: countminsketch_heap
               window_size: 60s
               output_metric_name: http.server.request.duration
-              per_attribute: [http.route]
+              per_attribute: [client.address]
               omit_resource_attrs: true
               sketch_params: {rows: 4, columns: 512, k: 20}
           to_merge:

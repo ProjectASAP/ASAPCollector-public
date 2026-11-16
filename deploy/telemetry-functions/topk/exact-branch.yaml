@@ -1,4 +1,4 @@
-# Exact pipeline, stage 1 at each source: a route -> count map per 1-minute window
+# Exact pipeline, stage 1 at each source: a client address -> count map per 1-minute window
 # goes to exact-merge.
 version: otel_dataflow/v1
 engine:
@@ -21,7 +21,7 @@ groups:
                 http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
           branch:
             type: urn:asap:processor:exact_branch
-            config: {window: 60s, per_attribute: [http.route]}
+            config: {window: 60s, per_attribute: [client.address]}
           to_merge:
             type: exporter:otlp_http
             config:

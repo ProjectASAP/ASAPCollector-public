@@ -29,7 +29,8 @@
 //! ```
 //!
 //! Attribute values are `<key>-<n>` (`<key>-<seed>-<n>` when unique); with
-//! `zipf`, `<key>-0` is the most popular. Every data point is one Gauge value with all configured attributes.
+//! `zipf`, `<key>-0` is the most popular (with `ipv4: true` values are IPv4
+//! addresses instead). Every data point is one Gauge value with all configured attributes.
 //!
 //! The points are a function of scenario time only: batch `i` of the `n`
 //! batches of second `s` after the scenario start is sent at `s + i/n` seconds,
@@ -120,6 +121,24 @@ pub struct AttributeSpec {
     /// Fractional growth of `cardinality` per minute (uniform values only).
     #[serde(default)]
     pub growth_per_minute: f64,
+    /// Values are IPv4 addresses (`a.b.c.d`, value `n` spread over the address
+    /// space by a fixed bijection) instead of `<key>-<n>`.
+    #[serde(default)]
+    pub ipv4: bool,
+}
+
+/// Value `n` as an IPv4 address: an odd multiplier is a bijection on 32 bits,
+/// so distinct values stay distinct but neighbours look unrelated.
+fn ipv4(n: u64) -> String {
+    // n + 1: the most popular value is not 0.0.0.0.
+    let a = (n as u32).wrapping_add(1).wrapping_mul(0x9E37_79B1);
+    format!(
+        "{}.{}.{}.{}",
+        a >> 24,
+        (a >> 16) & 255,
+        (a >> 8) & 255,
+        a & 255
+    )
 }
 
 /// A value distribution.
@@ -336,7 +355,11 @@ impl Scenario {
             let live = (cardinality as f64 * (1.0 + a.growth_per_minute).powf(minutes)).max(1.0);
             (self.rng.unit() * live) as u64
         };
-        format!("{}-{n}", a.key)
+        if a.ipv4 {
+            ipv4(n)
+        } else {
+            format!("{}-{n}", a.key)
+        }
     }
 
     /// First point and number of points of batch `index` of second `second`.
@@ -678,5 +701,13 @@ mod tests {
             .map(|t| s.rate_at(*t))
             .collect();
         assert_eq!(rates, vec![10, 20, 15, 15, 10, 20, 15, 10]);
+    }
+
+    #[test]
+    fn ipv4_values_are_distinct_addresses() {
+        let values: std::collections::HashSet<String> = (0..100_000).map(ipv4).collect();
+        assert_eq!(values.len(), 100_000);
+        assert_ne!(ipv4(0), "0.0.0.0");
+        assert!(ipv4(1).split('.').all(|o| o.parse::<u8>().is_ok()));
     }
 }
