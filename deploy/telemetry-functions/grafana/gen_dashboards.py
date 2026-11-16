@@ -46,18 +46,20 @@ def input_shape(title, expr, legend, desc):
     SHAPE = (title, expr, legend, desc)
 
 
-def gauges(title, exprs, desc, w, x, good_high, h=7):
-    """One gauge per series, green toward the good end (accuracy 100%, error 0%)."""
+def gauges(title, exprs, desc, w, x, good_high, h=7, limits=None):
+    """One gauge per series, green toward the good end (accuracy 100%, error 0%).
+    For errors, `limits` = (orange from, red from); default (2%, 5%)."""
+    orange, red = limits or (0.02, 0.05)
     steps = ([{"color": "red", "value": None}, {"color": "orange", "value": 0.8}, {"color": "green", "value": 0.9}]
              if good_high else
-             [{"color": "green", "value": None}, {"color": "orange", "value": 0.02}, {"color": "red", "value": 0.05}])
+             [{"color": "green", "value": None}, {"color": "orange", "value": orange}, {"color": "red", "value": red}])
     add({"type": "gauge", "title": title, "datasource": PROM, "description": desc,
          "targets": [{"refId": chr(65 + i), "expr": e, "legendFormat": legend, "instant": True}
                      for i, (e, legend) in enumerate(exprs)],
          "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
                      "showThresholdLabels": False, "showThresholdMarkers": True},
          "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 1, "min": 0,
-                                      "max": 1 if good_high else 0.1,
+                                      "max": 1 if good_high else 2 * red,
                                       "thresholds": {"mode": "absolute", "steps": steps}},
                          "overrides": []}}, w, h, x)
 
@@ -138,47 +140,50 @@ def topk():
             ("Sources A and B", "generator-a/b"),
             ("Summarize each minute: Count-Min sketch + top-20 list", "branch-a/b"),
             ("Combine A and B", "merge"),
-            ("Merge the last 5 minutes; top routes, and which are new", "detector"),
+            ("Merge the last 5 minutes; top clients, and which are new", "detector"),
             ("Store the answer", "prometheus-sketch"),
             ("Query: read the answer", "query-job")], "asap_topk{method=&quot;sketch&quot;, bound=&quot;estimate&quot;} (the stored 5-minute answer; no range: nothing to compute)"),
-        ("Exact", "count every route each minute", orange, [
+        ("Exact", "count every client each minute", orange, [
             ("Sources A and B (same points)", "exact-generator-a/b"),
-            ("Count every route each minute", "exact-branch-a/b"),
+            ("Count every client address each minute", "exact-branch-a/b"),
             ("Add up A and B", "exact-merge"),
-            ("Add up the last 5 minutes; top routes, and which are new", "exact-detector"),
+            ("Add up the last 5 minutes; top clients, and which are new", "exact-detector"),
             ("Store the answer", "prometheus-exact"),
             ("Query: read the answer", "query-job")], "asap_topk{method=&quot;exact&quot;, bound=&quot;estimate&quot;} (the stored 5-minute answer; no range: nothing to compute)"),
         ("Raw", "store every point, compute when asked", grey, [
             ("Sources A and B (same points)", "raw-generator-a/b"),
             ("Forward each point as it arrives (OTLP forwarder, no window)", "raw-sink-a/b"),
             ("Store every point", "prometheus-raw"),
-            ("Query: compute the top 20 of the last 5 minutes", "query-job")], "topk(20, sum by (http_route) (count_over_time(http_server_request_duration[5m])))"),
+            ("Query: compute the top 20 of the last 5 minutes", "query-job")], "topk(20, sum by (client_address) (count_over_time(http_server_request_duration[5m])))"),
     ], ["Same input for all three. The rate per source ramps up and back down every 40 minutes, again and again "
-        "(5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each). Once: <code>/new/hot-route</code> takes "
-        "15% of traffic at minute 10, and the number of routes grows from 100,000 to 1,000,000 at minute 15. Every step is one container pinned to one CPU; each "
+        "(5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each). Requests come from client addresses drawn "
+        "Zipf(1.1) over 100,000 IPv4 addresses. Once: a new client, <code>203.0.113.7</code>, takes 15% of traffic at "
+        "minute 10, and the number of addresses grows from 100,000 to 1,000,000 at minute 15. Every step is one container pinned to one CPU; each "
         "approach has its own Prometheus.",
-        "Raw adds a <code>point_slot</code> label so points of one route in the same millisecond stay separate "
+        "Raw adds a <code>point_slot</code> label so points of one client address in the same millisecond stay separate "
         "samples (Prometheus keeps one sample per series and millisecond). hh-accuracy compares Sketch with Exact; "
         "query-job compares Raw with Exact and times every approach&#39;s query.",
         "Every approach answers over the last 5 minutes, once a minute. Sketch and Exact read the stored answer "
         "(evaluated at the minute&#39;s end, keeping the samples stamped with it). Raw computes it from every raw "
         "point of the last 5 minutes (evaluated 1 ms before the minute&#39;s end, because PromQL ranges include "
         "their end)."])
-    add({"type": "text", "title": "Three ways to answer, every minute: which routes got the most requests in the last 5 minutes, and which are new?",
+    add({"type": "text", "title": "Three ways to answer, every minute: which client addresses sent the most requests in the last 5 minutes (top talkers), and which are new?",
          "options": {"mode": "html", "content": html}}, 24, 10, 0)
     y += 10
-    input_shape("Data shape: distinct routes in the last 5 minutes",
-            'max(last_over_time(asap_distinct{method="exact",attribute_key="http.route"}[2m]))', "distinct routes",
+    input_shape("Data shape: distinct client addresses in the last 5 minutes",
+            'max(last_over_time(asap_distinct{method="exact",attribute_key="client.address"}[2m]))',
+            "distinct addresses",
             "From the exact pipeline.")
 
     row("Accuracy against exact")
-    gauges("Sketch heavy hitters (routes with >= 1% of the points), last 5 minutes",
+    gauges("Sketch heavy hitters (clients with >= 1% of the requests), last 5 minutes",
            [(f'last_over_time(asap_hh_{m}{{method="sketch"}}[5m])', name)
             for m, name in (("precision", "precision"), ("recall", "recall"), ("f1", "F1"))],
            "Sketch against exact. Truth: exact counts >= 1% of the window's points.", w=16, x=0, good_high=True)
     gauges("Sketch average relative count error of the heavy hitters found (ARE)",
-           [('last_over_time(asap_hh_are{method="sketch"}[5m])', "ARE")], "Mean |estimate - exact| / exact.",
-           w=8, x=16, good_high=False)
+           [('last_over_time(asap_hh_are{method="sketch"}[5m])', "ARE")],
+           "Mean |estimate - exact| / exact. Green below 5%, orange 5% to 10%, red above 10%.",
+           w=8, x=16, good_high=False, limits=(0.05, 0.10))
     y += 7
 
     def answers():
@@ -204,7 +209,7 @@ def topk():
 
         compare = [(top10("exact", "exact_rank"), "exact"), (top10("sketch", "sketch_rank"), "sketch"),
                    (top10("raw", "raw_rank"), "raw"), (error("sketch"), "sketch_error"), (error("raw"), "raw_error")]
-        columns = {"key": "Route", "exact_rank": "Exact rank", "Value #A": "Exact count",
+        columns = {"key": "Client address", "exact_rank": "Exact rank", "Value #A": "Exact count",
                    "sketch_rank": "Sketch rank", "Value #B": "Sketch count", "Value #D": "Sketch error",
                    "raw_rank": "Raw rank", "Value #C": "Raw count",
                    "Value #E": "Raw error"}
@@ -212,11 +217,11 @@ def topk():
 
 
 
-        add({"type": "table", "title": "Top-10 routes of the last 5 minutes, the latest answer Raw computed (union of the three top-10s)",
-             "description": "One row per route in any approach's top-10, all from the latest window Raw has "
+        add({"type": "table", "title": "Top-10 client addresses of the last 5 minutes, the latest answer Raw computed (union of the three top-10s)",
+             "description": "One row per client address in any approach's top-10, all from the latest window Raw has "
                             "answered (query-job republishes sketch and exact for it), which lags behind when "
                             "prometheus-raw is slow; the panel on the right shows which window. Error is (count - exact) / exact; "
-                            "empty when the route is outside that approach's reported top-20.",
+                            "empty when the address is outside that approach's reported top-20.",
              "datasource": PROM,
              "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
                          for i, (e, _) in enumerate(compare)],
@@ -239,7 +244,7 @@ def topk():
                                  by_name("Raw count",
                                          {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["raw"]}},
                                          {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
-                                 by_name("Route", {"id": "custom.width", "value": 150}),
+                                 by_name("Client address", {"id": "custom.width", "value": 150}),
                                  by_name("Sketch error", {"id": "unit", "value": "percent"}, {"id": "decimals", "value": 1}),
                                  by_name("Raw error", {"id": "unit", "value": "percent"},
                                          {"id": "decimals", "value": 1})]}}, 20, 12, 0)

@@ -1,4 +1,4 @@
-# Top-20 routes with Count-Min bounds to Prometheus; routes new to the top 20
+# Top-20 client addresses with Count-Min bounds to Prometheus; addresses new to the top 20
 # (vs the last 10 windows) as `asap_event` gauges. A copy of the answers goes to
 # hh-accuracy, which compares them with the exact pipeline's.
 version: otel_dataflow/v1
