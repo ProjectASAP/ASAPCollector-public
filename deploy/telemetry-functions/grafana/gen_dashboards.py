@@ -32,10 +32,8 @@ def row(title):
 
 
 def ts(title, targets, unit=None, desc="", stack=False, log=False, w=12, x=0, h=8,
-       min0=True, names=(), last=False, bars=False):
+       min0=True, names=(), last=False):
     custom = {"spanNulls": True}
-    if bars:
-        custom.update({"drawStyle": "bars", "fillOpacity": 80, "lineWidth": 1})
     if stack:
         custom.update({"stacking": {"mode": "normal"}, "fillOpacity": 60,
                        "lineInterpolation": "stepAfter", "lineWidth": 1})
@@ -340,15 +338,13 @@ def resources():
     global y
     row("Resources per approach (generators and monitoring excluded)")
     whole = lambda ingest, after: f"{ingest}|{after}" if after else ingest
-    ts("CPU cores of the whole approach over time",
-       [(cpu(whole(ingest, after), procs), name) for name, _, ingest, after, procs in APPROACHES],
-       unit="short", w=24, h=8, names=("sketch", "exact", "store and query"), last=True,
-       desc="Every component of the approach: ingest (branch-a/b, exact-branch-a/b, raw-sink-a/b), merge and "
-       "detector, its Prometheus, and for store and query the query job.", bars=True)
-    y += 8
+    bars("CPU cores: whole approach",
+         [(name, cpu(whole(ingest, after), procs)) for name, _, ingest, after, procs in APPROACHES], "short",
+         "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, raw-sink-a/b), merge and "
+         "detector, its Prometheus, and for store and query the query job.", 8, 0)
     bars("Memory: whole approach",
          [(name, mem(whole(ingest, after), procs)) for name, _, ingest, after, procs in APPROACHES],
-         "bytes", "Resident memory of every component of the approach, its Prometheus included.", 12, 0)
+         "bytes", "Resident memory of every component of the approach, its Prometheus included.", 8, 8)
     received = lambda stages: (f'sum(rate(payload_size_bytes_total{{job="collectors",stage=~"{stages}",'
                                f'otel_scope_node_type="receiver"}}[2m])) * 8')
     bars("Network: total bits per second of the whole approach",
@@ -358,7 +354,7 @@ def resources():
          "bps", "Every hop of the approach: the raw points from the generators into its first stage, then "
          "sketch and exact: sketches / exact maps into merge and merged windows into detector; store and query: "
          "every raw point from raw-sink into prometheus-raw. The answers into the approach's Prometheus (a few "
-         "kilobytes per window) are not counted.", 12, 12)
+         "kilobytes per window) are not counted.", 8, 16)
     y += 7
 
 

@@ -1034,8 +1034,8 @@
       "id": 17
     },
     {
-      "type": "timeseries",
-      "title": "CPU cores of the whole approach over time",
+      "type": "bargauge",
+      "title": "CPU cores: whole approach",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-cardinality"
@@ -1045,29 +1045,41 @@
         {
           "refId": "A",
           "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
-          "legendFormat": "sketch"
+          "legendFormat": "sketch",
+          "instant": true
         },
         {
           "refId": "B",
           "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
-          "legendFormat": "exact"
+          "legendFormat": "exact",
+          "instant": true
         },
         {
           "refId": "C",
           "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
-          "legendFormat": "store and query"
+          "legendFormat": "store and query",
+          "instant": true
         }
       ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "drawStyle": "bars",
-            "fillOpacity": 80,
-            "lineWidth": 1
-          },
           "unit": "short",
-          "min": 0
+          "min": 0,
+          "decimals": 2
         },
         "overrides": [
           {
@@ -1117,22 +1129,9 @@
           }
         ]
       },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "gridPos": {
-        "h": 8,
-        "w": 24,
+        "h": 7,
+        "w": 8,
         "x": 0,
         "y": 58
       },
@@ -1236,9 +1235,9 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 12,
-        "x": 0,
-        "y": 66
+        "w": 8,
+        "x": 8,
+        "y": 58
       },
       "id": 19
     },
@@ -1340,9 +1339,9 @@
       },
       "gridPos": {
         "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 66
+        "w": 8,
+        "x": 16,
+        "y": 58
       },
       "id": 20
     }
