@@ -37,7 +37,7 @@ of scenario time, so all three pipelines receive identical points.
 | exact-merge | `exact_merge`: adds both sources' exact windows and emits each as soon as both have sent it (5 s timeout) |
 | exact-detector | `exact_detector`: the same answers and events from the exact windows (`method="exact"`): the ground truth |
 | raw-sink-a/b | `raw_sink`, the only stage per source: writes every raw point unchanged as one Gauge sample to `prometheus-raw` over OTLP (4 requests in flight), with a `point_slot` label (below), and reports when `prometheus-raw` acknowledged each window's last point (`source` label), as soon as its source has sent a later point and every message of the window is acknowledged (5 s timeout if the source idles) |
-| query-job | `query_job.py`: once per window, times each approach's query on its own Prometheus (`asap_query_seconds`, labelled `method`) and reports its data freshness (`asap_freshness_seconds`); it also answers from `prometheus-raw` with PromQL (`method="raw"`): in the top-k use case the top-20 and its heavy-hitter accuracy against exact, in the cardinality use case the distinct count of every attribute key (`asap_query_failed` when Prometheus refuses a query), and applies the detectors' event rules to these answers (new heavy hitters, cardinality classes) |
+| query-job | `query_job.py`: once per window, times each approach's query on its own Prometheus (`asap_query_seconds`, labelled `method`) and reports each window's timing (`asap_data_available_seconds`, `asap_result_age_seconds`); it also answers from `prometheus-raw` with PromQL (`method="raw"`): in the top-k use case the top-20 and its heavy-hitter accuracy against exact, in the cardinality use case the distinct count of every attribute key (`asap_query_failed` when Prometheus refuses a query), and applies the detectors' event rules to these answers (new heavy hitters, cardinality classes) |
 | hh-accuracy | `heavy_hitter_accuracy`, outside the pipelines: in the top-k use case both detectors send it a copy of their answers; per window it reports heavy-hitter precision, recall, F1 and average relative count error |
 
 **Heavy-hitter accuracy** (top-k use case). A heavy hitter is a route with at
@@ -66,17 +66,22 @@ series per minute at the top rate, which `prometheus-raw` is not built for
 (its memory is capped by `PROMETHEUS_RAW_MEMORY`); the demo shows where it
 stops answering.
 
-**Query latency and data freshness**, reported separately. Query latency
-(`asap_query_seconds`) is the time of the query that returns a window's answer
-from the approach's own Prometheus: sketch and exact read the stored answer, raw
-computes it from the raw samples. Data freshness (`asap_freshness_seconds`,
-p50 and p99) is the ingestion lag of a point: the time it is loaded into its
-approach's Prometheus minus its event time. For raw, raw-sink measures it for
-every point (Prometheus acknowledgement minus event time, the larger of the two
-sources). For sketch and exact a point is loaded when its window's answer is, so
-its lag is the time from the point to the window's end plus the window's answer
-delay (when the detector sent the answer; Prometheus stores it milliseconds
-later); points arrive evenly over a window, so quantile q adds q x 60 s.
+**From data generated to query result**, three gauges per window with the same
+definitions for all three approaches (p50 and p99 over the window's points
+where per point):
+
+1. Delay before data is available for query (`asap_data_available_seconds`):
+   from a point's generation until its window's data can be queried. Every point
+   first waits for its window to end; then sketch and exact wait until the
+   detector sent the window's answer to its Prometheus (Prometheus stores it
+   milliseconds later), raw until `prometheus-raw` acknowledged the window's last
+   raw point (the later source). Points arrive evenly over a window, so
+   quantile q is the delay after the window's end plus q x 60 s.
+2. Query latency (`asap_query_seconds`): the query that returns the window's
+   answer from the approach's own Prometheus; sketch and exact read the stored
+   answer, raw computes it from the raw samples.
+3. Query result computed minus data generated (`asap_result_age_seconds`): 1
+   plus 2, as if the query ran as soon as the data was available.
 
 Each dashboard also shows every pipeline's throughput: the points per window
 that reached the end of the pipeline (`asap_points`; for raw, the points
@@ -130,9 +135,9 @@ the JSON.
 | `USE_CASE` | Sketch | Scenario | Dashboard |
 | --- | --- | --- | --- |
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
-| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, relative error over time, throughput and distinct values over time, query latency and data freshness (separate panels), answer delay breakdown, CPU/memory/bits per component of each approach |
+| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, relative error over time, throughput and distinct values over time, data available / query latency / result age, delay breakdown, CPU/memory/bits per component of each approach |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
-| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, query latency and data freshness (separate panels), answer delay breakdown, CPU/memory per component and per approach, bits per second into each stage |
+| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, data available / query latency / result age, delay breakdown, CPU/memory per component and per approach, bits per second into each stage |
 
 **Cardinality classes.** Each detector classifies every attribute key per
 window from its last 10 windows (`cardinality:` in `detector.yaml`):

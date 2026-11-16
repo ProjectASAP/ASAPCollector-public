@@ -73,6 +73,21 @@ class RawEvents(unittest.TestCase):
                                    ("user.id", "identifier-like")])
 
 
+class Timing(unittest.TestCase):
+    def test_points_wait_for_their_window_then_the_query(self):
+        query_job.samples.clear()
+        query_job.report_timing("exact", 120, 11.0, 2.0)
+        got = {(name, dict(labels)["quantile"]): v for (name, labels), (v, _) in query_job.samples.items()}
+        self.assertEqual(got[("asap_data_available_seconds", "0.5")], 41.0)
+        self.assertAlmostEqual(got[("asap_data_available_seconds", "0.99")], 70.4)
+        self.assertEqual(got[("asap_result_age_seconds", "0.5")], 43.0)
+
+    def test_no_query_no_result_age(self):
+        query_job.samples.clear()
+        query_job.report_timing("raw", 120, 0.01, None)
+        self.assertEqual({name for name, _ in query_job.samples}, {"asap_data_available_seconds"})
+
+
 class RulesMatchDetectorConfigs(unittest.TestCase):
     def test_raw_event_rules_are_the_detectors(self):
         here = os.path.dirname(os.path.abspath(__file__))

@@ -242,43 +242,52 @@ def topk():
 
 
 
-def latency_and_freshness(raw_query):
+def timing(raw_query):
     global y
-    row("Query latency and data freshness (reported separately)")
-    ts("Query latency: time to run the query that returns a window's answer",
-       [(f'max(asap_query_seconds{{method="{m}"}})', n) for m, n in
-        (("sketch", "sketch"), ("exact", "exact"), ("raw", "store and query"))],
-       unit="s", log=True, names=("sketch", "exact", "store and query"), last=True,
+    row("From data generated to query result, per window (the same definitions for all three)")
+    methods = (("sketch", "sketch"), ("exact", "exact"), ("raw", "store and query"))
+    names = tuple(n for _, n in methods)
+
+    def quantiles(metric):
+        return [(f'max({metric}{{method="{m}",quantile="{q}"}})', f"{n} p{int(float(q) * 100)}")
+                for m, n in methods for q in ("0.5", "0.99")]
+
+    ts("1. Delay before data is available for query (data generated -> available)",
+       quantiles("asap_data_available_seconds"), unit="s", w=8, x=0, h=9, last=True, log=True,
+       desc="Per point, p50 and p99 over the window's points: from its generation until its window's data can be "
+       "queried. Every point first waits for its window to end (up to 60 s). sketch and exact: then until the "
+       "detector sent the window's answer to its Prometheus. store and query: then until prometheus-raw "
+       "acknowledged the window's last raw point.")
+    ts("2. Query latency (the query that returns the window's answer)",
+       [(f'max(asap_query_seconds{{method="{m}"}})', n) for m, n in methods],
+       unit="s", w=8, x=8, h=9, log=True, names=names, last=True,
        desc="Measured by query-job once per window against each approach's own Prometheus. sketch and exact read "
        f"the stored answer; store and query computes it from every raw sample ({raw_query}). Includes refused and "
        "timed-out queries.")
-    ts("Data freshness (ingestion lag): load time - event creation time, per point",
-       [(f'max(asap_freshness_seconds{{method="{m}",quantile="{q}"}})', f"{n} p{int(float(q) * 100)}")
-        for m, n in (("sketch", "sketch"), ("exact", "exact"), ("raw", "store and query"))
-        for q in ("0.5", "0.99")],
-       unit="s", x=12, last=True,
-       desc="How long a point takes from its creation to being in its approach's Prometheus, p50 and p99 over the "
-       "window's points. store and query: Prometheus's acknowledgement of the point minus its event time, measured "
-       "for every point by raw-sink. sketch and exact: a point is in Prometheus once its window's answer is, so its "
-       "lag is the time to the window's end plus the window's answer delay (points arrive evenly over the window). "
-       "The answer delay is when the detector sent the answer; Prometheus stores it milliseconds later. "
-       "Query latency is not included.")
-    y += 8
+    ts("3. Query result computed - data generated (1 + 2)",
+       quantiles("asap_result_age_seconds"), unit="s", w=8, x=16, h=9, last=True, log=True,
+       desc="Per point, p50 and p99: from its generation until the query result that includes it is computed, "
+       "i.e. data available plus query latency, as if the query ran as soon as the data was available.")
+    y += 9
     for i, method in enumerate(("sketch", "exact")):
         st = lambda metric, stage: f'max(asap_stage_{metric}{{method="{method}",stage="{stage}"}})'
-        ts(f"{'Sketch' if method == 'sketch' else 'Exact'}: answer delay breakdown per window",
+        ts(f"{'Sketch' if method == 'sketch' else 'Exact'}: where the delay after the window's end goes",
            [(st("received", "merge"), "branch + to merge"),
             (f'{st("emitted", "merge")} - {st("received", "merge")}', "merge (waits for both sources)"),
             (f'{st("received", "detector")} - {st("emitted", "merge")}', "to detector"),
-            (f'{st("emitted", "detector")} - {st("received", "detector")}', "detector")],
+            (f'{st("emitted", "detector")} - {st("received", "detector")}', "detector"),
+            (f'max(asap_query_seconds{{method="{method}"}})', "Prometheus query")],
            unit="s", stack=True, w=8, x=8 * i,
-           desc="Seconds per segment after the window's end, until the answer goes to Prometheus. branch + to merge: "
+           desc="Seconds per segment after the window's end, until the answer goes to Prometheus, then the query "
+           "that reads it. branch + to merge: "
            "the window's end until the last source's sketch reached the merge. merge: waiting for the other "
            "source's sketch (5 s timeout).")
-    ts("Store and query: time to store the window's last point",
-       [('max(asap_answer_delay{method="raw"})', "into prometheus-raw (last point acknowledged)")],
+    ts("Store and query: where the delay after the window's end goes",
+       [('max(asap_answer_delay{method="raw"})', "into prometheus-raw (last point acknowledged)"),
+        ('max(asap_query_seconds{method="raw"})', "PromQL query")],
        unit="s", stack=True, w=8, x=16,
-       desc="The window's end until prometheus-raw acknowledged its last point (or raw-sink's 50 s timeout).")
+       desc="The window's end until prometheus-raw acknowledged its last point (or raw-sink's 50 s timeout), "
+       "then the PromQL query that computes the answer from the raw samples.")
     y += 8
 
 
@@ -445,7 +454,7 @@ def cardinality():
 
 
 {"topk": topk, "cardinality": cardinality}[USE_CASE]()
-latency_and_freshness({"topk": "one PromQL top-k query",
+timing({"topk": "one PromQL top-k query",
                        "cardinality": "one PromQL distinct count per key, summed"}[USE_CASE])
 resources()
 TITLES = {"topk": "Heavy hitters: sketch vs exact vs store and query (real collector containers)",

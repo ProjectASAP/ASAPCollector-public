@@ -850,7 +850,7 @@
     },
     {
       "type": "row",
-      "title": "Query latency and data freshness (reported separately)",
+      "title": "From data generated to query result, per window (the same definitions for all three)",
       "collapsed": false,
       "panels": [],
       "gridPos": {
@@ -863,7 +863,81 @@
     },
     {
       "type": "timeseries",
-      "title": "Query latency: time to run the query that returns a window's answer",
+      "title": "1. Delay before data is available for query (data generated -> available)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-topk"
+      },
+      "description": "Per point, p50 and p99 over the window's points: from its generation until its window's data can be queried. Every point first waits for its window to end (up to 60 s). sketch and exact: then until the detector sent the window's answer to its Prometheus. store and query: then until prometheus-raw acknowledged the window's last raw point.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(asap_data_available_seconds{method=\"sketch\",quantile=\"0.5\"})",
+          "legendFormat": "sketch p50"
+        },
+        {
+          "refId": "B",
+          "expr": "max(asap_data_available_seconds{method=\"sketch\",quantile=\"0.99\"})",
+          "legendFormat": "sketch p99"
+        },
+        {
+          "refId": "C",
+          "expr": "max(asap_data_available_seconds{method=\"exact\",quantile=\"0.5\"})",
+          "legendFormat": "exact p50"
+        },
+        {
+          "refId": "D",
+          "expr": "max(asap_data_available_seconds{method=\"exact\",quantile=\"0.99\"})",
+          "legendFormat": "exact p99"
+        },
+        {
+          "refId": "E",
+          "expr": "max(asap_data_available_seconds{method=\"raw\",quantile=\"0.5\"})",
+          "legendFormat": "store and query p50"
+        },
+        {
+          "refId": "F",
+          "expr": "max(asap_data_available_seconds{method=\"raw\",quantile=\"0.99\"})",
+          "legendFormat": "store and query p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "spanNulls": true,
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 8,
+        "x": 0,
+        "y": 60
+      },
+      "id": 16
+    },
+    {
+      "type": "timeseries",
+      "title": "2. Query latency (the query that returns the window's answer)",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
@@ -959,60 +1033,63 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
+        "h": 9,
+        "w": 8,
+        "x": 8,
         "y": 60
       },
-      "id": 16
+      "id": 17
     },
     {
       "type": "timeseries",
-      "title": "Data freshness (ingestion lag): load time - event creation time, per point",
+      "title": "3. Query result computed - data generated (1 + 2)",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "How long a point takes from its creation to being in its approach's Prometheus, p50 and p99 over the window's points. store and query: Prometheus's acknowledgement of the point minus its event time, measured for every point by raw-sink. sketch and exact: a point is in Prometheus once its window's answer is, so its lag is the time to the window's end plus the window's answer delay (points arrive evenly over the window). The answer delay is when the detector sent the answer; Prometheus stores it milliseconds later. Query latency is not included.",
+      "description": "Per point, p50 and p99: from its generation until the query result that includes it is computed, i.e. data available plus query latency, as if the query ran as soon as the data was available.",
       "targets": [
         {
           "refId": "A",
-          "expr": "max(asap_freshness_seconds{method=\"sketch\",quantile=\"0.5\"})",
+          "expr": "max(asap_result_age_seconds{method=\"sketch\",quantile=\"0.5\"})",
           "legendFormat": "sketch p50"
         },
         {
           "refId": "B",
-          "expr": "max(asap_freshness_seconds{method=\"sketch\",quantile=\"0.99\"})",
+          "expr": "max(asap_result_age_seconds{method=\"sketch\",quantile=\"0.99\"})",
           "legendFormat": "sketch p99"
         },
         {
           "refId": "C",
-          "expr": "max(asap_freshness_seconds{method=\"exact\",quantile=\"0.5\"})",
+          "expr": "max(asap_result_age_seconds{method=\"exact\",quantile=\"0.5\"})",
           "legendFormat": "exact p50"
         },
         {
           "refId": "D",
-          "expr": "max(asap_freshness_seconds{method=\"exact\",quantile=\"0.99\"})",
+          "expr": "max(asap_result_age_seconds{method=\"exact\",quantile=\"0.99\"})",
           "legendFormat": "exact p99"
         },
         {
           "refId": "E",
-          "expr": "max(asap_freshness_seconds{method=\"raw\",quantile=\"0.5\"})",
+          "expr": "max(asap_result_age_seconds{method=\"raw\",quantile=\"0.5\"})",
           "legendFormat": "store and query p50"
         },
         {
           "refId": "F",
-          "expr": "max(asap_freshness_seconds{method=\"raw\",quantile=\"0.99\"})",
+          "expr": "max(asap_result_age_seconds{method=\"raw\",quantile=\"0.99\"})",
           "legendFormat": "store and query p99"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "spanNulls": true
+            "spanNulls": true,
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
           },
-          "unit": "s",
-          "min": 0
+          "unit": "s"
         },
         "overrides": []
       },
@@ -1030,21 +1107,21 @@
         }
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
+        "h": 9,
+        "w": 8,
+        "x": 16,
         "y": 60
       },
-      "id": 17
+      "id": 18
     },
     {
       "type": "timeseries",
-      "title": "Sketch: answer delay breakdown per window",
+      "title": "Sketch: where the delay after the window's end goes",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Seconds per segment after the window's end, until the answer goes to Prometheus. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
+      "description": "Seconds per segment after the window's end, until the answer goes to Prometheus, then the query that reads it. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
       "targets": [
         {
           "refId": "A",
@@ -1065,6 +1142,11 @@
           "refId": "D",
           "expr": "max(asap_stage_emitted{method=\"sketch\",stage=\"detector\"}) - max(asap_stage_received{method=\"sketch\",stage=\"detector\"})",
           "legendFormat": "detector"
+        },
+        {
+          "refId": "E",
+          "expr": "max(asap_query_seconds{method=\"sketch\"})",
+          "legendFormat": "Prometheus query"
         }
       ],
       "fieldConfig": {
@@ -1097,18 +1179,18 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 68
+        "y": 69
       },
-      "id": 18
+      "id": 19
     },
     {
       "type": "timeseries",
-      "title": "Exact: answer delay breakdown per window",
+      "title": "Exact: where the delay after the window's end goes",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Seconds per segment after the window's end, until the answer goes to Prometheus. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
+      "description": "Seconds per segment after the window's end, until the answer goes to Prometheus, then the query that reads it. branch + to merge: the window's end until the last source's sketch reached the merge. merge: waiting for the other source's sketch (5 s timeout).",
       "targets": [
         {
           "refId": "A",
@@ -1129,6 +1211,11 @@
           "refId": "D",
           "expr": "max(asap_stage_emitted{method=\"exact\",stage=\"detector\"}) - max(asap_stage_received{method=\"exact\",stage=\"detector\"})",
           "legendFormat": "detector"
+        },
+        {
+          "refId": "E",
+          "expr": "max(asap_query_seconds{method=\"exact\"})",
+          "legendFormat": "Prometheus query"
         }
       ],
       "fieldConfig": {
@@ -1161,23 +1248,28 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 68
+        "y": 69
       },
-      "id": 19
+      "id": 20
     },
     {
       "type": "timeseries",
-      "title": "Store and query: time to store the window's last point",
+      "title": "Store and query: where the delay after the window's end goes",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "The window's end until prometheus-raw acknowledged its last point (or raw-sink's 50 s timeout).",
+      "description": "The window's end until prometheus-raw acknowledged its last point (or raw-sink's 50 s timeout), then the PromQL query that computes the answer from the raw samples.",
       "targets": [
         {
           "refId": "A",
           "expr": "max(asap_answer_delay{method=\"raw\"})",
           "legendFormat": "into prometheus-raw (last point acknowledged)"
+        },
+        {
+          "refId": "B",
+          "expr": "max(asap_query_seconds{method=\"raw\"})",
+          "legendFormat": "PromQL query"
         }
       ],
       "fieldConfig": {
@@ -1210,9 +1302,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 68
+        "y": 69
       },
-      "id": 20
+      "id": 21
     },
     {
       "type": "row",
@@ -1223,9 +1315,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 76
+        "y": 77
       },
-      "id": 21
+      "id": 22
     },
     {
       "type": "timeseries",
@@ -1274,9 +1366,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 77
+        "y": 78
       },
-      "id": 22
+      "id": 23
     },
     {
       "type": "timeseries",
@@ -1325,9 +1417,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 77
+        "y": 78
       },
-      "id": 23
+      "id": 24
     },
     {
       "type": "timeseries",
@@ -1376,9 +1468,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 77
+        "y": 78
       },
-      "id": 24
+      "id": 25
     },
     {
       "type": "timeseries",
@@ -1427,9 +1519,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 89
+        "y": 90
       },
-      "id": 25
+      "id": 26
     },
     {
       "type": "timeseries",
@@ -1478,9 +1570,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 89
+        "y": 90
       },
-      "id": 26
+      "id": 27
     },
     {
       "type": "timeseries",
@@ -1529,9 +1621,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 89
+        "y": 90
       },
-      "id": 27
+      "id": 28
     },
     {
       "type": "timeseries",
@@ -1578,9 +1670,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 101
+        "y": 102
       },
-      "id": 28
+      "id": 29
     },
     {
       "type": "timeseries",
@@ -1627,9 +1719,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 101
+        "y": 102
       },
-      "id": 29
+      "id": 30
     },
     {
       "type": "timeseries",
@@ -1676,9 +1768,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 101
+        "y": 102
       },
-      "id": 30
+      "id": 31
     }
   ]
 }

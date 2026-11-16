@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Query job: the answer step of the store-and-query (raw) baseline, and each
-approach's query latency and data freshness.
+approach's timing per window: data available for query, query latency, and
+query result computed minus data generated.
 
 Every pipeline writes to its own Prometheus (prometheus-sketch,
 prometheus-exact, prometheus-raw). Once per window, after the window is
@@ -24,15 +25,22 @@ complete in each pipeline:
   detectors do (`asap_event{method="raw"}`, `asap_topk_new`,
   `asap_cardinality_state`).
 
-Data freshness (ingestion lag) is a point's load time into its pipeline's
-Prometheus minus its event time, reported per window as `asap_freshness_seconds`
-(labels `method`, `quantile` 0.5 and 0.99). raw: from raw-sink's measurement of
-every point (Prometheus acknowledgement minus event time, the larger of the two
-sources). sketch and exact: a point is loaded when its window's answer is, so its
-lag is the window's answer delay plus the time from the point to the window's
-end; points arrive evenly over a window, so quantile q adds q * WINDOW_SECONDS.
-The answer delay is when the detector sent the answer; Prometheus stores it a
-few milliseconds later.
+Timing, per window and approach, from the window's points to its answer
+(labels `method`; `quantile` 0.5 and 0.99 over the window's points):
+
+* `asap_data_available_seconds`: point generated -> the window's data is
+  available for query: for sketch and exact when the detector sent the
+  window's answer to its Prometheus (Prometheus stores it milliseconds later),
+  for raw when prometheus-raw acknowledged the window's last raw point (the
+  later of the two sources). A point also waits for the rest of its window:
+  points arrive evenly over a window, so the q-quantile over the window's
+  points is the delay after the window's end plus q * WINDOW_SECONDS.
+* `asap_query_seconds`: the query that returns the window's answer, on the
+  approach's own Prometheus.
+* `asap_result_age_seconds`: point generated -> query result computed, that is
+  data available plus query latency, as if the query ran as soon as the data
+  was available (the query job runs raw only after exact answered, which would
+  add a wait that is not raw's).
 
 Events (`asap_event`) carry the window's end in seconds as their value.
 
@@ -46,7 +54,7 @@ timestamp, so a dashboard always finds the latest compared window however far
 store and query lags behind.
 
 The raw answer runs once exact has answered the same window, so a slow exact
-pipeline delays it; freshness comes from the pipelines' own gauges and is not
+pipeline delays it; the timing gauges come from the pipelines' own gauges and is not
 affected. A window raw-sink reported with points still unacknowledged (its
 50 s timeout) is answered anyway and flagged with `asap_raw_incomplete`.
 
@@ -76,7 +84,7 @@ RAW_METRIC = "http_server_request_duration"
 # configs; test_query_job.py checks they match).
 NOVELTY_WINDOWS = 10
 IDENTIFIER_RATIO, GROWTH, CLASS_BASELINE_WINDOWS, MIN_POINTS = 0.9, 0.2, 10, 100
-FRESHNESS_QUANTILES = (0.5, 0.99)
+QUANTILES = (0.5, 0.99)
 USE_CASE = os.environ.get("USE_CASE", "topk")
 WINDOW_S = int(os.environ.get("WINDOW_SECONDS", "60"))
 K = int(os.environ.get("K", "20"))
@@ -168,25 +176,28 @@ def heavy_hitter_accuracy(points, exact, reported_list):
             "reported": len(reported), "are": sum(errors) / tp if tp else None}
 
 
+def report_timing(method, end, after_end_s, query_s):
+    """Data available, and query result computed, minus each point's generation:
+    `after_end_s` after the window's end plus the point's wait to the window's
+    end (quantile q of the window's points waits q * WINDOW_S)."""
+    for q in QUANTILES:
+        available = after_end_s + q * WINDOW_S
+        labels = {"method": method, "quantile": f"{q:g}"}
+        put("asap_data_available_seconds", labels, available, end)
+        if query_s is not None:
+            put("asap_result_age_seconds", labels, available + query_s, end)
+
+
 def time_prometheus_answer(method, end):
     """Times reading the window's answer from the pipeline's own Prometheus,
-    and reports the window's freshness."""
+    and reports the window's timing."""
     t0 = time.monotonic()
     at_window(f'{ANSWER_METRIC}{{method="{method}"}}', end, base=PIPELINE_PROMETHEUS[method])
-    put("asap_query_seconds", {"method": method}, time.monotonic() - t0, end)
+    query_s = time.monotonic() - t0
+    put("asap_query_seconds", {"method": method}, query_s, end)
     delays = [v for _, v in at_window(f'asap_answer_delay{{method="{method}"}}', end)]
     if delays:
-        for q in FRESHNESS_QUANTILES:
-            put("asap_freshness_seconds", {"method": method, "quantile": f"{q:g}"},
-                max(delays) + q * WINDOW_S, end)
-
-
-def raw_freshness(end):
-    """Per-point ingestion lag of the raw pipeline: the larger quantile of the two sources."""
-    for q in FRESHNESS_QUANTILES:
-        lags = [v for _, v in at_window(f'asap_raw_transit{{method="raw",quantile="{q:g}"}}', end)]
-        if lags:
-            put("asap_freshness_seconds", {"method": "raw", "quantile": f"{q:g}"}, max(lags), end)
+        report_timing(method, end, max(delays), query_s)
 
 
 def raw_points(end):
@@ -282,10 +293,10 @@ def refusal_reason(error):
 
 
 def raw_distinct(end):
-    """Distinct values per attribute key of the window from prometheus-raw; True when done."""
+    """Distinct values per attribute key of the window from prometheus-raw; its query seconds when done, else None."""
     exact = at_window('asap_distinct{method="exact"}', end)
     if not exact:
-        return False
+        return None
     flag_incomplete(end)
     failed = []
     compared = [({"method": m, "attribute_key": r["attribute_key"]}, v) for m in ("sketch", "exact")
@@ -329,16 +340,16 @@ def raw_distinct(end):
     replace("asap_compare_class", classes, None)
     replace("asap_compare_failed", failed, None)
     put("asap_compare_window_end", {}, end * 1000.0, None)
-    return True
+    return total
 
 
 def raw_topk(end):
-    """Top-k of window [end - WINDOW_S, end) from prometheus-raw; True when done."""
+    """Top-k of window [end - WINDOW_S, end) from prometheus-raw; its query seconds when done, else None."""
     exact_rows = at_window(f'asap_topk{{method="exact",{TOPK_SELECTOR}}}', end)
     exact_points = sum(v for _, v in at_window(
         f'asap_points{{method="exact",attribute_key="{ATTRIBUTE}"}}', end))
     if not exact_rows or not exact_points:
-        return False
+        return None
     flag_incomplete(end)
     query = (f"topk({K}, sum by ({RAW_LABEL}) "
              f"(count_over_time({RAW_METRIC}[{WINDOW_S}s])))")
@@ -367,7 +378,7 @@ def raw_topk(end):
         for name, value in acc.items():
             if value is not None:
                 put(f"asap_hh_{name}", labels, float(value), end)
-    return True
+    return latency
 
 
 def loop():
@@ -386,9 +397,13 @@ def loop():
                 if end in done["raw"] or end <= started - 2 * WINDOW_S:
                     continue
                 # Accuracy is against the exact answer of the same window.
-                if raw_answer is None or (end in done["exact"] and raw_answer(end)):
+                if raw_answer is not None and end not in done["exact"]:
+                    continue
+                query_s = raw_answer(end) if raw_answer else None
+                if raw_answer is None or query_s is not None:
                     done["raw"].add(end)
-                    raw_freshness(end)
+                    stored = [v for _, v in at_window('asap_answer_delay{method="raw"}', end)]
+                    report_timing("raw", end, max(stored), query_s)
             forget_before((time.time() - 15 * WINDOW_S) * 1000)
         except Exception as e:  # keep serving; the next round retries
             print(f"query_job: {e}", flush=True)
