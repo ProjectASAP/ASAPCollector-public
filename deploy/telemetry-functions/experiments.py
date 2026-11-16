@@ -138,8 +138,8 @@ def accuracy_size(args):
                         extra=lambda s, k=k: {"param": f"kll_k={k}", **latency_error(s)}))
     # The top-k use case's 100,000 Zipf routes are enough keys for Count-Min
     # collisions to matter.
-    for cols in ([] if args.only == "kll" else (256, 512, 1024, 2048)):
-        edit = ("branch.yaml", "columns: 512", f"columns: {cols}")
+    for cols in ([] if args.only == "kll" else (512, 2048, 8192, 16384)):
+        edit = ("branch.yaml", "columns: 8192", f"columns: {cols}")
         rows.append(run(args, "topk", args.rates[0], edits=[edit],
                         extra=lambda s, c=cols: {"param": f"cms_columns={c}", **topk_error(s)}))
     return rows
