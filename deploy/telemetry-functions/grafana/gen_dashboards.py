@@ -26,22 +26,24 @@ def row(title):
     y += 1
 
 
-def stat(title, expr, legend, desc, w, x, h=4):
+def stat(title, expr, legend, desc, w, x, h=4, trend=False):
+    """A number; with `trend`, also its recent history as a sparkline."""
     add({"type": "stat", "title": title, "datasource": PROM, "description": desc,
-         "targets": [{"refId": "A", "expr": expr, "legendFormat": legend, "instant": True}],
+         "targets": [{"refId": "A", "expr": expr, "legendFormat": legend}],
          "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
-                     "colorMode": "none", "graphMode": "none", "textMode": "value_and_name", "justifyMode": "center"},
+                     "colorMode": "none", "graphMode": "area" if trend else "none",
+                     "textMode": "value_and_name", "justifyMode": "center"},
          "fieldConfig": {"defaults": {"unit": "short", "decimals": 0}, "overrides": []}}, w, h, x)
 
 
-def traffic(shape_title, shape_expr, shape_legend, shape_desc):
-    """The current volume and shape of the input, as numbers."""
-    global y
-    stat("Input: points per second (both sources)",
-         'sum(last_over_time(asap_points{method="raw"}[2m])) / 60',
-         "points/s", "Points per second of the latest minute, both sources together.", 8, 0)
-    stat(shape_title, shape_expr, shape_legend, shape_desc, 16, 8)
-    y += 4
+# The data-shape number of the use case: (title, expr, legend, description),
+# set by topk() or cardinality() and shown beside the timing chart.
+SHAPE = None
+
+
+def input_shape(title, expr, legend, desc):
+    global SHAPE
+    SHAPE = (title, expr, legend, desc)
 
 
 def gauges(title, exprs, desc, w, x, good_high, h=7):
@@ -165,7 +167,7 @@ def topk():
     add({"type": "text", "title": "Three ways to answer, every minute: which routes got the most requests in the last 5 minutes, and which are new?",
          "options": {"mode": "html", "content": html}}, 24, 10, 0)
     y += 10
-    traffic("Data shape: distinct routes in the last 5 minutes",
+    input_shape("Data shape: distinct routes in the last 5 minutes",
             'max(last_over_time(asap_distinct{method="exact",attribute_key="http.route"}[2m]))', "distinct routes",
             "From the exact pipeline.")
 
@@ -248,79 +250,37 @@ def topk():
 
 
 def timing(raw_query):
-    """One stacked bar per approach, from data generated to the query result
-    (5-minute range wait, time until the data is queryable, the query), and the
-    same without the shared range wait over time."""
+    """Per approach over time: data generated -> query result without the 5-minute
+    range wait (the same for all three), beside the input's rate and shape."""
     global y
-    row("From data generated to query result (latest answer)")
-    def named(e):
-        for method, name in NAMES.items():
-            e = f'label_replace({e}, "approach", "{name}", "method", "{method}")'
-        return e
-    latest = lambda m: f'max by (method) (last_over_time({m}[5m]))'
-    segments = [
-        ("wait for the 5-minute range to end", latest("asap_window_wait_seconds")),
-        ("then until data is queryable",
-         f'{latest("asap_data_available_seconds")} - on (method) {latest("asap_window_wait_seconds")}'),
-        ("query", 'max by (method) (last_over_time(asap_query_seconds[5m]))'),
-    ]
-    add({"type": "barchart", "title": "Data generated -> query result: where the time goes", "datasource": PROM,
-         "description": "Every approach answers over the last 5 minutes, once a minute. 1. The range's oldest "
-                        "point waits 5 minutes for the range to end (all three). 2. Then until the data is "
-                        "queryable: sketch and exact until the detector wrote the answer to their Prometheus; Raw "
-                        "until prometheus-raw acknowledged the range's last point (otlp-forwarder forwards each "
-                        "point as it arrives). 3. The query that returns "
-                        "the answer on the approach's own Prometheus: sketch and exact read the stored answer "
-                        f"(estimates only); Raw computes it from every raw sample ({raw_query}).",
-         "targets": [{"refId": chr(65 + i), "expr": named(e), "format": "table", "instant": True}
-                     for i, (_, e) in enumerate(segments)],
-         "transformations": [
-             {"id": "joinByField", "options": {"byField": "approach", "mode": "outer"}},
-             {"id": "organize", "options": {
-                 "includeByName": {"approach": True, "Value #A": True, "Value #B": True, "Value #C": True},
-                 "indexByName": {"approach": 0, "Value #A": 1, "Value #B": 2, "Value #C": 3},
-                 "renameByName": {"Value #A": segments[0][0], "Value #B": segments[1][0],
-                                  "Value #C": segments[2][0]}}},
-             {"id": "sortBy", "options": {"sort": [{"field": "approach"}]}}],
-         "options": {"orientation": "horizontal", "stacking": "normal", "xField": "approach", "showValue": "always",
-                     "barWidth": 0.6, "groupWidth": 0.7, "legend": {"displayMode": "list", "placement": "bottom",
-                                                                   "showLegend": True},
-                     "tooltip": {"mode": "multi", "sort": "none"}},
-         "fieldConfig": {"defaults": {"unit": "s", "decimals": 2, "min": 0,
-                                      "custom": {"fillOpacity": 85, "lineWidth": 0}},
-                         "overrides": [
-                             by_name(segments[0][0], {"id": "color", "value": {"mode": "fixed", "fixedColor": "#8e8e8e"}}),
-                             by_name(segments[1][0], {"id": "color", "value": {"mode": "fixed", "fixedColor": "#ff9830"}}),
-                             by_name(segments[2][0], {"id": "color", "value": {"mode": "fixed", "fixedColor": "#5794f2"}})]}},
-        24, 8, 0)
-    y += 8
+    row("From data generated to query result, as the input scales up and down")
     add({"type": "timeseries", "title": "Time after the 5-minute range ends until the answer, over time (log scale)",
          "datasource": PROM,
-         "description": "Data generated -> query result, minus the 5-minute wait for the range to end: that wait "
-                        "is the same for all three approaches, so it is subtracted. What is left is the time until "
-                        "the data is queryable plus the query, per answer (once a minute). The input rate (right "
-                        "axis) ramps up and down, so the chart shows how each approach scales. Log scale: the values "
-                        "go from milliseconds to minutes.",
+         "description": "Every approach answers over the last 5 minutes, once a minute. Data generated -> query "
+                        "result, minus the 5-minute wait for the range to end: that wait is the same for all three "
+                        "approaches, so it is subtracted. What is left: until the data is queryable (Sketch and "
+                        "Exact: the detector wrote the answer to their Prometheus; Raw: prometheus-raw acknowledged "
+                        "the range's last point), plus the query on the approach's own Prometheus (Sketch and "
+                        f"Exact read the stored answer; Raw computes it from every raw sample: {raw_query}). "
+                        "Log scale: the values go from milliseconds to minutes.",
          "targets": [{"refId": chr(65 + i), "expr": f'max(asap_result_age_seconds{{method="{m}"}} - '
                                                      f'asap_window_wait_seconds{{method="{m}"}})',
                       "legendFormat": NAMES[m]}
-                     for i, m in enumerate(("sketch", "exact", "raw"))]
-                    + [{"refId": "D", "expr": 'sum(last_over_time(asap_points{method="raw"}[2m])) / 60',
-                        "legendFormat": "input points/s"}],
+                     for i, m in enumerate(("sketch", "exact", "raw"))],
          "fieldConfig": {"defaults": {"unit": "s", "custom": {"spanNulls": True, "lineWidth": 2,
                                                               "scaleDistribution": {"type": "log", "log": 10}}},
-                         "overrides": [
-                             *[by_name(NAMES[m], {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS[m]}})
-                               for m in ("sketch", "exact", "raw")],
-                             by_name("input points/s", {"id": "unit", "value": "short"},
-                                     {"id": "custom.axisPlacement", "value": "right"},
-                                     {"id": "custom.scaleDistribution", "value": {"type": "linear"}},
-                                     {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [6, 6]}},
-                                     {"id": "custom.lineWidth", "value": 1},
-                                     {"id": "color", "value": {"mode": "fixed", "fixedColor": "#73bf69"}})]},
+                         "overrides": [by_name(NAMES[m], {"id": "color",
+                                                          "value": {"mode": "fixed", "fixedColor": COLORS[m]}})
+                                       for m in ("sketch", "exact", "raw")]},
          "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]},
-                     "tooltip": {"mode": "multi", "sort": "none"}}}, 24, 9, 0)
-    y += 9
+                     "tooltip": {"mode": "multi", "sort": "none"}}}, 16, 10, 0)
+    stat("Input: points per second (both sources)", 'sum(last_over_time(asap_points{method="raw"}[2m])) / 60',
+         "points/s", "Points per second of the latest minute, both sources together; the line shows the ramp.",
+         8, 16, h=5, trend=True)
+    title, expr, legend, desc = SHAPE
+    y += 5
+    stat(title, expr, legend, desc, 8, 16, h=5, trend=True)
+    y += 5
 
 
 APPROACHES = [
@@ -425,7 +385,7 @@ def cardinality():
     add({"type": "text", "title": "Three ways to answer, every minute: how many distinct values did each attribute have in the last 5 minutes?",
          "options": {"mode": "html", "content": html}}, 24, 11, 0)
     y += 11
-    traffic("Data shape: distinct values per key in the last 5 minutes",
+    input_shape("Data shape: distinct values per key in the last 5 minutes",
             'max by (attribute_key) (last_over_time(asap_distinct{method="exact"}[2m])) or max by (attribute_key) '
             '(last_over_time(asap_distinct{method="sketch",bound="estimate"}[2m]))', "{{attribute_key}}",
             "From the exact pipeline; the sketch's estimate for a key exact has not answered recently.")

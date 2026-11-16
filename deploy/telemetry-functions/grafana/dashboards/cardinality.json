@@ -25,94 +25,6 @@
       "id": 1
     },
     {
-      "type": "stat",
-      "title": "Input: points per second (both sources)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-cardinality"
-      },
-      "description": "Points per second of the latest minute, both sources together.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum(last_over_time(asap_points{method=\"raw\"}[2m])) / 60",
-          "legendFormat": "points/s",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "none",
-        "graphMode": "none",
-        "textMode": "value_and_name",
-        "justifyMode": "center"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 0,
-        "y": 11
-      },
-      "id": 2
-    },
-    {
-      "type": "stat",
-      "title": "Data shape: distinct values per key in the last 5 minutes",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-cardinality"
-      },
-      "description": "From the exact pipeline; the sketch's estimate for a key exact has not answered recently.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (attribute_key) (last_over_time(asap_distinct{method=\"exact\"}[2m])) or max by (attribute_key) (last_over_time(asap_distinct{method=\"sketch\",bound=\"estimate\"}[2m]))",
-          "legendFormat": "{{attribute_key}}",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "colorMode": "none",
-        "graphMode": "none",
-        "textMode": "value_and_name",
-        "justifyMode": "center"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 16,
-        "x": 8,
-        "y": 11
-      },
-      "id": 3
-    },
-    {
       "type": "row",
       "title": "Accuracy against exact",
       "collapsed": false,
@@ -121,9 +33,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 11
       },
-      "id": 4
+      "id": 2
     },
     {
       "type": "gauge",
@@ -182,174 +94,22 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 12
       },
-      "id": 5
+      "id": 3
     },
     {
       "type": "row",
-      "title": "From data generated to query result (latest answer)",
+      "title": "From data generated to query result, as the input scales up and down",
       "collapsed": false,
       "panels": [],
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 19
       },
-      "id": 6
-    },
-    {
-      "type": "barchart",
-      "title": "Data generated -> query result: where the time goes",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-cardinality"
-      },
-      "description": "Every approach answers over the last 5 minutes, once a minute. 1. The range's oldest point waits 5 minutes for the range to end (all three). 2. Then until the data is queryable: sketch and exact until the detector wrote the answer to their Prometheus; Raw until prometheus-raw acknowledged the range's last point (otlp-forwarder forwards each point as it arrives). 3. The query that returns the answer on the approach's own Prometheus: sketch and exact read the stored answer (estimates only); Raw computes it from every raw sample (one PromQL distinct count per key, summed).",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "label_replace(label_replace(label_replace(max by (method) (last_over_time(asap_window_wait_seconds[5m])), \"approach\", \"Sketch\", \"method\", \"sketch\"), \"approach\", \"Exact\", \"method\", \"exact\"), \"approach\", \"Raw\", \"method\", \"raw\")",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "refId": "B",
-          "expr": "label_replace(label_replace(label_replace(max by (method) (last_over_time(asap_data_available_seconds[5m])) - on (method) max by (method) (last_over_time(asap_window_wait_seconds[5m])), \"approach\", \"Sketch\", \"method\", \"sketch\"), \"approach\", \"Exact\", \"method\", \"exact\"), \"approach\", \"Raw\", \"method\", \"raw\")",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "refId": "C",
-          "expr": "label_replace(label_replace(label_replace(max by (method) (last_over_time(asap_query_seconds[5m])), \"approach\", \"Sketch\", \"method\", \"sketch\"), \"approach\", \"Exact\", \"method\", \"exact\"), \"approach\", \"Raw\", \"method\", \"raw\")",
-          "format": "table",
-          "instant": true
-        }
-      ],
-      "transformations": [
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "approach",
-            "mode": "outer"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "includeByName": {
-              "approach": true,
-              "Value #A": true,
-              "Value #B": true,
-              "Value #C": true
-            },
-            "indexByName": {
-              "approach": 0,
-              "Value #A": 1,
-              "Value #B": 2,
-              "Value #C": 3
-            },
-            "renameByName": {
-              "Value #A": "wait for the 5-minute range to end",
-              "Value #B": "then until data is queryable",
-              "Value #C": "query"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "field": "approach"
-              }
-            ]
-          }
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "stacking": "normal",
-        "xField": "approach",
-        "showValue": "always",
-        "barWidth": 0.6,
-        "groupWidth": 0.7,
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "decimals": 2,
-          "min": 0,
-          "custom": {
-            "fillOpacity": 85,
-            "lineWidth": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "wait for the 5-minute range to end"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "then until data is queryable"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 24
-      },
-      "id": 7
+      "id": 4
     },
     {
       "type": "timeseries",
@@ -358,7 +118,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus-cardinality"
       },
-      "description": "Data generated -> query result, minus the 5-minute wait for the range to end: that wait is the same for all three approaches, so it is subtracted. What is left is the time until the data is queryable plus the query, per answer (once a minute). The input rate (right axis) ramps up and down, so the chart shows how each approach scales. Log scale: the values go from milliseconds to minutes.",
+      "description": "Every approach answers over the last 5 minutes, once a minute. Data generated -> query result, minus the 5-minute wait for the range to end: that wait is the same for all three approaches, so it is subtracted. What is left: until the data is queryable (Sketch and Exact: the detector wrote the answer to their Prometheus; Raw: prometheus-raw acknowledged the range's last point), plus the query on the approach's own Prometheus (Sketch and Exact read the stored answer; Raw computes it from every raw sample: one PromQL distinct count per key, summed). Log scale: the values go from milliseconds to minutes.",
       "targets": [
         {
           "refId": "A",
@@ -374,11 +134,6 @@
           "refId": "C",
           "expr": "max(asap_result_age_seconds{method=\"raw\"} - asap_window_wait_seconds{method=\"raw\"})",
           "legendFormat": "Raw"
-        },
-        {
-          "refId": "D",
-          "expr": "sum(last_over_time(asap_points{method=\"raw\"}[2m])) / 60",
-          "legendFormat": "input points/s"
         }
       ],
       "fieldConfig": {
@@ -438,49 +193,6 @@
                 }
               }
             ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "input points/s"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "short"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
-              },
-              {
-                "id": "custom.scaleDistribution",
-                "value": {
-                  "type": "linear"
-                }
-              },
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dash",
-                  "dash": [
-                    6,
-                    6
-                  ]
-                }
-              },
-              {
-                "id": "custom.lineWidth",
-                "value": 1
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#73bf69"
-                }
-              }
-            ]
           }
         ]
       },
@@ -499,12 +211,98 @@
         }
       },
       "gridPos": {
-        "h": 9,
-        "w": 24,
+        "h": 10,
+        "w": 16,
         "x": 0,
-        "y": 32
+        "y": 20
       },
-      "id": 8
+      "id": 5
+    },
+    {
+      "type": "stat",
+      "title": "Input: points per second (both sources)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-cardinality"
+      },
+      "description": "Points per second of the latest minute, both sources together; the line shows the ramp.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(last_over_time(asap_points{method=\"raw\"}[2m])) / 60",
+          "legendFormat": "points/s"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 20
+      },
+      "id": 6
+    },
+    {
+      "type": "stat",
+      "title": "Data shape: distinct values per key in the last 5 minutes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-cardinality"
+      },
+      "description": "From the exact pipeline; the sketch's estimate for a key exact has not answered recently.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (attribute_key) (last_over_time(asap_distinct{method=\"exact\"}[2m])) or max by (attribute_key) (last_over_time(asap_distinct{method=\"sketch\",bound=\"estimate\"}[2m]))",
+          "legendFormat": "{{attribute_key}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "area",
+        "textMode": "value_and_name",
+        "justifyMode": "center"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 25
+      },
+      "id": 7
     },
     {
       "type": "row",
@@ -515,9 +313,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 30
       },
-      "id": 9
+      "id": 8
     },
     {
       "type": "bargauge",
@@ -619,9 +417,9 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 42
+        "y": 31
       },
-      "id": 10
+      "id": 9
     },
     {
       "type": "bargauge",
@@ -723,9 +521,9 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 42
+        "y": 31
       },
-      "id": 11
+      "id": 10
     },
     {
       "type": "bargauge",
@@ -827,9 +625,9 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 42
+        "y": 31
       },
-      "id": 12
+      "id": 11
     },
     {
       "type": "row",
@@ -840,9 +638,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 38
       },
-      "id": 13
+      "id": 12
     },
     {
       "type": "table",
@@ -1070,9 +868,9 @@
         "h": 7,
         "w": 20,
         "x": 0,
-        "y": 50
+        "y": 39
       },
-      "id": 14
+      "id": 13
     },
     {
       "type": "stat",
@@ -1111,9 +909,9 @@
         "h": 7,
         "w": 4,
         "x": 20,
-        "y": 50
+        "y": 39
       },
-      "id": 15
+      "id": 14
     },
     {
       "type": "table",
@@ -1203,9 +1001,9 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 46
       },
-      "id": 16
+      "id": 15
     }
   ]
 }
