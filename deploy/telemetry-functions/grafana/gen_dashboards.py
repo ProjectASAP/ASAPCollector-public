@@ -150,7 +150,14 @@ def topk():
         "approach has its own Prometheus.",
         "Raw adds a <code>point_slot</code> label so points of one route in the same millisecond stay separate "
         "samples (Prometheus keeps one sample per series and millisecond). hh-accuracy compares Sketch with Exact; "
-        "query-job compares Raw with Exact and times every approach&#39;s query."])
+        "query-job compares Raw with Exact and times every approach&#39;s query.",
+        "<b>The queries</b> (query-job runs each once per minute on that approach&#39;s own Prometheus):"
+        "<br>Sketch: <code>asap_topk{method=&quot;sketch&quot;, bound=&quot;estimate&quot;}[60s]</code>"
+        "<br>Exact: <code>asap_topk{method=&quot;exact&quot;, bound=&quot;estimate&quot;}[60s]</code>"
+        "<br>Raw: <code>topk(20, sum by (http_route) (count_over_time(http_server_request_duration[60s])))</code>",
+        "Sketch and Exact read the stored top 20 of the minute (evaluated at the minute&#39;s end, keeping the "
+        "samples stamped with it). Raw computes it from every raw point of the minute (evaluated 1 ms before the "
+        "minute&#39;s end, because PromQL ranges include their end)."])
     add({"type": "text", "title": "Three ways to answer: which routes get the most requests each minute, and which are new?",
          "options": {"mode": "html", "content": html}}, 24, 10, 0)
     y += 10
@@ -380,7 +387,14 @@ def cardinality():
         "<b>Class</b> (per attribute and minute, from the last 10 minutes; every approach applies the same rules to "
         "its own counts): <b>identifier-like</b> when distinct / points is at least 0.9, i.e. nearly every point has "
         "a new value; else <b>growing</b> when distinct is more than 20% above the mean of the last 10 minutes "
-        "(needs 3); else <b>stable</b>. Not classified below 100 points."])
+        "(needs 3); else <b>stable</b>. Not classified below 100 points.",
+        "<b>The queries</b> (query-job runs each once per minute on that approach&#39;s own Prometheus):"
+        "<br>Sketch: <code>asap_distinct{method=&quot;sketch&quot;, bound=&quot;estimate&quot;}[60s]</code>"
+        "<br>Exact: <code>asap_distinct{method=&quot;exact&quot;, bound=&quot;estimate&quot;}[60s]</code>"
+        "<br>Raw: <code>count(count by (user_id) (count_over_time(http_server_request_duration{user_id!=&quot;&quot;}[60s]))) &mdash; one per attribute (here <code>user_id</code>; likewise <code>http_route</code>, <code>http_method</code>, <code>k8s_pod_name</code>)</code>",
+        "Sketch and Exact read the stored distinct counts of the minute (evaluated at the minute&#39;s end, keeping "
+        "the samples stamped with it). Raw computes each from every raw point of the minute (evaluated 1 ms before "
+        "the minute&#39;s end)."])
     add({"type": "text", "title": "Three ways to answer: how many distinct values does each attribute have each minute?",
          "options": {"mode": "html", "content": html}}, 24, 11, 0)
     y += 11
