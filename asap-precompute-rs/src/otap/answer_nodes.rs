@@ -32,9 +32,6 @@ use serde::Deserialize;
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{
     AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
 };
-use otel_arrow_dfe_pdata::proto::opentelemetry::logs::v1::{
-    LogRecord, LogsData, ResourceLogs, ScopeLogs, SeverityNumber,
-};
 use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
     Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics,
 };
@@ -50,8 +47,8 @@ use crate::answers::{
 use crate::envelope::SketchEnvelope;
 use crate::envelope::SketchType;
 use crate::observation::{KeyValue, Observation};
-use crate::precompute::QuantileSketch;
-use crate::sketches::KLLWrapper;
+use crate::precompute::{PrecomputeError, QuantileSketch};
+use crate::sketches::{decode_snapshot, KLLWrapper};
 use std::collections::{HashMap, VecDeque};
 
 /// Registered URN of the sketch detector.
@@ -89,10 +86,79 @@ pub struct DetectorConfig {
     /// Windows whose top keys form the novelty baseline.
     #[serde(default = "default_novelty_windows")]
     pub novelty_windows: usize,
+    /// Windows each answer covers: every window, the answers merge it with the
+    /// previous `range_windows - 1` windows of the series (a sliding range
+    /// updated once per window). 1 answers each window alone.
+    #[serde(default = "default_range_windows")]
+    pub range_windows: usize,
 }
 
 pub(super) fn default_novelty_windows() -> usize {
     10
+}
+
+pub(super) fn default_range_windows() -> usize {
+    1
+}
+
+/// The last `windows` windows of every series, for answers over a sliding range.
+pub(super) struct RecentWindows {
+    windows: usize,
+    recent: HashMap<String, VecDeque<SketchEnvelope>>,
+}
+
+impl RecentWindows {
+    pub(super) fn new(windows: usize) -> Self {
+        Self {
+            windows: windows.max(1),
+            recent: HashMap::new(),
+        }
+    }
+
+    /// Adds a window of its series; returns the series' last windows, oldest
+    /// first, ending with `env`.
+    pub(super) fn push(&mut self, env: SketchEnvelope) -> &VecDeque<SketchEnvelope> {
+        let recent = self.recent.entry(series_key(&env)).or_default();
+        recent.push_back(env);
+        while recent.len() > self.windows {
+            recent.pop_front();
+        }
+        recent
+    }
+}
+
+/// One envelope covering `windows` (oldest first): the latest window's
+/// series, from the oldest window's start, with the points added up and the
+/// payload from `merge`.
+pub(super) fn merged_range(
+    windows: &VecDeque<SketchEnvelope>,
+    merge: impl FnOnce(&VecDeque<SketchEnvelope>) -> Result<Vec<u8>, PrecomputeError>,
+) -> Result<SketchEnvelope, PrecomputeError> {
+    let (Some(first), Some(last)) = (windows.front(), windows.back()) else {
+        return Err(PrecomputeError::Other("no window to merge".into()));
+    };
+    if windows.len() == 1 {
+        return Ok(last.clone());
+    }
+    Ok(SketchEnvelope {
+        window_start_ms: first.window_start_ms,
+        count: windows.iter().map(|w| w.count).sum(),
+        payload: merge(windows)?,
+        ..last.clone()
+    })
+}
+
+/// Merges sketch windows of one series into one snapshot.
+fn merge_sketches(windows: &VecDeque<SketchEnvelope>) -> Result<Vec<u8>, PrecomputeError> {
+    let mut iter = windows.iter();
+    let first = iter
+        .next()
+        .ok_or_else(|| PrecomputeError::Other("no window".into()))?;
+    let mut sketch = decode_snapshot(first.sketch_type, &first.payload)?;
+    for w in iter {
+        sketch.merge_snapshot(&w.payload)?;
+    }
+    sketch.snapshot()
 }
 
 pub(super) fn now_ms() -> u64 {
@@ -248,47 +314,31 @@ pub(super) fn gauges_pdata(envs: &[SketchEnvelope]) -> Result<OtapPdata, String>
     Ok(OtapPdata::new_todo_context(payload))
 }
 
-/// Detection events as OTLP log records (for Loki or any log backend).
-fn events_pdata(events: &[Event]) -> Result<OtapPdata, String> {
-    let records = events
+/// Detection events as `asap.event` gauges at the window's end, whose value is
+/// the window's end in seconds (a dashboard lists events by it),
+/// labelled `method`, `kind`, the event's attributes and `message` (one
+/// readable sentence), so the metrics store that holds the answers holds the
+/// events too.
+pub(super) fn event_gauges(events: &[Event]) -> Vec<SketchEnvelope> {
+    events
         .iter()
         .map(|e| {
-            let mut attributes = vec![
-                OtlpKeyValue::new("event.kind", AnyValue::new_string(e.kind.clone())),
-                OtlpKeyValue::new("method", AnyValue::new_string(e.method.clone())),
+            let mut labels = vec![
+                KeyValue::new("method", e.method.clone()),
+                KeyValue::new("kind", e.kind.clone()),
+                KeyValue::new("message", e.body.clone()),
             ];
-            attributes.extend(e.attributes.iter().map(|kv| {
-                OtlpKeyValue::new(kv.key.clone(), AnyValue::new_string(kv.value.clone()))
-            }));
-            LogRecord::build()
-                .time_unix_nano(e.window_end_ms * 1_000_000)
-                .observed_time_unix_nano(e.window_end_ms * 1_000_000)
-                .severity_number(SeverityNumber::Info)
-                .severity_text("INFO")
-                // The method is part of the line: Loki drops a second entry with
-                // the same stream, timestamp and line, and sketch and exact events
-                // can otherwise read the same.
-                .body(AnyValue::new_string(format!("[{}] {}", e.method, e.body)))
-                .attributes(attributes)
-                .finish()
+            labels.extend(e.attributes.iter().cloned());
+            SketchEnvelope {
+                labels,
+                metric_name: "asap.event".into(),
+                window_start_ms: e.window_end_ms,
+                window_end_ms: e.window_end_ms,
+                value: e.window_end_ms as f64 / 1000.0,
+                ..Default::default()
+            }
         })
-        .collect::<Vec<_>>();
-    let data = LogsData::new(vec![ResourceLogs::new(
-        Resource::build()
-            .attributes(vec![OtlpKeyValue::new(
-                "service.name",
-                AnyValue::new_string("asap-detector"),
-            )])
-            .finish(),
-        vec![ScopeLogs::new(
-            InstrumentationScope::build().name("asap.events").finish(),
-            records,
-        )],
-    )]);
-    let payload: OtapPayload = OtlpProtoMessage::Logs(data)
-        .try_into()
-        .map_err(|e| format!("{e:?}"))?;
-    Ok(OtapPdata::new_todo_context(payload))
+        .collect()
 }
 
 pub(super) async fn emit(
@@ -296,22 +346,14 @@ pub(super) async fn emit(
     events: &[Event],
     effects: &mut local::EffectHandler<OtapPdata>,
 ) -> Result<(), Error> {
-    if !envs.is_empty() {
-        let envs = with_delay(envs, now_ms());
-        match gauges_pdata(&envs) {
-            Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
-            Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
-        }
+    if envs.is_empty() && events.is_empty() {
+        return Ok(());
     }
-    if !events.is_empty() {
-        match events_pdata(events) {
-            Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
-            Err(e) => {
-                effects
-                    .info(&format!("answers: event encode failed: {e}"))
-                    .await
-            }
-        }
+    let mut envs = with_delay(envs, now_ms());
+    envs.extend(event_gauges(events));
+    match gauges_pdata(&envs) {
+        Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
+        Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
     }
     Ok(())
 }
@@ -333,6 +375,7 @@ pub(super) async fn observations(
 
 struct SketchDetector {
     config: DetectorConfig,
+    range: RecentWindows,
     cardinality: CardinalityClassifier,
     novelty: NoveltyTracker,
     drift: DriftTracker,
@@ -420,6 +463,13 @@ impl local::Processor<OtapPdata> for SketchDetector {
                 continue;
             };
             let _ = windows.insert((env.window_start_ms, env.window_end_ms));
+            let env = match merged_range(self.range.push(*env), merge_sketches) {
+                Ok(range) => range,
+                Err(e) => {
+                    effects.info(&format!("sketch_detector: {e}")).await;
+                    continue;
+                }
+            };
             match sketch_answers(&env, &self.config.quantiles, self.config.k) {
                 Ok(answers) => {
                     if env.sketch_type == SketchType::KLLSketch {
@@ -468,6 +518,7 @@ static SKETCH_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
             serde_json::from_value(node_config.config.clone()).map_err(invalid)?;
         Ok(ProcessorWrapper::local(
             SketchDetector {
+                range: RecentWindows::new(config.range_windows),
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
                 novelty: NoveltyTracker::new(config.novelty_windows),
                 drift: DriftTracker::new(config.drift.clone()),

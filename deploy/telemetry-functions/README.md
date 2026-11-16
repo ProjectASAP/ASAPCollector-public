@@ -7,14 +7,24 @@ each pinned to its own CPU, connected by OTLP/HTTP over the compose network.
 Three approaches run side by side over the same input and share no processor:
 
 ```text
-sketch:          generator-a/b -> branch-a/b (sketch per window) -> merge -> detector -> Prometheus, Loki
-exact:           exact-generator-a/b -> exact-branch-a/b (exact window) -> exact-merge -> exact-detector -> Prometheus, Loki
-store and query: raw-generator-a/b -> raw-sink-a/b -> loki-raw; query-job runs the answer query over loki-raw
+Sketch (summarize each minute at the source):
+  generator-a/b -> branch-a/b (sketch per minute) -> merge -> detector -> prometheus-sketch
+Exact (count every value each minute):
+  exact-generator-a/b -> exact-branch-a/b (exact counts per minute) -> exact-merge -> exact-detector -> prometheus-exact
+Raw (store every point, compute when asked):
+  raw-generator-a/b -> raw-sink-a/b (forwards each point, no window) -> prometheus-raw; query-job computes the answer with PromQL
 ```
 
-The store-and-query pipeline (`method="raw"`) keeps every raw point and
-computes the answer later, the way a log store would be used without inline
-functions.
+The raw pipeline (`method="raw"`) keeps every raw point and
+computes the answer later, the way Prometheus is used without inline
+functions: every raw point is one sample in `prometheus-raw`.
+
+Each approach has its own Prometheus, which holds only that approach's data,
+so its cost is the approach's own. A fourth, monitoring Prometheus
+(`prometheus`) is what Grafana reads: it scrapes every stage's telemetry,
+copies the sketch and exact answers from their Prometheus (federation of
+`asap_*`), and receives the raw pipeline's timing, hh-accuracy and the query
+job's results. There is no Loki: detection events are `asap_event` gauges.
 
 The two generators of each pipeline (sources a and b) run the same configs
 with the same scenario start (`SCENARIO_START`), and every point is a function
@@ -27,10 +37,10 @@ of scenario time, so all three pipelines receive identical points.
 | merge | `window_merge`: merges both sources' sketches per window and emits it as soon as both have sent it (5 s timeout for a missing source) |
 | detector | `sketch_detector`: answers with bounds, baseline comparisons, events (`method="sketch"`) |
 | exact-branch-a/b | `exact_branch`: every value per quantile series and a value -> count map per attribute key, per 1-minute window |
-| exact-merge | `exact_merge`: adds both sources' exact windows and emits each as soon as both have sent it (5 s timeout) |
+| exact-merge | `exact_merge`: adds both sources' exact windows and emits each as soon as both have sent it (60 s timeout: at the top rate an exact window takes more than 5 s to arrive) |
 | exact-detector | `exact_detector`: the same answers and events from the exact windows (`method="exact"`): the ground truth |
-| raw-sink-a/b | `raw_sink`, the only stage per source: writes every raw point as one log record to `loki-raw` (4 requests in flight) and reports when `loki-raw` acknowledged each window's last point (`source` label), as soon as its source has sent a later point and every message of the window is acknowledged (5 s timeout if the source idles) |
-| query-job | `query_job.py`: once per window, times each approach's backend query (`asap_query_seconds`, labelled `method` and `backend`); it also answers from `loki-raw` with LogQL (`method="raw"`): in the top-k use case the top-20 and its heavy-hitter accuracy against exact, in the cardinality use case the distinct count of every attribute key (`asap_query_failed` when Loki refuses a query) |
+| raw-sink-a/b | `raw_sink`, the only stage per source: writes every raw point unchanged as one Gauge sample to `prometheus-raw` over OTLP (4 requests in flight), with a `point_slot` label (below), and reports when `prometheus-raw` acknowledged each window's last point (`source` label), as soon as its source has sent a later point and every message of the window is acknowledged (5 s timeout if the source idles) |
+| query-job | `query_job.py`: once per window, times each approach's query on its own Prometheus (`asap_query_seconds`, labelled `method`) and reports each window's timing (`asap_data_available_seconds`, `asap_result_age_seconds`); it also answers from `prometheus-raw` with PromQL (`method="raw"`): in the top-k use case the top-20 and its heavy-hitter accuracy against exact, in the cardinality use case the distinct count of every attribute key (`asap_query_failed` when Prometheus refuses a query), and applies the detectors' event rules to these answers (new heavy hitters, cardinality classes) |
 | hh-accuracy | `heavy_hitter_accuracy`, outside the pipelines: in the top-k use case both detectors send it a copy of their answers; per window it reports heavy-hitter precision, recall, F1 and average relative count error |
 
 **Heavy-hitter accuracy** (top-k use case). A heavy hitter is a route with at
@@ -44,32 +54,71 @@ that every heavy hitter is in the exact list (about 10 routes reach 1% here);
 a window whose exact top 20 is all above the threshold only gets
 `asap_hh_incomplete`.
 
+**Every raw point in Prometheus.** Prometheus keeps one sample per series and
+millisecond, and the generators stamp all points of a batch (up to 1,024) with
+the batch's time, so the same route twice in a batch would be two samples of one
+series at one millisecond, and Prometheus would keep only the first. raw-sink
+therefore labels each point `point_slot`: 0 for the first point of its series at
+that millisecond, 1 for the second, and so on. Every point stays a sample, and
+queries sum over `point_slot` (for example
+`topk(20, sum by (http_route) (count_over_time(http_server_request_duration[60s])))`).
+The two sources are kept apart by their resource attribute `source`, which
+`prometheus-raw` promotes to a label. In the cardinality use case `user.id`
+is unique per point, so every point is a new series: about 9.6 million new
+series per minute at the top rate, which `prometheus-raw` is not built for
+(its memory is capped by `PROMETHEUS_RAW_MEMORY`); the demo shows where it
+stops answering.
+
+**Answers over the last 5 minutes.** Every approach answers over the last 5
+minutes, once a minute (`range_windows: 5` in the top-k and cardinality
+detectors, `RANGE_WINDOWS` for the query job): the detectors keep each
+series' last 5 one-minute windows and merge them (sketches: merge 5
+fixed-size sketches; exact: add up 5 full count maps), and raw queries
+`[5m]` of raw points. Accuracy compares these 5-minute answers.
+
+**From data generated to query result**, gauges per answer with the same
+definitions for all three approaches:
+
+1. Range wait (`asap_window_wait_seconds`) and delay before data is
+   available for query (`asap_data_available_seconds`, which includes the
+   wait): every approach answers over the last 5 minutes, once a minute, so the
+   range's oldest point waits 5 minutes for the range to end (all three). Then
+   sketch and exact wait until the detector sent the answer to its Prometheus
+   (Prometheus stores it milliseconds later), raw until `prometheus-raw`
+   acknowledged the range's last point (raw-sink, shown as "otlp-forwarder",
+   forwards each point as it arrives).
+2. Query latency (`asap_query_seconds`): the query that returns the window's
+   answer from the approach's own Prometheus; sketch and exact read the stored
+   answer (estimates only, so both read the same series; sketch's lower and
+   upper bounds are extra), raw computes it from the raw samples.
+3. Query result computed minus data generated (`asap_result_age_seconds`): 1
+   plus 2, as if the query ran as soon as the data was available.
+
 Each dashboard also shows every pipeline's throughput: the points per window
 that reached the end of the pipeline (`asap_points`; for raw, the points
-`loki-raw` acknowledged within 50 s of the window's end, after which raw-sink
+`prometheus-raw` acknowledged within 50 s of the window's end, after which raw-sink
 reports the window anyway) divided by the window length. A pipeline that stops
 reporting shows a gap after 2 minutes rather than its last value.
 
 **Latency breakdown.** Merges and detectors report, per window, when they
 received its last input and when they emitted it, in seconds after the window's
 end (`asap_stage_received` and `asap_stage_emitted`, labelled `method` and
-`stage`); detectors pass the merge's timing on to Prometheus. With the query
-job's backend query time, the top-k dashboard stacks each approach's freshness:
-the window wait (up to 60 s for a window's first sample), branch and transfer to
-the merge, the merge's wait for both sources, transfer to the detector, the detector, and the
-query. For store and query: the window wait, ingestion into `loki-raw` (last
-point acknowledged) and the LogQL query.
+`stage`); detectors pass the merge's timing on to Prometheus. The dashboards
+show only each approach's total delay after the window's end (one stacked bar per
+approach: window wait, delay after the window's end, query); these gauges stay
+in Prometheus to find which stage the delay comes from.
 
-**Whole-system cost.** Prometheus also scrapes `loki-raw`, itself and the
-query job, so the top-k dashboard shows CPU and memory per component and per
-approach: sketch and exact count their four stages, store and query its sinks,
-`loki-raw` and the query job; Prometheus, which holds every approach's answers
-and the monitoring data, is shown on its own.
+**Whole-system cost.** The monitoring Prometheus also scrapes the three
+pipeline Prometheus, itself and the query job, so the dashboards show the CPU,
+memory and network of each approach as bars: sketch and exact count their four
+stages and their Prometheus, raw its sinks, `prometheus-raw` and the
+query job. Network counts every hop of the approach, including the raw points
+raw-sink sends to `prometheus-raw` (`asap_raw_sent_bytes`). The monitoring Prometheus belongs to no approach and is not shown.
 
 The merges count a window's messages, not distinct sources: a source that sends
 a window twice (a retried request, or a branch restarted or reconfigured
 mid-window) completes it early, and the other source's late input is logged and
-dropped. If raw-sink is still waiting for `loki-raw` 50 s after a window's end,
+dropped. If raw-sink is still waiting for `prometheus-raw` 50 s after a window's end,
 it reports the window anyway with `asap_raw_unacknowledged` (points still
 waiting) and that time as its delay; the query job flags such windows with
 `asap_raw_incomplete`. The generators size their batches for the scenario's
@@ -80,9 +129,9 @@ start of the scenario, not from the change.
 Every pipeline reports its window completion delay as `asap_answer_delay`
 (seconds from a window's end until its result is complete at the end of the
 pipeline): sketch and exact when their detector emits the window's answers,
-raw when `loki-raw` has acknowledged the window's last point. raw-sink also
+raw when `prometheus-raw` has acknowledged the window's last point. raw-sink also
 reports each point's time from its event time to that acknowledgement
-(`asap_raw_transit`, p50 and p99) and points `loki-raw` rejected
+(`asap_raw_transit`, p50 and p99) and points `prometheus-raw` rejected
 (`asap_raw_failed`).
 
 The top-k and cardinality dashboards are generated by
@@ -97,9 +146,9 @@ the JSON.
 | `USE_CASE` | Sketch | Scenario | Dashboard |
 | --- | --- | --- | --- |
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
-| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, relative error over time, throughput and distinct values over time, freshness breakdown, CPU/memory/bits per component of each approach |
+| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source ramps up and back down every 40 minutes, again and again (5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each), and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: input rate and distinct values per key (numbers), distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, the sketch's error per key (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
-| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), heavy-hitter precision/recall/F1/ARE, throughput and distinct routes over time, freshness breakdown, CPU/memory per component and per approach, bits per second into each stage |
+| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source ramps up and back down every 40 minutes, again and again (5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: input rate and distinct routes (numbers), top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), the sketch's heavy-hitter precision/recall/F1/ARE (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
 
 **Cardinality classes.** Each detector classifies every attribute key per
 window from its last 10 windows (`cardinality:` in `detector.yaml`):
@@ -112,19 +161,22 @@ differing classes show where the sketch's error crosses a threshold.
 
 Answers reach Prometheus over OTLP as `asap_quantile`, `asap_distinct`,
 `asap_topk`, `asap_points`, `asap_cardinality_state`, `asap_drift_ks`,
-`asap_drift`, `asap_topk_new` and `asap_answer_delay`, labelled
+`asap_drift`, `asap_topk_new`, `asap_event` and `asap_answer_delay`, labelled
 `method="sketch"` or `"exact"` (`asap_answer_delay`, `asap_points` and
-`asap_raw_transit` also `"raw"`). Events (class changes, drift start/end, new
-heavy hitters) reach Loki as OTLP logs from `service.name=asap-detector`.
-Prometheus also scrapes each engine's telemetry
+`asap_raw_transit` also `"raw"`; the query job's raw answers and events are
+`"raw"` too). Each event (class change, drift start/end, new heavy hitter) is an
+`asap_event` gauge at its window's end, labelled `kind`, the event's fields and
+`message` (one sentence), whose value is the window's end in seconds; the
+dashboards list them. The monitoring Prometheus
+also scrapes each engine's telemetry
 (`/api/v1/metrics?format=prometheus`): CPU time per pipeline, resident memory
 and payload bytes per receiver, labelled with the stage.
 
 ## Run
 
 Linux, Docker with Compose, 18 free CPUs (0-17 by default; `CPU_BRANCH_A=20`
-etc. move a stage) and memory for `loki-raw` (capped at `LOKI_RAW_MEMORY`,
-default 16g). From the repository root:
+etc. move a stage) and memory for `prometheus-raw` (capped at
+`PROMETHEUS_RAW_MEMORY`, default 32g). From the repository root:
 
 ```sh
 USE_CASE=cardinality deploy/telemetry-functions/run.sh   # DOCKER_COMMAND="sudo docker" if needed
@@ -132,7 +184,7 @@ USE_CASE=cardinality deploy/telemetry-functions/run.sh   # DOCKER_COMMAND="sudo 
 
 Open `http://localhost:3000/d/asap-<use case>`: one Grafana (`grafana-compose.yaml`,
 project `tf-grafana`) shows every demo, and each dashboard reads its own demo's
-Prometheus and Loki (`tf-<use case>-prometheus-1`), so a dashboard stays empty
+monitoring Prometheus (`tf-<use case>-prometheus-1`), so a dashboard stays empty
 until its demo runs.
 The first answers appear about
 65 seconds after the first full minute. Stop with
@@ -148,7 +200,7 @@ Keep the default project name `tf-<use case>`: the data sources address `tf-<use
 
 Several demos can run side by side, each a full stack of its own (they share
 no Prometheus, so their metrics do not mix). `DEMO_SLOT=N` gives the Nth demo
-host ports shifted by N (Prometheus 9090+N, Loki 3100+2N, loki-raw 3101+2N) and
+host ports shifted by N (monitoring Prometheus 9090+N, prometheus-raw 9190+N for querying the raw samples by hand) and
 CPUs 18N to 18N+17; `NO_BUILD=1` reuses the built image. Grafana stays on
 `:3000` for all of them:
 
@@ -162,8 +214,8 @@ A demo is one compose project per use case, so a use case runs once at a time: s
 again restarts it. `acceptance.py` and `experiments.py` use the default project and ports, so stop
 the demos before running them. Slots must fit the host: slot N needs CPUs 18N to 18N+17.
 
-Each demo also needs its own `LOKI_RAW_MEMORY` (default 16g) and disk for
-`loki-raw`. Stages on different slots can share a physical core when the host
+Each demo also needs its own `PROMETHEUS_RAW_MEMORY` (default 32g) and disk for
+`prometheus-raw` (2 h retention). Stages on different slots can share a physical core when the host
 has hyper-threads (CPU n and n+28 on a 56-CPU host), so run one demo at a time
 for capacity measurements.
 
@@ -177,16 +229,16 @@ deploy/telemetry-functions/acceptance.py --report acceptance.json
 Runs all four use cases on the containers with time scaled down 6x (10-second
 windows, changes at second 100, at each scenario's starting rate without its
 rate and cardinality ramps) and checks the sketch answers against the
-exact ground truth through Prometheus and Loki. It exits non-zero if any check
+exact ground truth through the monitoring Prometheus. It exits non-zero if any check
 fails. The checks:
 
 | Use case | Checks |
 | --- | --- |
 | all | every stage up; points per window equal the offered rate (no backpressure); sketch and exact windows hold the same points; every pipeline reports its window completion delay (the raw pipeline's points per window are reported, not required); merges and detectors report their timing; the query job times the sketch and exact backend queries |
 | latency | exact p50/p99 inside the sketch's bound (routes with at least 2,000 points) |
-| cardinality | sketch and exact give every key the same class; the generated classes are found; distinct-count error at most 2%; store and query answers every key from `loki-raw` within 1% of exact; class events in Loki |
-| drift | the changed route drifts in both methods; no other route does; drift event in Loki |
-| topk | the new route enters both top-10s; sketch recall@10 at least 0.9; heavy-hitter precision and recall at least 0.9; store and query answers from `loki-raw` with heavy-hitter recall at least 0.9; novelty event in Loki |
+| cardinality | sketch and exact give every key the same class; the generated classes are found; distinct-count error at most 2%; raw answers every key from `prometheus-raw` within 1% of exact; class events in Prometheus |
+| drift | the changed route drifts in both methods; no other route does; drift event in Prometheus |
+| topk | the new route enters both top-10s; sketch recall@10 at least 0.9; heavy-hitter precision and recall at least 0.9; raw answers from `prometheus-raw` with heavy-hitter recall at least 0.9; novelty event in Prometheus |
 
 CI runs it on every PR (`.github/workflows/ci.yml`) with the stages sharing
 the runner's CPUs: a correctness check, not a capacity measurement.

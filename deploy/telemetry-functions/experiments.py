@@ -5,7 +5,7 @@ pipelines     The three pipelines (sketch, exact, raw) side by side over
               offered rates, fed identical points: CPU of each stage, memory,
               points delivered per second and window completion delay. The raw
               pipeline has one stage per source (raw-sink-a/b, writing to
-              loki-raw), reported in the branch columns.
+              prometheus-raw), reported in the branch columns.
 accuracy-size Error against exact versus sketch size: KLL k (latency p99
               error) and Count-Min width (top-10 recall and count error),
               with the bytes merge receives per window.
@@ -82,7 +82,7 @@ def run(args, use_case, rate, edits=(), extra=None):
     with tempfile.TemporaryDirectory(prefix="asap-exp-") as tmp:
         pipelines, common = prepare(use_case, Path(tmp), rate, edits)
         stack = acc.Stack(shlex.split(args.docker_command), use_case, pipelines, common,
-                          args.prometheus, args.loki)
+                          args.prometheus)
         stack.compose("down", "--remove-orphans")
         stack.compose("up", "-d")
         try:
@@ -155,7 +155,6 @@ def main():
     parser.add_argument("--measure", type=int, default=60)
     parser.add_argument("--docker-command", default="docker")
     parser.add_argument("--prometheus", default="http://127.0.0.1:9090")
-    parser.add_argument("--loki", default="http://127.0.0.1:3100")
     parser.add_argument("--output", type=Path, default=Path("experiment-results"))
     parser.add_argument("--only", choices=("kll", "cms"), help="accuracy-size: run one sweep")
     args = parser.parse_args()

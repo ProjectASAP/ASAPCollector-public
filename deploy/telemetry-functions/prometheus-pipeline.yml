@@ -1,0 +1,4 @@
+# Prometheus of the sketch or the exact pipeline: only its detector's answers,
+# events and timing arrive here (OTLP); it scrapes nothing.
+global:
+  scrape_interval: 5s

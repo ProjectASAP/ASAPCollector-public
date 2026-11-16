@@ -1,5 +1,5 @@
 # Top-20 routes with Count-Min bounds to Prometheus; routes new to the top 20
-# (vs the last 10 windows) as events to Loki. A copy of the answers goes to
+# (vs the last 10 windows) as `asap_event` gauges. A copy of the answers goes to
 # hh-accuracy, which compares them with the exact pipeline's.
 version: otel_dataflow/v1
 engine:
@@ -22,7 +22,7 @@ groups:
                 http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
           detector:
             type: urn:asap:processor:sketch_detector
-            config: {k: 20, novelty_windows: 10}
+            config: {k: 20, novelty_windows: 10, range_windows: 5}
           fanout:
             type: processor:fanout
             outputs: [answers, accuracy]
@@ -33,9 +33,8 @@ groups:
           to_prometheus:
             type: exporter:otlp_http
             config:
-              endpoint: http://prometheus:9090
-              metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
-              logs_endpoint: http://loki:3100/otlp/v1/logs
+              endpoint: http://prometheus-sketch:9090
+              metrics_endpoint: http://prometheus-sketch:9090/api/v1/otlp/v1/metrics
               client_pool_size: 1
               max_in_flight: 1
               http: {timeout: 30s, compression: none}

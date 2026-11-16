@@ -13,14 +13,20 @@
 //! * `urn:asap:processor:exact_detector` computes each merged window's exact
 //!   answers and events, with `method="exact"`: the ground truth.
 //! * `urn:asap:processor:raw_sink` ends the raw pipeline, which only forwards
-//!   raw points: it writes every point as one log record to a store through
-//!   its `logs` output and watches the store's acknowledgements. Once its
+//!   raw points: it writes every point unchanged as one Gauge sample to a
+//!   metrics store (Prometheus) through its `metrics` output and watches the
+//!   store's acknowledgements. A metrics store keeps one sample per series and
+//!   millisecond, and the points of a generator batch share one timestamp, so
+//!   each point also gets a `point_slot` label: 0 for the first point of its
+//!   series at that millisecond, 1 for the second, and so on. No point is
+//!   dropped, and a query sums over `point_slot`. Once its
 //!   source has sent a point past a window's end (or `grace` after the end if
 //!   the source idles) and the store answered every message of the window,
 //!   it reports on its `latency` output when the store
 //!   acknowledged the window's last point (`asap.answer.delay`,
 //!   `method="raw"`), the per-point time from event to acknowledgement
-//!   (`asap.raw.transit`) and rejected points (`asap.raw.failed`).
+//!   (`asap.raw.transit`), rejected points (`asap.raw.failed`) and the running
+//!   total of bytes sent to the store (`asap.raw.sent.bytes`).
 //!
 //! ```yaml
 //! exact_branch:
@@ -34,10 +40,12 @@
 //!   config: {quantiles: [0.5, 0.99], k: 10}
 //! raw_sink:
 //!   type: urn:asap:processor:raw_sink
-//!   outputs: [logs, latency]
+//!   outputs: [metrics, latency]
 //!   config: {window: 60s, grace: 5s}
 //! ```
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,8 +69,8 @@ use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{
     AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
 };
-use otel_arrow_dfe_pdata::proto::opentelemetry::logs::v1::{
-    LogRecord, LogsData, ResourceLogs, ScopeLogs,
+use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
+    Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics,
 };
 use otel_arrow_dfe_pdata::proto::opentelemetry::resource::v1::Resource;
 use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
@@ -70,9 +78,9 @@ use otel_arrow_dfe_pdata::OtapPayload;
 use serde::Deserialize;
 
 use super::answer_nodes::{
-    default_grace, default_k, default_novelty_windows, default_quantiles, default_window,
-    detector_timing, emit, gauges_pdata, invalid, now_ms, observations, send_gauges, series_key,
-    stage_timing, upstream_timing,
+    default_grace, default_k, default_novelty_windows, default_quantiles, default_range_windows,
+    default_window, detector_timing, emit, gauges_pdata, invalid, merged_range, now_ms,
+    observations, send_gauges, series_key, stage_timing, upstream_timing, RecentWindows,
 };
 use super::codec::{decode_each, OtapSketchEncoder};
 use crate::answers::{
@@ -91,8 +99,10 @@ pub const EXACT_MERGE_URN: &str = "urn:asap:processor:exact_merge";
 pub const EXACT_DETECTOR_URN: &str = "urn:asap:processor:exact_detector";
 /// Registered URN of the raw pipeline's sink.
 pub const RAW_SINK_URN: &str = "urn:asap:processor:raw_sink";
-/// `raw_sink` output with the log records for the store.
-const LOGS_PORT: &str = "logs";
+/// `raw_sink` output with the raw points for the store.
+const METRICS_PORT: &str = "metrics";
+/// Label telling apart the points of one series at the same millisecond.
+const POINT_SLOT_LABEL: &str = "point_slot";
 /// `raw_sink` output with the latency gauges.
 const LATENCY_PORT: &str = "latency";
 
@@ -147,6 +157,20 @@ pub struct ExactDetectorConfig {
     /// Windows whose top keys form the novelty baseline.
     #[serde(default = "default_novelty_windows")]
     pub novelty_windows: usize,
+    /// Windows each answer covers, as in `sketch_detector`.
+    #[serde(default = "default_range_windows")]
+    pub range_windows: usize,
+}
+
+/// Adds up exact windows of one series into one.
+fn merge_exact(
+    windows: &VecDeque<SketchEnvelope>,
+) -> Result<Vec<u8>, crate::precompute::PrecomputeError> {
+    let mut merged = ExactWindow::default();
+    for w in windows {
+        merged.merge(ExactWindow::decode(&w.payload)?);
+    }
+    Ok(merged.encode())
 }
 
 /// `raw_sink` configuration.
@@ -431,6 +455,7 @@ impl local::Processor<OtapPdata> for ExactMerge {
 
 struct ExactDetector {
     config: ExactDetectorConfig,
+    range: RecentWindows,
     cardinality: CardinalityClassifier,
     novelty: NoveltyTracker,
     drift: DriftTracker,
@@ -528,7 +553,14 @@ impl local::Processor<OtapPdata> for ExactDetector {
                 continue;
             };
             let _ = windows.insert((env.window_start_ms, env.window_end_ms));
-            let (gauges, new) = self.answer(*env);
+            let env = match merged_range(self.range.push(*env), merge_exact) {
+                Ok(range) => range,
+                Err(e) => {
+                    effects.info(&format!("exact_detector: {e}")).await;
+                    continue;
+                }
+            };
+            let (gauges, new) = self.answer(env);
             out.extend(gauges);
             events.extend(new);
         }
@@ -560,14 +592,21 @@ struct RawSink {
     emitted_until: u64,
     /// Latest event time (ms) the source has sent.
     sent_until_ms: u64,
+    /// Points already sent per millisecond and series hash, for
+    /// `point_slot`; milliseconds older than `grace` before the latest are
+    /// dropped.
+    slots: BTreeMap<u64, HashMap<u64, u32>>,
+    /// Encoded bytes of every message sent to the store so far.
+    sent_bytes: u64,
     timer_started: bool,
 }
 
-/// One log record per raw point: event time, the value as the body, the
-/// point's attributes.
-fn logs_pdata(points: &[Observation]) -> Result<OtapPdata, String> {
-    let mut by_resource: BTreeMap<Vec<(String, String)>, Vec<LogRecord>> = BTreeMap::new();
-    for p in points {
+/// Every raw point as one Gauge sample with its event time, value, resource
+/// and attributes, plus `point_slot` from `slots` (one per point, in order).
+fn metrics_pdata(points: &[Observation], slots: &[u32]) -> Result<OtapPdata, String> {
+    type ByMetric = BTreeMap<String, Vec<NumberDataPoint>>;
+    let mut by_resource: BTreeMap<Vec<(String, String)>, ByMetric> = BTreeMap::new();
+    for (p, slot) in points.iter().zip(slots) {
         let resource = p
             .resource_labels
             .iter()
@@ -577,38 +616,108 @@ fn logs_pdata(points: &[Observation]) -> Result<OtapPdata, String> {
             .labels
             .iter()
             .map(|kv| OtlpKeyValue::new(kv.key.clone(), AnyValue::new_string(kv.value.clone())))
+            .chain([OtlpKeyValue::new(
+                POINT_SLOT_LABEL,
+                AnyValue::new_string(slot.to_string()),
+            )])
             .collect();
-        by_resource.entry(resource).or_default().push(
-            LogRecord::build()
-                .time_unix_nano(p.timestamp_ms * 1_000_000)
-                .body(AnyValue::new_double(p.value.float))
-                .attributes(attributes)
-                .finish(),
-        );
+        by_resource
+            .entry(resource)
+            .or_default()
+            .entry(p.metric.clone())
+            .or_default()
+            .push(
+                NumberDataPoint::build()
+                    .time_unix_nano(p.timestamp_ms * 1_000_000)
+                    .value_double(p.value.float)
+                    .attributes(attributes)
+                    .finish(),
+            );
     }
-    let resource_logs: Vec<ResourceLogs> = by_resource
+    let resource_metrics: Vec<ResourceMetrics> = by_resource
         .into_iter()
-        .map(|(resource, records)| {
+        .map(|(resource, by_metric)| {
             let attributes: Vec<OtlpKeyValue> = resource
                 .into_iter()
                 .map(|(k, v)| OtlpKeyValue::new(k, AnyValue::new_string(v)))
                 .collect();
-            ResourceLogs::new(
+            let metrics: Vec<Metric> = by_metric
+                .into_iter()
+                .map(|(name, points)| {
+                    Metric::build()
+                        .name(name)
+                        .data_gauge(Gauge::new(points))
+                        .finish()
+                })
+                .collect();
+            ResourceMetrics::new(
                 Resource::build().attributes(attributes).finish(),
-                vec![ScopeLogs::new(
+                vec![ScopeMetrics::new(
                     InstrumentationScope::build().name("asap.raw").finish(),
-                    records,
+                    metrics,
                 )],
             )
         })
         .collect();
-    let payload: OtapPayload = OtlpProtoMessage::Logs(LogsData::new(resource_logs))
+    let payload: OtapPayload = OtlpProtoMessage::Metrics(MetricsData::new(resource_metrics))
         .try_into()
         .map_err(|e| format!("{e:?}"))?;
     Ok(OtapPdata::new_todo_context(payload))
 }
 
+/// Hash of a point's series in the store (metric, resource and attributes),
+/// independent of attribute order. Two series with the same hash only share a
+/// slot count: their points get distinct slots, and none is lost.
+fn raw_series_hash(p: &Observation) -> u64 {
+    let hash = |x: &dyn Fn(&mut DefaultHasher)| {
+        let mut h = DefaultHasher::new();
+        x(&mut h);
+        h.finish()
+    };
+    let resource = p.resource_labels.iter().map(|kv| {
+        hash(&|h| {
+            0u8.hash(h);
+            kv.key.hash(h);
+            kv.value.hash(h);
+        })
+    });
+    let labels = p.labels.iter().map(|kv| {
+        hash(&|h| {
+            1u8.hash(h);
+            kv.key.hash(h);
+            kv.value.hash(h);
+        })
+    });
+    resource
+        .chain(labels)
+        .fold(hash(&|h| p.metric.hash(h)), u64::wrapping_add)
+}
+
 impl RawSink {
+    /// `point_slot` of every point, in order: how many points of the same
+    /// series at the same millisecond came before it.
+    fn assign_slots(&mut self, points: &[Observation]) -> Vec<u32> {
+        let slots = points
+            .iter()
+            .map(|p| {
+                let next = self
+                    .slots
+                    .entry(p.timestamp_ms)
+                    .or_default()
+                    .entry(raw_series_hash(p))
+                    .or_insert(0);
+                *next += 1;
+                *next - 1
+            })
+            .collect();
+        // Points arrive in time order: forget milliseconds a grace before the latest.
+        if let Some(&latest) = self.slots.keys().next_back() {
+            let horizon = latest.saturating_sub(self.config.grace.as_millis() as u64);
+            self.slots = self.slots.split_off(&horizon);
+        }
+        slots
+    }
+
     /// Registers a message about to go to the store; returns its id.
     fn send(&mut self, points: &[Observation]) -> u64 {
         let size = self.config.window.as_millis().max(1) as u64;
@@ -712,6 +821,8 @@ impl RawSink {
             ));
             out.push(metric("asap.points", &[], w.transit_s.len() as f64));
             out.push(metric("asap.raw.failed", &[], w.failed as f64));
+            // Running total, so `rate()` gives the bytes per second into the store.
+            out.push(metric("asap.raw.sent.bytes", &[], self.sent_bytes as f64));
             if !w.transit_s.is_empty() {
                 w.transit_s.sort_unstable_by(f64::total_cmp);
                 let at =
@@ -753,13 +864,15 @@ impl local::Processor<OtapPdata> for RawSink {
                 if points.is_empty() {
                     return Ok(());
                 }
-                match logs_pdata(&points) {
-                    Ok(mut logs) => {
+                let slots = self.assign_slots(&points);
+                match metrics_pdata(&points, &slots) {
+                    Ok(mut raw) => {
+                        self.sent_bytes += raw.num_bytes().unwrap_or(0) as u64;
                         let id = self.send(&points);
                         let calldata = CallData::from_vec(vec![Context8u8::from(id)]);
-                        effects.subscribe_to(Interests::ACKS_OR_NACKS, calldata, &mut logs);
+                        effects.subscribe_to(Interests::ACKS_OR_NACKS, calldata, &mut raw);
                         effects
-                            .send_message_to(LOGS_PORT, logs)
+                            .send_message_to(METRICS_PORT, raw)
                             .await
                             .map_err(Error::from)?;
                     }
@@ -872,6 +985,7 @@ static EXACT_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         let config: ExactDetectorConfig = config(&node_config)?;
         Ok(ProcessorWrapper::local(
             ExactDetector {
+                range: RecentWindows::new(config.range_windows),
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
                 novelty: NoveltyTracker::new(config.novelty_windows),
                 drift: DriftTracker::new(config.drift.clone()),
@@ -904,6 +1018,8 @@ static RAW_SINK: ProcessorFactory<OtapPdata> = ProcessorFactory {
                 next_id: 0,
                 emitted_until: 0,
                 sent_until_ms: 0,
+                slots: BTreeMap::new(),
+                sent_bytes: 0,
                 timer_started: false,
             },
             node,
@@ -1013,6 +1129,7 @@ mod tests {
         let config: ExactDetectorConfig =
             serde_json::from_value(serde_json::json!({"k": 2})).unwrap();
         let mut detector = ExactDetector {
+            range: RecentWindows::new(config.range_windows),
             cardinality: CardinalityClassifier::new(config.cardinality.clone()),
             novelty: NoveltyTracker::new(config.novelty_windows),
             drift: DriftTracker::new(config.drift.clone()),
@@ -1073,6 +1190,8 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
+            slots: BTreeMap::new(),
+            sent_bytes: 0,
             timer_started: false,
         };
         let stored = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
@@ -1103,6 +1222,8 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
+            slots: BTreeMap::new(),
+            sent_bytes: 0,
             timer_started: false,
         };
         let last = raw.send(&[point(59_900, "/a", "u1", 1.0)]);
@@ -1135,6 +1256,8 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
+            slots: BTreeMap::new(),
+            sent_bytes: 0,
             timer_started: false,
         };
         let first = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
@@ -1156,5 +1279,66 @@ mod tests {
             get(&out, "asap.raw.transit", ("quantile", "0.99")),
             Some(1.3)
         );
+    }
+
+    #[test]
+    fn raw_sink_gives_points_of_one_series_and_millisecond_their_own_slot() {
+        let mut raw = RawSink {
+            config: serde_json::from_value(serde_json::json!({})).unwrap(),
+            windows: BTreeMap::new(),
+            in_flight: HashMap::new(),
+            next_id: 0,
+            emitted_until: 0,
+            sent_until_ms: 0,
+            slots: BTreeMap::new(),
+            sent_bytes: 0,
+            timer_started: false,
+        };
+        let batch = [
+            point(1_000, "/a", "u0", 1.0),
+            point(1_000, "/a", "u0", 2.0),
+            point(1_000, "/b", "u0", 3.0),
+            point(1_000, "/a", "u0", 4.0),
+        ];
+        assert_eq!(raw.assign_slots(&batch), vec![0, 1, 0, 2]);
+        // A later message at the same millisecond continues the count.
+        assert_eq!(raw.assign_slots(&batch[..1]), vec![3]);
+        assert_eq!(raw.assign_slots(&[point(1_001, "/a", "u0", 1.0)]), vec![0]);
+        // Attribute order does not change the series.
+        let mut reordered = point(1_001, "/a", "u0", 1.0);
+        reordered.labels.reverse();
+        assert_eq!(raw.assign_slots(&[reordered]), vec![1]);
+        // Milliseconds a grace (5 s) before the latest are forgotten.
+        let _ = raw.assign_slots(&[point(7_000, "/a", "u0", 1.0)]);
+        assert_eq!(raw.slots.keys().copied().collect::<Vec<_>>(), vec![7_000]);
+        assert!(metrics_pdata(&batch, &[0, 1, 0, 2]).is_ok());
+    }
+
+    #[test]
+    fn exact_range_adds_up_the_last_windows_of_a_series() {
+        let window = |end: u64, route: &str, n: u64| {
+            let mut w = ExactWindow::default();
+            *w.counts.entry(route.to_string()).or_default() += n;
+            w.points = n;
+            SketchEnvelope {
+                metric_name: "m".into(),
+                window_start_ms: end - 60_000,
+                window_end_ms: end,
+                count: n,
+                payload: w.encode(),
+                ..Default::default()
+            }
+        };
+        let mut range = RecentWindows::new(2);
+        let _ = range.push(window(60_000, "/a", 3));
+        let _ = range.push(window(120_000, "/b", 4));
+        let merged = merged_range(range.push(window(180_000, "/a", 5)), merge_exact).unwrap();
+        // The oldest window fell out: /b 4 + /a 5 over [60 s, 180 s).
+        assert_eq!(
+            (merged.window_start_ms, merged.window_end_ms, merged.count),
+            (60_000, 180_000, 9)
+        );
+        let w = ExactWindow::decode(&merged.payload).unwrap();
+        assert_eq!((w.counts["/a"], w.counts["/b"], w.points), (5, 4, 9));
     }
 }

@@ -40,7 +40,7 @@ if [ "$slot" != 0 ]; then
     exit 1
   fi
   export PROMETHEUS_PORT=${PROMETHEUS_PORT:-$((9090 + slot))}
-  export LOKI_PORT=${LOKI_PORT:-$((3100 + 2 * slot))} LOKI_RAW_PORT=${LOKI_RAW_PORT:-$((3101 + 2 * slot))}
+  export PROMETHEUS_RAW_PORT=${PROMETHEUS_RAW_PORT:-$((9190 + slot))}
   cpu=$((18 * slot))
   for stage in GENERATOR_A GENERATOR_B BRANCH_A BRANCH_B MERGE DETECTOR EXACT_GENERATOR_A EXACT_GENERATOR_B \
       EXACT_BRANCH_A EXACT_BRANCH_B EXACT_MERGE EXACT_DETECTOR RAW_GENERATOR_A RAW_GENERATOR_B RAW_SINK_A \
@@ -52,7 +52,7 @@ if [ "$slot" != 0 ]; then
 fi
 "${docker[@]}" compose -f deploy/telemetry-functions/compose.yaml up -d
 "${docker[@]}" compose -p tf-grafana -f deploy/telemetry-functions/grafana-compose.yaml up -d
-# Grafana reads each demo's Prometheus and Loki by container name, so it joins every
+# Grafana reads each demo's monitoring Prometheus by container name, so it joins every
 # demo's network; this also repairs the connections of the other demos when its
 # container was recreated.
 for network in $("${docker[@]}" network ls --format '{{.Name}}' --filter 'name=^tf-.*_default$'); do

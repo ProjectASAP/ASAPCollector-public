@@ -3,17 +3,21 @@
 #   exact:  exact-generator-a/b -> exact-branch-a/b (exact window) ->
 #           exact-merge -> exact-detector
 #   store and query (raw): raw-generator-a/b -> raw-sink-a/b (every raw point
-#           into loki-raw); query-job computes the answer from loki-raw
+#           into prometheus-raw); query-job computes the answer from
+#           prometheus-raw with PromQL
 # hh-accuracy sits outside the pipelines: in the top-k use case both detectors
 # send it a copy of their answers, and it reports heavy-hitter accuracy.
-# query-job also times each approach's backend query (Prometheus or Loki).
+# Each pipeline writes to its own Prometheus (prometheus-sketch,
+# prometheus-exact, prometheus-raw); query-job times each approach's query on
+# it. The monitoring Prometheus (`prometheus`) is what Grafana reads: it scrapes
+# every stage's telemetry and copies the sketch and exact answers.
 # Each stage is the official OTAP engine (asap-collector) in its own container,
 # pinned to one CPU, talking OTLP/HTTP over the compose network. The generators
 # of a source share one config (`downstream` is their pipeline's first stage)
 # and SCENARIO_START, so all three pipelines get identical points.
 # PIPELINES is the use case's stage-config directory (run.sh sets it from
 # USE_CASE), COMMON the stages every use case shares; CPU_* variables move a
-# stage to another core. Prometheus and Loki are the observers; Grafana is shared (grafana-compose.yaml).
+# stage to another core. Grafana is shared (grafana-compose.yaml).
 x-collector: &collector
   image: asap-collector:local
   restart: "no"
@@ -61,7 +65,7 @@ services:
     command: ["--config", "/pipelines/detector.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_DETECTOR:-5}"
-    depends_on: [prometheus, hh-accuracy]
+    depends_on: [prometheus-sketch, hh-accuracy]
   # exact pipeline
   exact-generator-a:
     <<: *generator
@@ -100,7 +104,7 @@ services:
     command: ["--config", "/pipelines/exact-detector.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_EXACT_DETECTOR:-11}"
-    depends_on: [prometheus, hh-accuracy]
+    depends_on: [prometheus-exact, hh-accuracy]
   # store-and-query pipeline: one stage per source, then the query job
   raw-generator-a:
     <<: *generator
@@ -121,13 +125,13 @@ services:
     command: ["--config", "/common/raw-sink-a.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_RAW_SINK_A:-14}"
-    depends_on: [prometheus, loki-raw]
+    depends_on: [prometheus, prometheus-raw]
   raw-sink-b:
     <<: *collector
     command: ["--config", "/common/raw-sink-b.yaml"]
     volumes: ["${PIPELINES:-./latency}:/pipelines:ro", "${COMMON:-./common}:/common:ro"]
     cpuset: "${CPU_RAW_SINK_B:-15}"
-    depends_on: [prometheus, loki-raw]
+    depends_on: [prometheus, prometheus-raw]
   query-job:
     image: python:3.12-slim
     command: ["python3", "/app/query_job.py"]
@@ -135,8 +139,9 @@ services:
     environment:
       USE_CASE: "${USE_CASE:-latency}"
       WINDOW_SECONDS: "${WINDOW_SECONDS:-60}"
+      RANGE_WINDOWS: "${RANGE_WINDOWS:-5}"
     cpuset: "${CPU_QUERY_JOB:-16}"
-    depends_on: [prometheus, loki-raw]
+    depends_on: [prometheus, prometheus-sketch, prometheus-exact, prometheus-raw]
   # Outside the pipelines: compares the sketch and exact top-k answers.
   hh-accuracy:
     <<: *collector
@@ -145,6 +150,7 @@ services:
     cpuset: "${CPU_HH_ACCURACY:-17}"
     depends_on: [prometheus]
 
+  # Monitoring: what Grafana reads (see prometheus.yml).
   prometheus:
     image: prom/prometheus:v3.5.0
     command:
@@ -152,14 +158,30 @@ services:
       - --web.enable-otlp-receiver
     ports: ["127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"]
     volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
-  # The raw pipeline's store, apart from the Loki with the events.
-  loki-raw:
-    image: grafana/loki:3.5.0
-    command: ["-config.file=/etc/loki/loki-raw.yaml"]
-    ports: ["127.0.0.1:${LOKI_RAW_PORT:-3101}:3100"]
-    volumes: ["./loki-raw.yaml:/etc/loki/loki-raw.yaml:ro"]
-    mem_limit: "${LOKI_RAW_MEMORY:-16g}"
-  loki:
-    image: grafana/loki:3.5.0
-    command: ["-config.file=/etc/loki/local-config.yaml"]
-    ports: ["127.0.0.1:${LOKI_PORT:-3100}:3100"]
+  # One Prometheus per pipeline, each holding only that pipeline's data.
+  prometheus-sketch:
+    image: prom/prometheus:v3.5.0
+    command: &pipeline-prometheus
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-otlp-receiver
+      - --storage.tsdb.retention.time=2h
+    volumes: ["./prometheus-pipeline.yml:/etc/prometheus/prometheus.yml:ro"]
+  prometheus-exact:
+    image: prom/prometheus:v3.5.0
+    command: *pipeline-prometheus
+    volumes: ["./prometheus-pipeline.yml:/etc/prometheus/prometheus.yml:ro"]
+  # Every raw point, one sample each. Only the latest windows are queried;
+  # 2 h retention keeps a long-running demo from filling the disk.
+  prometheus-raw:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-otlp-receiver
+      - --storage.tsdb.retention.time=2h
+      # A window's answer reads every raw sample of it (up to 9.6 million at
+      # 80,000 points/s per source).
+      - --query.max-samples=200000000
+      - --query.timeout=5m
+    ports: ["127.0.0.1:${PROMETHEUS_RAW_PORT:-9190}:9090"]
+    volumes: ["./prometheus-raw.yml:/etc/prometheus/prometheus.yml:ro"]
+    mem_limit: "${PROMETHEUS_RAW_MEMORY:-32g}"

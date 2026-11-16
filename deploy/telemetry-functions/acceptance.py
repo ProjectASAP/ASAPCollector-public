@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """End-to-end acceptance of the telemetry functions on real collector containers.
 
-For each use case: start the three pipelines (sketch, exact, raw) plus
-Prometheus and Loki with `docker compose`, wait for the scenario to
-play out, then check the sketch answers against the exact pipeline's ground
-truth through Prometheus and Loki, and that every pipeline reports its window
+For each use case: start the three pipelines (sketch, exact, raw), each with
+its own Prometheus, plus the monitoring Prometheus with `docker compose`, wait
+for the scenario to play out, then check the sketch answers against the exact
+pipeline's ground truth through the monitoring Prometheus, and that every pipeline reports its window
 completion delay. Prints one line per check and exits non-zero if any check
 fails.
 
@@ -56,7 +56,10 @@ def scaled_copy(directory, into):
         text = src.read_text()
         text = text.replace("window_size: 60s", f"window_size: {WINDOW_S}s")
         text = text.replace("window: 60s", f"window: {WINDOW_S}s")
-        # The 5 s timeout for a missing source is not scaled: merges emit as
+        # Answers per window, not over the last 5 windows: the checks compare
+        # each window's answers with its points.
+        text = text.replace("range_windows: 5", "range_windows: 1")
+        # The timeouts for a missing source (5 s, exact-merge 60 s) are not scaled: merges emit as
         # soon as both sources sent a window, and shared CI runners can be slow.
         text = re.sub(r"\n\s*- \{after_seconds: \d+, (signals_per_second|attribute: [^,]+, cardinality): \d+\}", "", text)
         # A `changes:` left with no entries would read as null, not an empty list.
@@ -68,19 +71,19 @@ def scaled_copy(directory, into):
 
 
 class Stack:
-    def __init__(self, docker, use_case, pipelines, common, prometheus, loki):
+    def __init__(self, docker, use_case, pipelines, common, prometheus):
         self.docker, self.use_case = docker, use_case
         self.pipelines, self.common = pipelines, common
         self.rate = rate(use_case)
-        self.prometheus, self.loki = prometheus, loki
+        self.prometheus = prometheus
         # The generators of all three pipelines count from the same second.
         self.start = int(time.time()) + 10
 
     def compose(self, *args):
         # A CI runner has about 16 GB; the raw pipeline's store gets 4.
         env = dict(os.environ, PIPELINES=str(self.pipelines), COMMON=str(self.common),
-                   SCENARIO_START=str(self.start), LOKI_RAW_MEMORY="4g",
-                   USE_CASE=self.use_case, WINDOW_SECONDS=str(WINDOW_S))
+                   SCENARIO_START=str(self.start), PROMETHEUS_RAW_MEMORY="4g",
+                   USE_CASE=self.use_case, WINDOW_SECONDS=str(WINDOW_S), RANGE_WINDOWS="1")
         cmd = self.docker + ["compose", "-f", str(HERE / "compose.yaml"), *args]
         return subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
 
@@ -96,11 +99,10 @@ class Stack:
         rows = self.get(self.prometheus, "/api/v1/query", {"query": f"{expr}[{minutes}m]"})
         return [(r["metric"], {int(float(t)): float(v) for t, v in r["values"]}) for r in rows]
 
-    def events(self, selector):
-        rows = self.get(self.loki, "/loki/api/v1/query_range",
-                        {"query": '{service_name="asap-detector"} ' + selector, "limit": 500,
-                         "start": str(int((time.time() - 1800) * 1e9))})
-        return [v[1] for s in rows for v in s["values"]]
+    def events(self, kind, method):
+        """Messages of the `asap_event` gauges of `kind` and `method` in the last 30 minutes."""
+        rows = self.vector(f'last_over_time(asap_event{{kind="{kind}",method="{method}"}}[30m])')
+        return [m.get("message", "") for m, _ in rows]
 
 
 def check(name, ok, detail):
@@ -190,8 +192,9 @@ def cardinality_checks(stack, t):
     yield check("identifier and stable keys classified as generated",
                 all(state.get((k, m)) == s for k, s in want.items() for m in ("sketch", "exact")), str(want))
     grew = stack.vector('max_over_time(asap_cardinality_state{state="growing",attribute_key="k8s.pod.name"}[10m])')
-    yield check("growing key (k8s.pod.name) classified growing by both",
-                {m["method"] for m, v in grew if v == 1} == {"sketch", "exact"},
+    # Raw has no detector: the query job applies the same rules to its answers.
+    yield check("growing key (k8s.pod.name) classified growing by all three",
+                {m["method"] for m, v in grew if v == 1} == {"sketch", "exact", "raw"},
                 f"growing seen by {sorted(m['method'] for m, v in grew if v == 1)}")
     distinct = {(m["attribute_key"], m["method"]): v
                 for m, v in stack.vector(f'asap_distinct{{bound=~"estimate|"}} @ {t}')}
@@ -199,19 +202,19 @@ def cardinality_checks(stack, t):
             for k in keys if (k, "sketch") in distinct and (k, "exact") in distinct}
     yield check("distinct-count error <= 2% for every key", errs and max(errs.values()) <= 0.02,
                 ", ".join(f"{k} {e:.2%}" for k, e in errs.items()))
-    # Store and query answers later than exact: compare the latest window in
+    # Raw answers later than exact: compare the latest window in
     # which it answered every key exact did.
     raw = {m["attribute_key"]: series for m, series in stack.matrix('asap_distinct{method="raw"}')}
     exact = {m["attribute_key"]: series for m, series in stack.matrix('asap_distinct{method="exact"}')}
     end = max((e for e in set.intersection(*[set(v) for v in exact.values()])
                if all(e in raw.get(k, {}) for k in exact)), default=None) if exact else None
     raw_errs = {k: abs(raw[k][end] - exact[k][end]) / exact[k][end] for k in exact} if end else {}
-    yield check("store and query: distinct counts from loki-raw, error <= 1% for every key",
+    yield check("raw: distinct counts from prometheus-raw, error <= 1% for every key",
                 raw_errs and max(raw_errs.values()) <= 0.01,
                 ", ".join(f"{k} {e:.2%}" for k, e in sorted(raw_errs.items()))
                 or f"no window with every key answered; never answered: {sorted(set(exact) - set(raw))}")
-    events = stack.events('| event_kind="cardinality" | method="sketch"')
-    yield check("class events in Loki", any("identifier-like" in e for e in events),
+    events = stack.events("cardinality", "sketch")
+    yield check("class events in Prometheus", any("identifier-like" in e for e in events),
                 f"{len(events)} sketch events")
 
 
@@ -222,8 +225,8 @@ def drift_checks(stack, t):
                 {("http.route-3", "sketch"), ("http.route-3", "exact")} <= hit, str(sorted(hit)))
     yield check("no other route flagged (no false positives)",
                 all(r == "http.route-3" for r, _ in hit), f"{len(seen)} series watched")
-    events = stack.events('| event_kind="drift" | method="sketch"')
-    yield check("drift event in Loki", any("http.route-3" in e and "drifted" in e for e in events),
+    events = stack.events("drift", "sketch")
+    yield check("drift event in Prometheus", any("http.route-3" in e and "drifted" in e for e in events),
                 events[0] if events else "none")
 
 
@@ -243,14 +246,14 @@ def topk_checks(stack, t):
                 ", ".join(f"{k.removeprefix('asap_hh_')} {v:.3f}" for k, v in sorted(hh.items())) or "no asap_hh gauges")
     raw = {m["__name__"]: v for m, v in stack.vector(
         '{__name__=~"asap_hh_(precision|recall)",method="raw"}')}
-    loki = stack.vector('max_over_time(asap_query_seconds{method="raw",backend="loki"}[5m])')
-    yield check("store and query: top-k from loki-raw, heavy-hitter recall >= 0.9",
-                loki and raw.get("asap_hh_recall", 0) >= 0.9,
+    query = stack.vector('max_over_time(asap_query_seconds{method="raw"}[5m])')
+    yield check("raw: top-k from prometheus-raw, heavy-hitter recall >= 0.9",
+                query and raw.get("asap_hh_recall", 0) >= 0.9,
                 ", ".join(f"{k.removeprefix('asap_hh_')} {v:.3f}" for k, v in sorted(raw.items()))
-                + (f"; Loki query {loki[0][1]:.2f} s" if loki else "; no Loki query timed"))
-    events = stack.events('| event_kind="novelty" | method="sketch"')
+                + (f"; PromQL query {query[0][1]:.2f} s" if query else "; no raw query timed"))
+    events = stack.events("novelty", "sketch")
     flagged = stack.vector('max_over_time(asap_topk_new{key="/new/hot-route"}[10m])')
-    yield check("novelty event in Loki", any("/new/hot-route" in e for e in events),
+    yield check("novelty event in Prometheus", any("/new/hot-route" in e for e in events),
                 next((e for e in events if "/new/hot-route" in e),
                      f"none; {len(events)} sketch novelty events, "
                      f"asap_topk_new gauge from {sorted(m['method'] for m, _ in flagged)}"))
@@ -274,7 +277,7 @@ def run_case(args, use_case):
         for f in [pipelines, common, *pipelines.iterdir(), *common.iterdir()]:
             f.chmod(0o755 if f.is_dir() else 0o644)
         stack = Stack(shlex.split(args.docker_command), use_case, pipelines, common,
-                      args.prometheus, args.loki)
+                      args.prometheus)
         stack.compose("down", "--remove-orphans")
         stack.compose("up", "-d")
         try:
@@ -295,7 +298,6 @@ def main():
     parser.add_argument("--use-cases", nargs="+", choices=USE_CASES, default=list(USE_CASES))
     parser.add_argument("--docker-command", default="docker")
     parser.add_argument("--prometheus", default="http://127.0.0.1:9090")
-    parser.add_argument("--loki", default="http://127.0.0.1:3100")
     parser.add_argument("--build", action="store_true", help="build the asap-collector image first")
     parser.add_argument("--report", type=Path, help="write all results as JSON")
     args = parser.parse_args()
