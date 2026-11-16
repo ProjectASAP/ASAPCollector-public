@@ -144,69 +144,6 @@ def topk():
             'max(last_over_time(asap_distinct{method="exact",attribute_key="http.route"}[2m]))', "distinct routes",
             "From the exact pipeline.")
 
-    row("Answers")
-    TOP10 = 'rank=~"[1-9]|10"'
-
-
-    def top10(method, label):
-        sel = f'asap_compare_topk{{method="{method}",{TOP10}}}'
-        return f'max by (key, {label}) (label_replace({sel}, "{label}", "$1", "rank", "(.*)"))'
-
-
-    def count(method):
-        return f'asap_compare_topk{{method="{method}"}}'
-
-
-    def error(method):
-        return (f'100 * (max by (key) ({count(method)}) - on (key) max by (key) ({count("exact")}))'
-                f' / on (key) max by (key) ({count("exact")})'
-                f' and on (key) ({" or ".join(top10(m, m + "_rank") for m in ("exact", "sketch", "raw"))})')
-
-
-    compare = [(top10("exact", "exact_rank"), "exact"), (top10("sketch", "sketch_rank"), "sketch"),
-               (top10("raw", "raw_rank"), "raw"), (error("sketch"), "sketch_error"), (error("raw"), "raw_error")]
-    columns = {"key": "Route", "exact_rank": "Exact rank", "Value #A": "Exact count",
-               "sketch_rank": "Sketch rank", "Value #B": "Sketch count", "Value #D": "Sketch error",
-               "raw_rank": "Store+query rank", "Value #C": "Store+query count",
-               "Value #E": "Store+query error"}
-
-
-
-
-    add({"type": "table", "title": "Top-10 routes of the three approaches, latest window store and query answered (union of their top-10s)",
-         "description": "One row per route in any approach's top-10, all from the latest window store and query has "
-                        "answered (query-job republishes sketch and exact for it), which lags behind when "
-                        "prometheus-raw is slow; the panel on the right shows which window. Error is (count - exact) / exact; "
-                        "empty when the route is outside that approach's reported top-20.",
-         "datasource": PROM,
-         "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
-                     for i, (e, _) in enumerate(compare)],
-         "transformations": [
-             {"id": "joinByField", "options": {"byField": "key", "mode": "outer"}},
-             {"id": "organize", "options": {
-                 "excludeByName": {f: True for f in ["Time", "Time 1", "Time 2", "Time 3", "Time 4", "Time 5"]},
-                 "indexByName": {name: i for i, name in enumerate(columns)},
-                 "renameByName": columns}},
-             {"id": "convertFieldType", "options": {"conversions": [
-                 {"targetField": c, "destinationType": "number"}
-                 for c in ["Exact rank", "Sketch rank", "Store+query rank"]]}}],
-         "options": {"showHeader": True, "sortBy": [{"displayName": "Exact count", "desc": True}]},
-         "fieldConfig": {"defaults": {"decimals": 0, "custom": {"align": "auto"}},
-                         "overrides": [
-                             by_name("Sketch count", {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["sketch"]}},
-                                     {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
-                             by_name("Exact count", {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["exact"]}},
-                                     {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
-                             by_name("Store+query count",
-                                     {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["raw"]}},
-                                     {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
-                             by_name("Route", {"id": "custom.width", "value": 150}),
-                             by_name("Sketch error", {"id": "unit", "value": "percent"}, {"id": "decimals", "value": 1}),
-                             by_name("Store+query error", {"id": "unit", "value": "percent"},
-                                     {"id": "decimals", "value": 1})]}}, 20, 12, 0)
-    window_compared(12)
-    y += 12
-
     row("Accuracy against exact")
     gauges("Sketch heavy hitters (routes with >= 1% of the window's points), latest window",
            [(f'last_over_time(asap_hh_{m}{{method="sketch"}}[5m])', name)
@@ -217,7 +154,72 @@ def topk():
            w=8, x=16, good_high=False)
     y += 7
 
+    def answers():
+        global y
+        row("Answers")
+        TOP10 = 'rank=~"[1-9]|10"'
 
+
+        def top10(method, label):
+            sel = f'asap_compare_topk{{method="{method}",{TOP10}}}'
+            return f'max by (key, {label}) (label_replace({sel}, "{label}", "$1", "rank", "(.*)"))'
+
+
+        def count(method):
+            return f'asap_compare_topk{{method="{method}"}}'
+
+
+        def error(method):
+            return (f'100 * (max by (key) ({count(method)}) - on (key) max by (key) ({count("exact")}))'
+                    f' / on (key) max by (key) ({count("exact")})'
+                    f' and on (key) ({" or ".join(top10(m, m + "_rank") for m in ("exact", "sketch", "raw"))})')
+
+
+        compare = [(top10("exact", "exact_rank"), "exact"), (top10("sketch", "sketch_rank"), "sketch"),
+                   (top10("raw", "raw_rank"), "raw"), (error("sketch"), "sketch_error"), (error("raw"), "raw_error")]
+        columns = {"key": "Route", "exact_rank": "Exact rank", "Value #A": "Exact count",
+                   "sketch_rank": "Sketch rank", "Value #B": "Sketch count", "Value #D": "Sketch error",
+                   "raw_rank": "Store+query rank", "Value #C": "Store+query count",
+                   "Value #E": "Store+query error"}
+
+
+
+
+        add({"type": "table", "title": "Top-10 routes of the three approaches, latest window store and query answered (union of their top-10s)",
+             "description": "One row per route in any approach's top-10, all from the latest window store and query has "
+                            "answered (query-job republishes sketch and exact for it), which lags behind when "
+                            "prometheus-raw is slow; the panel on the right shows which window. Error is (count - exact) / exact; "
+                            "empty when the route is outside that approach's reported top-20.",
+             "datasource": PROM,
+             "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
+                         for i, (e, _) in enumerate(compare)],
+             "transformations": [
+                 {"id": "joinByField", "options": {"byField": "key", "mode": "outer"}},
+                 {"id": "organize", "options": {
+                     "excludeByName": {f: True for f in ["Time", "Time 1", "Time 2", "Time 3", "Time 4", "Time 5"]},
+                     "indexByName": {name: i for i, name in enumerate(columns)},
+                     "renameByName": columns}},
+                 {"id": "convertFieldType", "options": {"conversions": [
+                     {"targetField": c, "destinationType": "number"}
+                     for c in ["Exact rank", "Sketch rank", "Store+query rank"]]}}],
+             "options": {"showHeader": True, "sortBy": [{"displayName": "Exact count", "desc": True}]},
+             "fieldConfig": {"defaults": {"decimals": 0, "custom": {"align": "auto"}},
+                             "overrides": [
+                                 by_name("Sketch count", {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["sketch"]}},
+                                         {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
+                                 by_name("Exact count", {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["exact"]}},
+                                         {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
+                                 by_name("Store+query count",
+                                         {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS["raw"]}},
+                                         {"id": "custom.cellOptions", "value": {"type": "color-text"}}),
+                                 by_name("Route", {"id": "custom.width", "value": 150}),
+                                 by_name("Sketch error", {"id": "unit", "value": "percent"}, {"id": "decimals", "value": 1}),
+                                 by_name("Store+query error", {"id": "unit", "value": "percent"},
+                                         {"id": "decimals", "value": 1})]}}, 20, 12, 0)
+        window_compared(12)
+        y += 12
+
+    return answers
 
 
 def timing(raw_query):
@@ -225,10 +227,10 @@ def timing(raw_query):
     (p50 over the window's points), split into window wait, delay after the
     window's end, and the query."""
     global y
-    row("From data generated to query result (p50 over a window's points, latest window)")
+    row("From data generated to query result (latest window)")
     named = lambda e: (f'label_replace(label_replace({e}, "approach", "$1", "method", "(.*)"), '
                        f'"approach", "store and query", "method", "raw")')
-    latest = lambda m: f'max by (method) (last_over_time({m}{{quantile="0.5"}}[5m]))'
+    latest = lambda m: f'max by (method) (last_over_time({m}[5m]))'
     segments = [
         ("wait for the window to end", latest("asap_window_wait_seconds")),
         ("then until data is queryable",
@@ -236,13 +238,13 @@ def timing(raw_query):
         ("query", 'max by (method) (last_over_time(asap_query_seconds[5m]))'),
     ]
     add({"type": "barchart", "title": "Data generated -> query result: where the time goes", "datasource": PROM,
-         "description": "Per approach, p50 over the window's points. 1. sketch and exact compute per 1-minute "
-                        "window, so a point waits for its window to end (30 s at p50, 59.4 s at p99); store and query "
-                        "has no window. 2. Then until the data is queryable: sketch and exact until the detector "
-                        "wrote the window's answer to their Prometheus; store and query until prometheus-raw "
-                        "acknowledged the point (otlp-forwarder forwards each point as it arrives). 3. The query that returns the window's answer on the approach's "
-                        "own Prometheus: sketch and exact read the stored answer (estimates only); store and query "
-                        f"computes it from every raw sample ({raw_query}).",
+         "description": "1. Window wait: sketch and exact compute per 1-minute window (the configured window), "
+                        "so a window's answer exists only after the window ends; store and query has no window. "
+                        "2. Then until the data is queryable: sketch and exact until the detector wrote the window's "
+                        "answer to their Prometheus; store and query until prometheus-raw acknowledged the window's "
+                        "last point (otlp-forwarder forwards each point as it arrives). 3. The query that returns "
+                        "the answer on the approach's own Prometheus: sketch and exact read the stored answer "
+                        f"(estimates only); store and query computes it from every raw sample ({raw_query}).",
          "targets": [{"refId": chr(65 + i), "expr": named(e), "format": "table", "instant": True}
                      for i, (_, e) in enumerate(segments)],
          "transformations": [
@@ -369,53 +371,6 @@ def cardinality():
             '(last_over_time(asap_distinct{method="sketch",bound="estimate"}[2m]))', "{{attribute_key}}",
             "From the exact pipeline; the sketch's estimate for a key exact has not answered recently.")
 
-    row("Answers")
-
-    def distinct(method):
-        sel = f'asap_compare_distinct{{method="{method}"}}'
-        return f"max by (attribute_key) ({sel})"
-
-    def error(method):
-        return f'100 * ({distinct(method)} - on (attribute_key) {distinct("exact")}) / on (attribute_key) {distinct("exact")}'
-
-    def state(method, label):
-        sel = f'asap_compare_class{{method="{method}"}}'
-        return f'max by (attribute_key, {label}) (label_replace({sel}, "{label}", "$1", "state", "(.*)"))'
-
-    compare = [distinct("exact"), distinct("sketch"), distinct("raw"), error("sketch"), error("raw"),
-               state("exact", "exact_class"), state("sketch", "sketch_class"),
-               "max by (attribute_key, reason) (asap_compare_failed)"]
-    columns = {"attribute_key": "Attribute key", "Value #A": "Exact distinct", "exact_class": "Exact class",
-               "Value #B": "Sketch estimate", "Value #D": "Sketch error", "sketch_class": "Sketch class",
-               "Value #C": "Store+query", "Value #E": "Store+query error", "reason": "Store+query refused because"}
-    hidden = ["Time", "Value #F", "Value #G", "Value #H"] + [f"Time {i}" for i in range(1, 9)]
-    add({"type": "table", "title": "Distinct values per attribute key, latest window store and query answered",
-         "description": "All from the latest window store and query has answered (query-job republishes sketch and "
-                        "exact for it), which lags behind when prometheus-raw is slow; the panel on the right shows "
-                        "which window. Error is (count - exact) / exact; when one method's window holds more than 1% fewer points than the other's (a source missed its merge), that method's count and class are left empty, and so are the errors that compare with it. Class: the detector's verdict from the last 10 windows "
-                        "(stable, growing, identifier-like). Store+query refused because: why prometheus-raw refused, "
-                        "timed out or returned nothing for the key's PromQL query, which leaves its count empty.",
-         "datasource": PROM,
-         "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
-                     for i, e in enumerate(compare)],
-         "transformations": [
-             {"id": "joinByField", "options": {"byField": "attribute_key", "mode": "outer"}},
-             {"id": "organize", "options": {
-                 "excludeByName": {f: True for f in hidden},
-                 "indexByName": {name: i for i, name in enumerate(columns)},
-                 "renameByName": columns}}],
-         "options": {"showHeader": True, "sortBy": [{"displayName": "Exact distinct", "desc": True}]},
-         "fieldConfig": {"defaults": {"decimals": 0, "custom": {"align": "auto"}},
-                         "overrides": [colored("Exact distinct", "exact"), colored("Sketch estimate", "sketch"),
-                                       colored("Store+query", "raw"),
-                                       by_name("Sketch error", {"id": "unit", "value": "percent"},
-                                               {"id": "decimals", "value": 2}),
-                                       by_name("Store+query error", {"id": "unit", "value": "percent"},
-                                               {"id": "decimals", "value": 2})]}}, 20, 7, 0)
-    window_compared(7)
-    y += 7
-    events("cardinality", "Class changes (events of all three approaches, from Prometheus)")
-
     row("Accuracy against exact")
     ex = 'max by (attribute_key) (asap_distinct{method="exact"})'
 
@@ -436,12 +391,63 @@ def cardinality():
            "missed a merge) or exact has no answer.", w=24, x=0, good_high=False)
     y += 7
 
+    def answers():
+        global y
+        row("Answers")
+
+        def distinct(method):
+            sel = f'asap_compare_distinct{{method="{method}"}}'
+            return f"max by (attribute_key) ({sel})"
+
+        def error(method):
+            return f'100 * ({distinct(method)} - on (attribute_key) {distinct("exact")}) / on (attribute_key) {distinct("exact")}'
+
+        def state(method, label):
+            sel = f'asap_compare_class{{method="{method}"}}'
+            return f'max by (attribute_key, {label}) (label_replace({sel}, "{label}", "$1", "state", "(.*)"))'
+
+        compare = [distinct("exact"), distinct("sketch"), distinct("raw"), error("sketch"), error("raw"),
+                   state("exact", "exact_class"), state("sketch", "sketch_class"),
+                   "max by (attribute_key, reason) (asap_compare_failed)"]
+        columns = {"attribute_key": "Attribute key", "Value #A": "Exact distinct", "exact_class": "Exact class",
+                   "Value #B": "Sketch estimate", "Value #D": "Sketch error", "sketch_class": "Sketch class",
+                   "Value #C": "Store+query", "Value #E": "Store+query error", "reason": "Store+query refused because"}
+        hidden = ["Time", "Value #F", "Value #G", "Value #H"] + [f"Time {i}" for i in range(1, 9)]
+        add({"type": "table", "title": "Distinct values per attribute key, latest window store and query answered",
+             "description": "All from the latest window store and query has answered (query-job republishes sketch and "
+                            "exact for it), which lags behind when prometheus-raw is slow; the panel on the right shows "
+                            "which window. Error is (count - exact) / exact; when one method's window holds more than 1% fewer points than the other's (a source missed its merge), that method's count and class are left empty, and so are the errors that compare with it. Class: the detector's verdict from the last 10 windows "
+                            "(stable, growing, identifier-like). Store+query refused because: why prometheus-raw refused, "
+                            "timed out or returned nothing for the key's PromQL query, which leaves its count empty.",
+             "datasource": PROM,
+             "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
+                         for i, e in enumerate(compare)],
+             "transformations": [
+                 {"id": "joinByField", "options": {"byField": "attribute_key", "mode": "outer"}},
+                 {"id": "organize", "options": {
+                     "excludeByName": {f: True for f in hidden},
+                     "indexByName": {name: i for i, name in enumerate(columns)},
+                     "renameByName": columns}}],
+             "options": {"showHeader": True, "sortBy": [{"displayName": "Exact distinct", "desc": True}]},
+             "fieldConfig": {"defaults": {"decimals": 0, "custom": {"align": "auto"}},
+                             "overrides": [colored("Exact distinct", "exact"), colored("Sketch estimate", "sketch"),
+                                           colored("Store+query", "raw"),
+                                           by_name("Sketch error", {"id": "unit", "value": "percent"},
+                                                   {"id": "decimals", "value": 2}),
+                                           by_name("Store+query error", {"id": "unit", "value": "percent"},
+                                                   {"id": "decimals", "value": 2})]}}, 20, 7, 0)
+        window_compared(7)
+        y += 7
+        events("cardinality", "Class changes (events of all three approaches, from Prometheus)")
+
+    return answers
 
 
-{"topk": topk, "cardinality": cardinality}[USE_CASE]()
+answers = {"topk": topk, "cardinality": cardinality}[USE_CASE]()
 timing({"topk": "one PromQL top-k query",
-                       "cardinality": "one PromQL distinct count per key, summed"}[USE_CASE])
+       "cardinality": "one PromQL distinct count per key, summed"}[USE_CASE])
 resources()
+answers()
 TITLES = {"topk": "Heavy hitters: sketch vs exact vs store and query (real collector containers)",
           "cardinality": "Cardinality: sketch vs exact vs store and query (real collector containers)"}
 json.dump({"uid": f"asap-{USE_CASE}", "title": TITLES[USE_CASE],

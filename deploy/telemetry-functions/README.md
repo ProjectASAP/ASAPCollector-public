@@ -66,18 +66,17 @@ series per minute at the top rate, which `prometheus-raw` is not built for
 (its memory is capped by `PROMETHEUS_RAW_MEMORY`); the demo shows where it
 stops answering.
 
-**From data generated to query result**, three gauges per window with the same
-definitions for all three approaches (p50 and p99 over the window's points
-where per point):
+**From data generated to query result**, gauges per window with the same
+definitions for all three approaches:
 
 1. Window wait (`asap_window_wait_seconds`) and delay before data is
    available for query (`asap_data_available_seconds`, which includes the
-   wait): sketch and exact compute per 1-minute window, so a point first waits
-   for its window to end (points arrive evenly, so quantile q waits q x 60 s),
-   then until the detector sent the window's answer to its Prometheus
-   (Prometheus stores it milliseconds later). Store and query has no window:
-   raw-sink (shown as "otlp-forwarder") forwards each point as it arrives, and a
-   point is available once `prometheus-raw` acknowledged it.
+   wait): sketch and exact compute per 1-minute window, so a window's answer
+   exists only after the window (60 s, the configured window) ends and then
+   the detector sent it to its Prometheus (Prometheus stores it milliseconds
+   later). Store and query has no window: raw-sink (shown as
+   "otlp-forwarder") forwards each point as it arrives; its delay is until
+   `prometheus-raw` acknowledged the window's last point.
 2. Query latency (`asap_query_seconds`): the query that returns the window's
    answer from the approach's own Prometheus; sketch and exact read the stored
    answer (estimates only, so both read the same series; sketch's lower and

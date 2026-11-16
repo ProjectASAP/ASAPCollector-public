@@ -74,26 +74,25 @@ class RawEvents(unittest.TestCase):
 
 
 class Timing(unittest.TestCase):
-    def test_points_wait_for_their_window_then_the_query(self):
+    def setUp(self):
         query_job.samples.clear()
-        query_job.report_timing("exact", 120, {0.5: 11.0, 0.99: 11.0}, 2.0)
-        got = {(name, dict(labels)["quantile"]): v for (name, labels), (v, _) in query_job.samples.items()}
-        self.assertEqual(got[("asap_data_available_seconds", "0.5")], 41.0)
-        self.assertAlmostEqual(got[("asap_data_available_seconds", "0.99")], 70.4)
-        self.assertEqual(got[("asap_result_age_seconds", "0.5")], 43.0)
 
-    def test_no_query_no_result_age(self):
-        query_job.samples.clear()
-        query_job.report_timing("raw", 120, {0.5: 0.01, 0.99: 0.02}, None, window_wait=False)
-        self.assertEqual({name for name, _ in query_job.samples},
-                         {"asap_window_wait_seconds", "asap_data_available_seconds"})
+    def got(self):
+        return {name: v for (name, _), (v, _) in query_job.samples.items()}
+
+    def test_windowed_approach_waits_one_window(self):
+        query_job.report_timing("exact", 120, 11.0, 2.0)
+        self.assertEqual(self.got(), {"asap_window_wait_seconds": 60.0, "asap_data_available_seconds": 71.0,
+                                      "asap_result_age_seconds": 73.0})
 
     def test_raw_has_no_window_wait(self):
-        query_job.samples.clear()
-        query_job.report_timing("raw", 120, {0.5: 0.005, 0.99: 0.03}, 17.0, window_wait=False)
-        got = {(name, dict(labels)["quantile"]): v for (name, labels), (v, _) in query_job.samples.items()}
-        self.assertEqual(got[("asap_window_wait_seconds", "0.5")], 0.0)
-        self.assertEqual(got[("asap_result_age_seconds", "0.5")], 17.005)
+        query_job.report_timing("raw", 120, 0.01, 17.0, windowed=False)
+        self.assertEqual(self.got(), {"asap_window_wait_seconds": 0.0, "asap_data_available_seconds": 0.01,
+                                      "asap_result_age_seconds": 17.01})
+
+    def test_no_query_no_result_age(self):
+        query_job.report_timing("raw", 120, 0.01, None, windowed=False)
+        self.assertNotIn("asap_result_age_seconds", self.got())
 
 
 class RulesMatchDetectorConfigs(unittest.TestCase):

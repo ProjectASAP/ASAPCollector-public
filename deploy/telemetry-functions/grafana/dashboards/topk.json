@@ -114,7 +114,7 @@
     },
     {
       "type": "row",
-      "title": "Answers",
+      "title": "Accuracy against exact",
       "collapsed": false,
       "panels": [],
       "gridPos": {
@@ -124,6 +124,643 @@
         "y": 14
       },
       "id": 4
+    },
+    {
+      "type": "gauge",
+      "title": "Sketch heavy hitters (routes with >= 1% of the window's points), latest window",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-topk"
+      },
+      "description": "Sketch against exact. Truth: exact counts >= 1% of the window's points.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "last_over_time(asap_hh_precision{method=\"sketch\"}[5m])",
+          "legendFormat": "precision",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "last_over_time(asap_hh_recall{method=\"sketch\"}[5m])",
+          "legendFormat": "recall",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "last_over_time(asap_hh_f1{method=\"sketch\"}[5m])",
+          "legendFormat": "F1",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 16,
+        "x": 0,
+        "y": 15
+      },
+      "id": 5
+    },
+    {
+      "type": "gauge",
+      "title": "Sketch average relative count error of the heavy hitters found (ARE)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-topk"
+      },
+      "description": "Mean |estimate - exact| / exact.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "last_over_time(asap_hh_are{method=\"sketch\"}[5m])",
+          "legendFormat": "ARE",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 0.1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.02
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 15
+      },
+      "id": 6
+    },
+    {
+      "type": "row",
+      "title": "From data generated to query result (latest window)",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 7
+    },
+    {
+      "type": "barchart",
+      "title": "Data generated -> query result: where the time goes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-topk"
+      },
+      "description": "1. Window wait: sketch and exact compute per 1-minute window (the configured window), so a window's answer exists only after the window ends; store and query has no window. 2. Then until the data is queryable: sketch and exact until the detector wrote the window's answer to their Prometheus; store and query until prometheus-raw acknowledged the window's last point (otlp-forwarder forwards each point as it arrives). 3. The query that returns the answer on the approach's own Prometheus: sketch and exact read the stored answer (estimates only); store and query computes it from every raw sample (one PromQL top-k query).",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_window_wait_seconds[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_data_available_seconds[5m])) - on (method) max by (method) (last_over_time(asap_window_wait_seconds[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_query_seconds[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "approach",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "includeByName": {
+              "approach": true,
+              "Value #A": true,
+              "Value #B": true,
+              "Value #C": true
+            },
+            "indexByName": {
+              "approach": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3
+            },
+            "renameByName": {
+              "Value #A": "wait for the window to end",
+              "Value #B": "then until data is queryable",
+              "Value #C": "query"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "sort": [
+              {
+                "field": "approach"
+              }
+            ]
+          }
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "stacking": "normal",
+        "xField": "approach",
+        "showValue": "always",
+        "barWidth": 0.6,
+        "groupWidth": 0.7,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "wait for the window to end"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "then until data is queryable"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 8
+    },
+    {
+      "type": "row",
+      "title": "Resources per approach (generators and monitoring excluded)",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "id": 9
+    },
+    {
+      "type": "bargauge",
+      "title": "CPU cores: whole approach",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-topk"
+      },
+      "description": "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, otlp-forwarder-a/b), merge and detector, its Prometheus, and for store and query the query job.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
+          "legendFormat": "sketch",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
+          "legendFormat": "exact",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
+          "legendFormat": "store and query",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 0,
+        "y": 32
+      },
+      "id": 10
+    },
+    {
+      "type": "bargauge",
+      "title": "Memory: whole approach",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-topk"
+      },
+      "description": "Resident memory of every component of the approach, its Prometheus included.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"branch-.|merge|detector\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-sketch\"})) or vector(0))",
+          "legendFormat": "sketch",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-exact\"})) or vector(0))",
+          "legendFormat": "exact",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"raw-sink-.\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-raw|query-job\"})) or vector(0))",
+          "legendFormat": "store and query",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 8,
+        "y": 32
+      },
+      "id": 11
+    },
+    {
+      "type": "bargauge",
+      "title": "Network: total bits per second of the whole approach",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "asap-prometheus-topk"
+      },
+      "description": "Every hop of the approach: the raw points from the generators into its first stage, then sketch and exact: sketches / exact maps into merge and merged windows into detector; store and query: every raw point from otlp-forwarder into prometheus-raw. The answers into the approach's Prometheus (a few kilobytes per window) are not counted.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0))",
+          "legendFormat": "sketch",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0))",
+          "legendFormat": "exact",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0)) + (sum(rate(asap_raw_sent_bytes{method=\"raw\"}[3m])) * 8 or vector(0))",
+          "legendFormat": "store and query",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 8,
+        "x": 16,
+        "y": 32
+      },
+      "id": 12
+    },
+    {
+      "type": "row",
+      "title": "Answers",
+      "collapsed": false,
+      "panels": [],
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 39
+      },
+      "id": 13
     },
     {
       "type": "table",
@@ -358,9 +995,9 @@
         "h": 12,
         "w": 20,
         "x": 0,
-        "y": 15
+        "y": 40
       },
-      "id": 5
+      "id": 14
     },
     {
       "type": "stat",
@@ -399,644 +1036,7 @@
         "h": 12,
         "w": 4,
         "x": 20,
-        "y": 15
-      },
-      "id": 6
-    },
-    {
-      "type": "row",
-      "title": "Accuracy against exact",
-      "collapsed": false,
-      "panels": [],
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 27
-      },
-      "id": 7
-    },
-    {
-      "type": "gauge",
-      "title": "Sketch heavy hitters (routes with >= 1% of the window's points), latest window",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Sketch against exact. Truth: exact counts >= 1% of the window's points.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "last_over_time(asap_hh_precision{method=\"sketch\"}[5m])",
-          "legendFormat": "precision",
-          "instant": true
-        },
-        {
-          "refId": "B",
-          "expr": "last_over_time(asap_hh_recall{method=\"sketch\"}[5m])",
-          "legendFormat": "recall",
-          "instant": true
-        },
-        {
-          "refId": "C",
-          "expr": "last_over_time(asap_hh_f1{method=\"sketch\"}[5m])",
-          "legendFormat": "F1",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 1,
-          "min": 0,
-          "max": 1,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 0.8
-              },
-              {
-                "color": "green",
-                "value": 0.9
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 16,
-        "x": 0,
-        "y": 28
-      },
-      "id": 8
-    },
-    {
-      "type": "gauge",
-      "title": "Sketch average relative count error of the heavy hitters found (ARE)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Mean |estimate - exact| / exact.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "last_over_time(asap_hh_are{method=\"sketch\"}[5m])",
-          "legendFormat": "ARE",
-          "instant": true
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showThresholdLabels": false,
-        "showThresholdMarkers": true
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 1,
-          "min": 0,
-          "max": 0.1,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 0.02
-              },
-              {
-                "color": "red",
-                "value": 0.05
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 16,
-        "y": 28
-      },
-      "id": 9
-    },
-    {
-      "type": "row",
-      "title": "From data generated to query result (p50 over a window's points, latest window)",
-      "collapsed": false,
-      "panels": [],
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 35
-      },
-      "id": 10
-    },
-    {
-      "type": "barchart",
-      "title": "Data generated -> query result: where the time goes",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Per approach, p50 over the window's points. 1. sketch and exact compute per 1-minute window, so a point waits for its window to end (30 s at p50, 59.4 s at p99); store and query has no window. 2. Then until the data is queryable: sketch and exact until the detector wrote the window's answer to their Prometheus; store and query until prometheus-raw acknowledged the point (otlp-forwarder forwards each point as it arrives). 3. The query that returns the window's answer on the approach's own Prometheus: sketch and exact read the stored answer (estimates only); store and query computes it from every raw sample (one PromQL top-k query).",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_window_wait_seconds{quantile=\"0.5\"}[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "refId": "B",
-          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_data_available_seconds{quantile=\"0.5\"}[5m])) - on (method) max by (method) (last_over_time(asap_window_wait_seconds{quantile=\"0.5\"}[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "refId": "C",
-          "expr": "label_replace(label_replace(max by (method) (last_over_time(asap_query_seconds[5m])), \"approach\", \"$1\", \"method\", \"(.*)\"), \"approach\", \"store and query\", \"method\", \"raw\")",
-          "format": "table",
-          "instant": true
-        }
-      ],
-      "transformations": [
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "approach",
-            "mode": "outer"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "includeByName": {
-              "approach": true,
-              "Value #A": true,
-              "Value #B": true,
-              "Value #C": true
-            },
-            "indexByName": {
-              "approach": 0,
-              "Value #A": 1,
-              "Value #B": 2,
-              "Value #C": 3
-            },
-            "renameByName": {
-              "Value #A": "wait for the window to end",
-              "Value #B": "then until data is queryable",
-              "Value #C": "query"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "field": "approach"
-              }
-            ]
-          }
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "stacking": "normal",
-        "xField": "approach",
-        "showValue": "always",
-        "barWidth": 0.6,
-        "groupWidth": 0.7,
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "decimals": 2,
-          "min": 0,
-          "custom": {
-            "fillOpacity": 85,
-            "lineWidth": 0
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "wait for the window to end"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "then until data is queryable"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 36
-      },
-      "id": 11
-    },
-    {
-      "type": "row",
-      "title": "Resources per approach (generators and monitoring excluded)",
-      "collapsed": false,
-      "panels": [],
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 44
-      },
-      "id": 12
-    },
-    {
-      "type": "bargauge",
-      "title": "CPU cores: whole approach",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, otlp-forwarder-a/b), merge and detector, its Prometheus, and for store and query the query job.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
-          "legendFormat": "sketch",
-          "instant": true
-        },
-        {
-          "refId": "B",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
-          "legendFormat": "exact",
-          "instant": true
-        },
-        {
-          "refId": "C",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
-          "legendFormat": "store and query",
-          "instant": true
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "showUnfilled": true,
-        "valueMode": "color",
-        "namePlacement": "left",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "decimals": 2
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 0,
-        "y": 45
-      },
-      "id": 13
-    },
-    {
-      "type": "bargauge",
-      "title": "Memory: whole approach",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Resident memory of every component of the approach, its Prometheus included.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"branch-.|merge|detector\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-sketch\"})) or vector(0))",
-          "legendFormat": "sketch",
-          "instant": true
-        },
-        {
-          "refId": "B",
-          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-exact\"})) or vector(0))",
-          "legendFormat": "exact",
-          "instant": true
-        },
-        {
-          "refId": "C",
-          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"raw-sink-.\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-raw|query-job\"})) or vector(0))",
-          "legendFormat": "store and query",
-          "instant": true
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "showUnfilled": true,
-        "valueMode": "color",
-        "namePlacement": "left",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes",
-          "min": 0,
-          "decimals": 2
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 8,
-        "y": 45
-      },
-      "id": 14
-    },
-    {
-      "type": "bargauge",
-      "title": "Network: total bits per second of the whole approach",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Every hop of the approach: the raw points from the generators into its first stage, then sketch and exact: sketches / exact maps into merge and merged windows into detector; store and query: every raw point from otlp-forwarder into prometheus-raw. The answers into the approach's Prometheus (a few kilobytes per window) are not counted.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0))",
-          "legendFormat": "sketch",
-          "instant": true
-        },
-        {
-          "refId": "B",
-          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0))",
-          "legendFormat": "exact",
-          "instant": true
-        },
-        {
-          "refId": "C",
-          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0)) + (sum(rate(asap_raw_sent_bytes{method=\"raw\"}[3m])) * 8 or vector(0))",
-          "legendFormat": "store and query",
-          "instant": true
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "showUnfilled": true,
-        "valueMode": "color",
-        "namePlacement": "left",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "min": 0,
-          "decimals": 2
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 8,
-        "x": 16,
-        "y": 45
+        "y": 40
       },
       "id": 15
     }
