@@ -70,14 +70,21 @@ ARROW = '<td style="border:none;padding:0 6px;color:#8e8e8e;text-align:center;wh
 
 def approaches(rows, notes):
     """The three approaches, one row each: name and idea on the left, then each
-    step as a box (what it does, and its container in small grey)."""
+    step as a box (what it does, and its container in small grey), and the
+    PromQL query that returns the answer on the right."""
     def label(name, idea, color):
         return (f'<td style="border:none;padding:0 10px 0 0;white-space:nowrap;vertical-align:middle">'
                 f'<b style="color:{color}">{name}</b><br><small>{idea}</small></td>')
+    def query(promql):
+        return (f'<td style="border:none;padding:0 0 0 12px;vertical-align:middle;max-width:360px">'
+                f'<small style="color:#8e8e8e">PromQL</small><br><code style="font-size:11px;white-space:normal">'
+                f'{promql}</code></td>')
     html = '<table style="width:100%;border-collapse:separate;border-spacing:0 6px;border:none">'
-    for name, idea, (color, bg), steps in rows:
+    for name, idea, (color, bg), steps, promql in rows:
         cells = [box(what, f'<span style="color:#8e8e8e">{container}</span>', color, bg) for what, container in steps]
-        html += "<tr>" + label(name, idea, color) + ARROW.join(cells) + "</tr>"
+        # Raw has fewer steps: pad so the queries line up in one column.
+        pad = '<td style="border:none"></td>' * (2 * (max(len(r[3]) for r in rows) - len(steps)))
+        html += "<tr>" + label(name, idea, color) + ARROW.join(cells) + pad + query(promql) + "</tr>"
     return html + "</table>" + "".join(f'<p style="margin:4px 0 0 0"><small>{n}</small></p>' for n in notes)
 
 
@@ -131,19 +138,19 @@ def topk():
             ("Combine A and B", "merge"),
             ("Top routes, and which are new", "detector"),
             ("Store the answer", "prometheus-sketch"),
-            ("Query: read the answer", "query-job")]),
+            ("Query: read the answer", "query-job")], "asap_topk{method=&quot;sketch&quot;, bound=&quot;estimate&quot;}[60s]"),
         ("Exact", "count every route each minute", orange, [
             ("Sources A and B (same points)", "exact-generator-a/b"),
             ("Count every route each minute", "exact-branch-a/b"),
             ("Add up A and B", "exact-merge"),
             ("Top routes, and which are new", "exact-detector"),
             ("Store the answer", "prometheus-exact"),
-            ("Query: read the answer", "query-job")]),
+            ("Query: read the answer", "query-job")], "asap_topk{method=&quot;exact&quot;, bound=&quot;estimate&quot;}[60s]"),
         ("Raw", "store every point, compute when asked", grey, [
             ("Sources A and B (same points)", "raw-generator-a/b"),
             ("Forward each point as it arrives (OTLP forwarder, no window)", "raw-sink-a/b"),
             ("Store every point", "prometheus-raw"),
-            ("Query: compute the top 20 of the last 60 s", "query-job")]),
+            ("Query: compute the top 20 of the last 60 s", "query-job")], "topk(20, sum by (http_route) (count_over_time(http_server_request_duration[60s])))"),
     ], ["Same input for all three. Traffic grows over 30 minutes: the rate per source doubles every 5 minutes "
         "(5k to 80k points/s), <code>/new/hot-route</code> takes 15% of traffic at minute 10, and the number of "
         "routes grows from 100,000 to 1,000,000 at minute 15. Every step is one container pinned to one CPU; each "
@@ -151,10 +158,6 @@ def topk():
         "Raw adds a <code>point_slot</code> label so points of one route in the same millisecond stay separate "
         "samples (Prometheus keeps one sample per series and millisecond). hh-accuracy compares Sketch with Exact; "
         "query-job compares Raw with Exact and times every approach&#39;s query.",
-        "<b>The queries</b> (query-job runs each once per minute on that approach&#39;s own Prometheus):"
-        "<br>Sketch: <code>asap_topk{method=&quot;sketch&quot;, bound=&quot;estimate&quot;}[60s]</code>"
-        "<br>Exact: <code>asap_topk{method=&quot;exact&quot;, bound=&quot;estimate&quot;}[60s]</code>"
-        "<br>Raw: <code>topk(20, sum by (http_route) (count_over_time(http_server_request_duration[60s])))</code>",
         "Sketch and Exact read the stored top 20 of the minute (evaluated at the minute&#39;s end, keeping the "
         "samples stamped with it). Raw computes it from every raw point of the minute (evaluated 1 ms before the "
         "minute&#39;s end, because PromQL ranges include their end)."])
@@ -366,19 +369,19 @@ def cardinality():
             ("Combine A and B", "merge"),
             ("Distinct counts, and each attribute&#39;s class", "detector"),
             ("Store the answer", "prometheus-sketch"),
-            ("Query: read the answer", "query-job")]),
+            ("Query: read the answer", "query-job")], "asap_distinct{method=&quot;sketch&quot;, bound=&quot;estimate&quot;}[60s]"),
         ("Exact", "keep every value each minute", orange, [
             ("Sources A and B (same points)", "exact-generator-a/b"),
             ("Keep every value of every attribute each minute", "exact-branch-a/b"),
             ("Add up A and B", "exact-merge"),
             ("Distinct counts, and each attribute&#39;s class", "exact-detector"),
             ("Store the answer", "prometheus-exact"),
-            ("Query: read the answer", "query-job")]),
+            ("Query: read the answer", "query-job")], "asap_distinct{method=&quot;exact&quot;, bound=&quot;estimate&quot;}[60s]"),
         ("Raw", "store every point, compute when asked", grey, [
             ("Sources A and B (same points)", "raw-generator-a/b"),
             ("Forward each point as it arrives (OTLP forwarder, no window)", "raw-sink-a/b"),
             ("Store every point", "prometheus-raw"),
-            ("Query: count distinct values per attribute over the last 60 s", "query-job")]),
+            ("Query: count distinct values per attribute over the last 60 s", "query-job")], "count(count by (user_id) (count_over_time(http_server_request_duration{user_id!=&quot;&quot;}[60s]))), one per attribute"),
     ], ["Same input for all three. Four attributes: <code>http.route</code> and <code>http.method</code> stable, "
         "<code>k8s.pod.name</code> growing 5%/min, <code>user.id</code> unique per point. Traffic grows over 30 "
         "minutes: the rate per source doubles every 5 minutes (5k to 80k points/s), and at minute 10 "
@@ -388,10 +391,6 @@ def cardinality():
         "its own counts): <b>identifier-like</b> when distinct / points is at least 0.9, i.e. nearly every point has "
         "a new value; else <b>growing</b> when distinct is more than 20% above the mean of the last 10 minutes "
         "(needs 3); else <b>stable</b>. Not classified below 100 points.",
-        "<b>The queries</b> (query-job runs each once per minute on that approach&#39;s own Prometheus):"
-        "<br>Sketch: <code>asap_distinct{method=&quot;sketch&quot;, bound=&quot;estimate&quot;}[60s]</code>"
-        "<br>Exact: <code>asap_distinct{method=&quot;exact&quot;, bound=&quot;estimate&quot;}[60s]</code>"
-        "<br>Raw: <code>count(count by (user_id) (count_over_time(http_server_request_duration{user_id!=&quot;&quot;}[60s]))) &mdash; one per attribute (here <code>user_id</code>; likewise <code>http_route</code>, <code>http_method</code>, <code>k8s_pod_name</code>)</code>",
         "Sketch and Exact read the stored distinct counts of the minute (evaluated at the minute&#39;s end, keeping "
         "the samples stamped with it). Raw computes each from every raw point of the minute (evaluated 1 ms before "
         "the minute&#39;s end)."])
