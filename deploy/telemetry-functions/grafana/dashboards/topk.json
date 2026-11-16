@@ -1010,7 +1010,7 @@
     },
     {
       "type": "row",
-      "title": "Resources per approach (generators and monitoring excluded), latest values",
+      "title": "Resources per approach (generators and monitoring excluded)",
       "collapsed": false,
       "panels": [],
       "gridPos": {
@@ -1022,52 +1022,40 @@
       "id": 17
     },
     {
-      "type": "bargauge",
-      "title": "CPU cores: ingest (every approach touches every point)",
+      "type": "timeseries",
+      "title": "CPU cores of the whole approach over time",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "branch-a/b, exact-branch-a/b, raw-sink-a/b: the per-point work at the sources.",
+      "description": "Every component of the approach: ingest (branch-a/b, exact-branch-a/b, raw-sink-a/b), merge and detector, its Prometheus, and for store and query the query job.",
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0))",
-          "legendFormat": "sketch",
-          "instant": true
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
+          "legendFormat": "sketch"
         },
         {
           "refId": "B",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0))",
-          "legendFormat": "exact",
-          "instant": true
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
+          "legendFormat": "exact"
         },
         {
           "refId": "C",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0))",
-          "legendFormat": "store and query",
-          "instant": true
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
+          "legendFormat": "store and query"
         }
       ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "showUnfilled": true,
-        "valueMode": "color",
-        "namePlacement": "left",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
       "fieldConfig": {
         "defaults": {
+          "custom": {
+            "spanNulls": true,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1
+          },
           "unit": "short",
-          "min": 0,
-          "decimals": 2
+          "min": 0
         },
         "overrides": [
           {
@@ -1117,117 +1105,26 @@
           }
         ]
       },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "gridPos": {
-        "h": 7,
-        "w": 12,
+        "h": 8,
+        "w": 24,
         "x": 0,
         "y": 54
       },
       "id": 18
-    },
-    {
-      "type": "bargauge",
-      "title": "CPU cores: after ingest (merge, detector, the approach's Prometheus, queries)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "sketch and exact: merge, detector and their Prometheus. store and query: prometheus-raw and the query job.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
-          "legendFormat": "sketch",
-          "instant": true
-        },
-        {
-          "refId": "B",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
-          "legendFormat": "exact",
-          "instant": true
-        },
-        {
-          "refId": "C",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"^$\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
-          "legendFormat": "store and query",
-          "instant": true
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "displayMode": "basic",
-        "showUnfilled": true,
-        "valueMode": "color",
-        "namePlacement": "left",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0,
-          "decimals": 2
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 7,
-        "w": 12,
-        "x": 12,
-        "y": 54
-      },
-      "id": 19
     },
     {
       "type": "bargauge",
@@ -1329,9 +1226,9 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 62
       },
-      "id": 20
+      "id": 19
     },
     {
       "type": "bargauge",
@@ -1427,114 +1324,9 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 61
+        "y": 62
       },
-      "id": 21
-    },
-    {
-      "type": "timeseries",
-      "title": "CPU cores of the whole approach over time",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Ingest plus after ingest, as the rate grows.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
-          "legendFormat": "sketch"
-        },
-        {
-          "refId": "B",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
-          "legendFormat": "exact"
-        },
-        {
-          "refId": "C",
-          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
-          "legendFormat": "store and query"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "scaleDistribution": {
-              "type": "log",
-              "log": 10
-            }
-          },
-          "unit": "short"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#ff9830"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "store and query"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#8e8e8e"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 68
-      },
-      "id": 22
+      "id": 20
     }
   ]
 }
