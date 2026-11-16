@@ -79,7 +79,8 @@ where per point):
    quantile q is the delay after the window's end plus q x 60 s.
 2. Query latency (`asap_query_seconds`): the query that returns the window's
    answer from the approach's own Prometheus; sketch and exact read the stored
-   answer, raw computes it from the raw samples.
+   answer (estimates only, so both read the same series; sketch's lower and
+   upper bounds are extra), raw computes it from the raw samples.
 3. Query result computed minus data generated (`asap_result_age_seconds`): 1
    plus 2, as if the query ran as soon as the data was available.
 

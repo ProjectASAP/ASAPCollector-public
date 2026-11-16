@@ -746,7 +746,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus-cardinality"
       },
-      "description": "Measured by query-job once per window against each approach's own Prometheus. sketch and exact read the stored answer; store and query computes it from every raw sample (one PromQL distinct count per key, summed). Includes refused and timed-out queries.",
+      "description": "Measured by query-job once per window against each approach's own Prometheus. sketch and exact read the stored answer (estimates only, so both read the same series); store and query computes it from every raw sample (one PromQL distinct count per key, summed). Includes refused and timed-out queries.",
       "targets": [
         {
           "refId": "A",

@@ -262,7 +262,7 @@ def timing(raw_query):
        [(f'max(asap_query_seconds{{method="{m}"}})', n) for m, n in methods],
        unit="s", w=8, x=8, h=9, log=True, names=names, last=True,
        desc="Measured by query-job once per window against each approach's own Prometheus. sketch and exact read "
-       f"the stored answer; store and query computes it from every raw sample ({raw_query}). Includes refused and "
+       f"the stored answer (estimates only, so both read the same series); store and query computes it from every raw sample ({raw_query}). Includes refused and "
        "timed-out queries.")
     ts("3. Query result computed - data generated (1 + 2)",
        quantiles("asap_result_age_seconds"), unit="s", w=8, x=16, h=9, last=True, log=True,

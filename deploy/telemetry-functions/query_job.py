@@ -36,7 +36,8 @@ Timing, per window and approach, from the window's points to its answer
   points arrive evenly over a window, so the q-quantile over the window's
   points is the delay after the window's end plus q * WINDOW_SECONDS.
 * `asap_query_seconds`: the query that returns the window's answer, on the
-  approach's own Prometheus.
+  approach's own Prometheus (for sketch and exact only the estimates, so both
+  read the same series; sketch's bounds are extra).
 * `asap_result_age_seconds`: point generated -> query result computed, that is
   data available plus query latency, as if the query ran as soon as the data
   was available (the query job runs raw only after exact answered, which would
@@ -192,7 +193,10 @@ def time_prometheus_answer(method, end):
     """Times reading the window's answer from the pipeline's own Prometheus,
     and reports the window's timing."""
     t0 = time.monotonic()
-    at_window(f'{ANSWER_METRIC}{{method="{method}"}}', end, base=PIPELINE_PROMETHEUS[method])
+    # Only the estimates: sketch also stores lower and upper bounds, which exact
+    # has not, so both read the same series (unbounded answers have no `bound`).
+    at_window(f'{ANSWER_METRIC}{{method="{method}",bound=~"estimate|"}}', end,
+              base=PIPELINE_PROMETHEUS[method])
     query_s = time.monotonic() - t0
     put("asap_query_seconds", {"method": method}, query_s, end)
     delays = [v for _, v in at_window(f'asap_answer_delay{{method="{method}"}}', end)]
