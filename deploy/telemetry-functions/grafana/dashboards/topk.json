@@ -417,8 +417,8 @@
       "id": 7
     },
     {
-      "type": "timeseries",
-      "title": "Heavy hitters (routes with >= 1% of the window's points): precision, recall, F1",
+      "type": "gauge",
+      "title": "Sketch heavy hitters (routes with >= 1% of the window's points), latest window",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
@@ -427,102 +427,125 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "asap_hh_precision{method=\"sketch\"}",
-          "legendFormat": "sketch precision"
+          "expr": "last_over_time(asap_hh_precision{method=\"sketch\"}[5m])",
+          "legendFormat": "precision",
+          "instant": true
         },
         {
           "refId": "B",
-          "expr": "asap_hh_recall{method=\"sketch\"}",
-          "legendFormat": "sketch recall"
+          "expr": "last_over_time(asap_hh_recall{method=\"sketch\"}[5m])",
+          "legendFormat": "recall",
+          "instant": true
         },
         {
           "refId": "C",
-          "expr": "asap_hh_f1{method=\"sketch\"}",
-          "legendFormat": "sketch F1"
+          "expr": "last_over_time(asap_hh_f1{method=\"sketch\"}[5m])",
+          "legendFormat": "F1",
+          "instant": true
         }
       ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "unit": "percentunit"
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "green",
+                "value": 0.9
+              }
+            ]
+          }
         },
         "overrides": []
       },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
       "gridPos": {
-        "h": 8,
-        "w": 12,
+        "h": 7,
+        "w": 16,
         "x": 0,
         "y": 28
       },
       "id": 8
     },
     {
-      "type": "timeseries",
-      "title": "Average relative count error of the heavy hitters found (ARE)",
+      "type": "gauge",
+      "title": "Sketch average relative count error of the heavy hitters found (ARE)",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "",
+      "description": "Mean |estimate - exact| / exact.",
       "targets": [
         {
           "refId": "A",
-          "expr": "asap_hh_are{method=\"sketch\"}",
-          "legendFormat": "sketch"
+          "expr": "last_over_time(asap_hh_are{method=\"sketch\"}[5m])",
+          "legendFormat": "ARE",
+          "instant": true
         }
       ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
           "unit": "percentunit",
-          "min": 0
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sketch"
-            },
-            "properties": [
+          "decimals": 1,
+          "min": 0,
+          "max": 0.1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
               {
-                "id": "color",
-                "value": {
-                  "mode": "fixed",
-                  "fixedColor": "#5794f2"
-                }
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.02
+              },
+              {
+                "color": "red",
+                "value": 0.05
               }
             ]
           }
-        ]
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
         },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
+        "overrides": []
       },
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
+        "h": 7,
+        "w": 8,
+        "x": 16,
         "y": 28
       },
       "id": 9
@@ -536,7 +559,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 36
+        "y": 35
       },
       "id": 10
     },
@@ -610,7 +633,7 @@
         "h": 9,
         "w": 8,
         "x": 0,
-        "y": 37
+        "y": 36
       },
       "id": 11
     },
@@ -715,7 +738,7 @@
         "h": 9,
         "w": 8,
         "x": 8,
-        "y": 37
+        "y": 36
       },
       "id": 12
     },
@@ -789,7 +812,7 @@
         "h": 9,
         "w": 8,
         "x": 16,
-        "y": 37
+        "y": 36
       },
       "id": 13
     },
@@ -858,7 +881,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 46
+        "y": 45
       },
       "id": 14
     },
@@ -927,7 +950,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 46
+        "y": 45
       },
       "id": 15
     },
@@ -981,256 +1004,516 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 46
+        "y": 45
       },
       "id": 16
     },
     {
       "type": "row",
-      "title": "Resources per approach (generators and observers excluded)",
+      "title": "Resources per approach (generators and monitoring excluded), latest values",
       "collapsed": false,
       "panels": [],
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 53
       },
       "id": 17
     },
     {
-      "type": "timeseries",
-      "title": "Sketch: CPU cores per component",
+      "type": "bargauge",
+      "title": "CPU cores: ingest (every approach touches every point)",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Pipeline stages from the engine's CPU time; each approach's Prometheus and query-job from their process CPU time. total: the whole approach.",
+      "description": "branch-a/b, exact-branch-a/b, raw-sink-a/b: the per-point work at the sources.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m]))",
-          "legendFormat": "{{stage}}"
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0))",
+          "legendFormat": "sketch",
+          "instant": true
         },
         {
           "refId": "B",
-          "expr": "sum(sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])))",
-          "legendFormat": "total"
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0))",
+          "legendFormat": "exact",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0))",
+          "legendFormat": "store and query",
+          "instant": true
         }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
+          ],
+          "fields": "",
+          "values": false
         }
       },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
       "gridPos": {
-        "h": 12,
-        "w": 8,
+        "h": 7,
+        "w": 12,
         "x": 0,
-        "y": 55
+        "y": 54
       },
       "id": 18
     },
     {
-      "type": "timeseries",
-      "title": "Exact: CPU cores per component",
+      "type": "bargauge",
+      "title": "CPU cores: after ingest (merge, detector, the approach's Prometheus, queries)",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Pipeline stages from the engine's CPU time; each approach's Prometheus and query-job from their process CPU time. total: the whole approach.",
+      "description": "sketch and exact: merge, detector and their Prometheus. store and query: prometheus-raw and the query job.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m]))",
-          "legendFormat": "{{stage}}"
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
+          "legendFormat": "sketch",
+          "instant": true
         },
         {
           "refId": "B",
-          "expr": "sum(sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])))",
-          "legendFormat": "total"
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
+          "legendFormat": "exact",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"^$\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
+          "legendFormat": "store and query",
+          "instant": true
         }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
+          ],
+          "fields": "",
+          "values": false
         }
       },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
       "gridPos": {
-        "h": 12,
-        "w": 8,
-        "x": 8,
-        "y": 55
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 54
       },
       "id": 19
     },
     {
-      "type": "timeseries",
-      "title": "Store and query: CPU cores per component",
+      "type": "bargauge",
+      "title": "Memory: whole approach",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Pipeline stages from the engine's CPU time; each approach's Prometheus and query-job from their process CPU time. total: the whole approach.",
+      "description": "Resident memory of every component of the approach, its Prometheus included.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m]))",
-          "legendFormat": "{{stage}}"
+          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"branch-.|merge|detector\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-sketch\"})) or vector(0))",
+          "legendFormat": "sketch",
+          "instant": true
         },
         {
           "refId": "B",
-          "expr": "sum(sum by (stage) (rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or sum by (stage) (rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])))",
-          "legendFormat": "total"
+          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-exact\"})) or vector(0))",
+          "legendFormat": "exact",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"raw-sink-.\"})) or vector(0)) + (sum(max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-raw|query-job\"})) or vector(0))",
+          "legendFormat": "store and query",
+          "instant": true
         }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
+          ],
+          "fields": "",
+          "values": false
         }
       },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
       "gridPos": {
-        "h": 12,
-        "w": 8,
-        "x": 16,
-        "y": 55
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 61
       },
       "id": 20
     },
     {
-      "type": "timeseries",
-      "title": "Sketch: resident memory per component",
+      "type": "bargauge",
+      "title": "Network after ingest: bits per second into merge and detector",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "total: the whole approach.",
+      "description": "What the sources ship after ingest: sketches (sketch) or exact maps (exact). Store and query ships raw points straight into prometheus-raw.",
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (stage) (memory_rss{job=\"collectors\",stage=~\"branch-.|merge|detector\"}) or max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-sketch\"})",
-          "legendFormat": "{{stage}}"
+          "expr": "sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"merge|detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
+          "legendFormat": "sketch",
+          "instant": true
         },
         {
           "refId": "B",
-          "expr": "sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"branch-.|merge|detector\"}) or max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-sketch\"}))",
-          "legendFormat": "total"
+          "expr": "sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"exact-merge|exact-detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
+          "legendFormat": "exact",
+          "instant": true
         }
       ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "unit": "bytes",
-          "min": 0
-        },
-        "overrides": []
-      },
       "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "left",
+        "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
+          ],
+          "fields": "",
+          "values": false
         }
       },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0,
+          "decimals": 2
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
+      },
       "gridPos": {
-        "h": 12,
-        "w": 8,
-        "x": 0,
-        "y": 67
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 61
       },
       "id": 21
     },
     {
       "type": "timeseries",
-      "title": "Exact: resident memory per component",
+      "title": "CPU cores of the whole approach over time",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "total: the whole approach.",
+      "description": "Ingest plus after ingest, as the rate grows.",
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (stage) (memory_rss{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\"}) or max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-exact\"})",
-          "legendFormat": "{{stage}}"
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-sketch\"}[1m])) or vector(0))",
+          "legendFormat": "sketch"
         },
         {
           "refId": "B",
-          "expr": "sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\"}) or max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-exact\"}))",
-          "legendFormat": "total"
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-exact\"}[1m])) or vector(0))",
+          "legendFormat": "exact"
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(cpu_time_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_pipeline_id=\"main\"}[1m])) or vector(0)) + (sum(rate(process_cpu_seconds_total{stage=~\"prometheus-raw|query-job\"}[1m])) or vector(0))",
+          "legendFormat": "store and query"
         }
       ],
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "spanNulls": true
+            "spanNulls": true,
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
           },
-          "unit": "bytes",
-          "min": 0
+          "unit": "short"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sketch"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#5794f2"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#ff9830"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "store and query"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -1246,210 +1529,12 @@
         }
       },
       "gridPos": {
-        "h": 12,
-        "w": 8,
-        "x": 8,
-        "y": 67
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 68
       },
       "id": 22
-    },
-    {
-      "type": "timeseries",
-      "title": "Store and query: resident memory per component",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "total: the whole approach.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (stage) (memory_rss{job=\"collectors\",stage=~\"raw-sink-.\"}) or max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-raw|query-job\"})",
-          "legendFormat": "{{stage}}"
-        },
-        {
-          "refId": "B",
-          "expr": "sum(max by (stage) (memory_rss{job=\"collectors\",stage=~\"raw-sink-.\"}) or max by (stage) (process_resident_memory_bytes{stage=~\"prometheus-raw|query-job\"}))",
-          "legendFormat": "total"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true
-          },
-          "unit": "bytes",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 12,
-        "w": 8,
-        "x": 16,
-        "y": 67
-      },
-      "id": 23
-    },
-    {
-      "type": "timeseries",
-      "title": "Sketch: bits per second into each stage",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (stage) (rate(payload_size_bytes_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
-          "legendFormat": "{{stage}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "scaleDistribution": {
-              "type": "log",
-              "log": 10
-            }
-          },
-          "unit": "bps"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 12,
-        "w": 8,
-        "x": 0,
-        "y": 79
-      },
-      "id": 24
-    },
-    {
-      "type": "timeseries",
-      "title": "Exact: bits per second into each stage",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (stage) (rate(payload_size_bytes_total{job=\"collectors\",stage=~\"exact-(branch-.|merge|detector)\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
-          "legendFormat": "{{stage}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "scaleDistribution": {
-              "type": "log",
-              "log": 10
-            }
-          },
-          "unit": "bps"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 12,
-        "w": 8,
-        "x": 8,
-        "y": 79
-      },
-      "id": 25
-    },
-    {
-      "type": "timeseries",
-      "title": "Store and query: bits per second into each stage",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / exact-merge: sketches / exact maps. into detector / exact-detector: merged windows.",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (stage) (rate(payload_size_bytes_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
-          "legendFormat": "{{stage}}"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "spanNulls": true,
-            "scaleDistribution": {
-              "type": "log",
-              "log": 10
-            }
-          },
-          "unit": "bps"
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "gridPos": {
-        "h": 12,
-        "w": 8,
-        "x": 16,
-        "y": 79
-      },
-      "id": 26
     }
   ]
 }

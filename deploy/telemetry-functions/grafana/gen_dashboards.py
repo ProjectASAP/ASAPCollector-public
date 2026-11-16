@@ -70,6 +70,22 @@ def traffic(shape_title, shape_expr, shape_legend, shape_desc):
     y += 4
 
 
+def gauges(title, exprs, desc, w, x, good_high, h=7):
+    """One gauge per series, green toward the good end (accuracy 100%, error 0%)."""
+    steps = ([{"color": "red", "value": None}, {"color": "orange", "value": 0.8}, {"color": "green", "value": 0.9}]
+             if good_high else
+             [{"color": "green", "value": None}, {"color": "orange", "value": 0.02}, {"color": "red", "value": 0.05}])
+    add({"type": "gauge", "title": title, "datasource": PROM, "description": desc,
+         "targets": [{"refId": chr(65 + i), "expr": e, "legendFormat": legend, "instant": True}
+                     for i, (e, legend) in enumerate(exprs)],
+         "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+                     "showThresholdLabels": False, "showThresholdMarkers": True},
+         "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 1, "min": 0,
+                                      "max": 1 if good_high else 0.1,
+                                      "thresholds": {"mode": "absolute", "steps": steps}},
+                         "overrides": []}}, w, h, x)
+
+
 def box(name, small, color, bg):
     return (f'<td style="border:none;padding:0"><div style="border:1px solid {color};border-radius:6px;'
             f'padding:5px 8px;text-align:center;background:{bg}"><b>{name}</b><br><small>{small}</small></div></td>')
@@ -219,14 +235,14 @@ def topk():
     y += 12
 
     row("Accuracy against exact")
-    ts("Heavy hitters (routes with >= 1% of the window's points): precision, recall, F1",
-       [('asap_hh_precision{method="sketch"}', "sketch precision"), ('asap_hh_recall{method="sketch"}', "sketch recall"),
-        ('asap_hh_f1{method="sketch"}', "sketch F1")],
-       unit="percentunit", desc="Sketch against exact. Truth: exact counts >= 1% of the window's points.",
-       min0=False)
-    ts("Average relative count error of the heavy hitters found (ARE)",
-       [('asap_hh_are{method="sketch"}', "sketch")], unit="percentunit", x=12, names=("sketch",))
-    y += 8
+    gauges("Sketch heavy hitters (routes with >= 1% of the window's points), latest window",
+           [(f'last_over_time(asap_hh_{m}{{method="sketch"}}[5m])', name)
+            for m, name in (("precision", "precision"), ("recall", "recall"), ("f1", "F1"))],
+           "Sketch against exact. Truth: exact counts >= 1% of the window's points.", w=16, x=0, good_high=True)
+    gauges("Sketch average relative count error of the heavy hitters found (ARE)",
+           [('last_over_time(asap_hh_are{method="sketch"}[5m])', "ARE")], "Mean |estimate - exact| / exact.",
+           w=8, x=16, good_high=False)
+    y += 7
 
 
 
@@ -281,50 +297,68 @@ def timing(raw_query):
 
 
 APPROACHES = [
-    # (title, collector stages, its Prometheus and other processes scraped directly)
-    ("Sketch", "branch-.|merge|detector", "prometheus-sketch"),
-    ("Exact", "exact-(branch-.|merge|detector)", "prometheus-exact"),
-    ("Store and query", "raw-sink-.", "prometheus-raw|query-job"),
+    # (name, color key, ingest stages, collector stages after ingest, processes after ingest)
+    ("sketch", "sketch", "branch-.", "merge|detector", "prometheus-sketch"),
+    ("exact", "exact", "exact-branch-.", "exact-merge|exact-detector", "prometheus-exact"),
+    ("store and query", "raw", "raw-sink-.", None, "prometheus-raw|query-job"),
 ]
 
 
-def cpu(sel, jobs):
-    return (f'sum by (stage) (rate(cpu_time_total{{job="collectors",stage=~"{sel}",otel_scope_pipeline_id="main"}}[1m]))'
-            + (f' or sum by (stage) (rate(process_cpu_seconds_total{{stage=~"{jobs}"}}[1m]))' if jobs else ""))
+def total(*parts):
+    """Sum of the parts that exist (a part with no series counts 0)."""
+    return " + ".join(f"({p} or vector(0))" for p in parts)
 
 
-def mem(sel, jobs):
-    return (f'max by (stage) (memory_rss{{job="collectors",stage=~"{sel}"}})'
-            + (f' or max by (stage) (process_resident_memory_bytes{{stage=~"{jobs}"}})' if jobs else ""))
+def cpu(stages, processes=None):
+    parts = [f'sum(rate(cpu_time_total{{job="collectors",stage=~"{stages}",otel_scope_pipeline_id="main"}}[1m]))']
+    if processes:
+        parts.append(f'sum(rate(process_cpu_seconds_total{{stage=~"{processes}"}}[1m]))')
+    return total(*parts)
 
 
-def bits(sel, _jobs):
-    return (f'sum by (stage) (rate(payload_size_bytes_total{{job="collectors",stage=~"{sel}",'
-            f'otel_scope_node_type="receiver"}}[2m])) * 8')
+def mem(stages, processes):
+    return total(f'sum(max by (stage) (memory_rss{{job="collectors",stage=~"{stages}"}}))',
+                 f'sum(max by (stage) (process_resident_memory_bytes{{stage=~"{processes}"}}))')
 
 
-def per_approach(title, query, unit, desc, log=False):
-    global y
-    for i, (name, sel, jobs) in enumerate(APPROACHES):
-        expr = query(sel, jobs)
-        targets = [(expr, "{{stage}}")]
-        if query is not bits:
-            targets.append((f"sum({expr})", "total"))
-        ts(f"{name}: {title}", targets, unit=unit, log=log, w=8, x=8 * i, h=12, desc=desc, last=True)
-    y += 12
+def bars(title, exprs, unit, desc, w, x, h=7):
+    """One horizontal bar per approach."""
+    add({"type": "bargauge", "title": title, "datasource": PROM, "description": desc,
+         "targets": [{"refId": chr(65 + i), "expr": e, "legendFormat": name, "instant": True}
+                     for i, (name, e) in enumerate(exprs)],
+         "options": {"orientation": "horizontal", "displayMode": "basic", "showUnfilled": True,
+                     "valueMode": "color", "namePlacement": "left",
+                     "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False}},
+         "fieldConfig": {"defaults": {"unit": unit, "min": 0, "decimals": 2}, "overrides": [
+             by_name(name, {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS[key]}})
+             for name, key, *_ in APPROACHES]}}, w, h, x)
 
 
 def resources():
     global y
-    row("Resources per approach (generators and observers excluded)")
-    per_approach("CPU cores per component", cpu, "short",
-                 "Pipeline stages from the engine's CPU time; each approach's Prometheus and query-job from their "
-                 "process CPU time. "
-                 "total: the whole approach.")
-    per_approach("resident memory per component", mem, "bytes", "total: the whole approach.")
-    per_approach("bits per second into each stage", bits, "bps",
-                 "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / "
-                 "exact-merge: sketches / exact maps. into detector / exact-detector: merged windows.", log=True)
+    row("Resources per approach (generators and monitoring excluded), latest values")
+    bars("CPU cores: ingest (every approach touches every point)",
+         [(name, cpu(ingest)) for name, _, ingest, _, _ in APPROACHES], "short",
+         "branch-a/b, exact-branch-a/b, raw-sink-a/b: the per-point work at the sources.", 12, 0)
+    bars("CPU cores: after ingest (merge, detector, the approach's Prometheus, queries)",
+         [(name, cpu(after, procs) if after else cpu("^$", procs)) for name, _, _, after, procs in APPROACHES],
+         "short", "sketch and exact: merge, detector and their Prometheus. store and query: prometheus-raw and the "
+         "query job.", 12, 12)
+    y += 7
+    bars("Memory: whole approach",
+         [(name, mem(f"{ingest}|{after}" if after else ingest, procs)) for name, _, ingest, after, procs in APPROACHES],
+         "bytes", "Resident memory of every component of the approach, its Prometheus included.", 12, 0)
+    bars("Network after ingest: bits per second into merge and detector",
+         [(name, f'sum(rate(payload_size_bytes_total{{job="collectors",stage=~"{after}",'
+                 f'otel_scope_node_type="receiver"}}[2m])) * 8') for name, _, _, after, _ in APPROACHES if after],
+         "bps", "What the sources ship after ingest: sketches (sketch) or exact maps (exact). Store and query ships "
+         "raw points straight into prometheus-raw.", 12, 12)
+    y += 7
+    ts("CPU cores of the whole approach over time",
+       [(cpu(f"{ingest}|{after}" if after else ingest, procs), name) for name, _, ingest, after, procs in APPROACHES],
+       unit="short", w=24, h=8, log=True, names=("sketch", "exact", "store and query"), last=True,
+       desc="Ingest plus after ingest, as the rate grows.")
+    y += 8
 
 
 KEYS = ("http.route", "http.method", "k8s.pod.name", "user.id")
@@ -427,13 +461,12 @@ def cardinality():
                 f" and on () ({complete})")
 
     est = 'max by (attribute_key) (asap_distinct{method="sketch",bound="estimate"})'
-    ts("Sketch (HLL): relative error of the distinct count per key",
-       [(same_window(f'abs({est} - on (attribute_key) {ex}) / on (attribute_key) {ex}', "sketch"),
-         "{{attribute_key}}")],
-       unit="percentunit", w=24,
-       desc="|estimate - exact| / exact per window; left out when the two windows' points differ by more "
-       "than 1% (a source missed a merge).")
-    y += 8
+    gauges("Sketch (HLL): relative error of the distinct count per key, latest window compared",
+           [(same_window(f'abs({est} - on (attribute_key) {ex}) / on (attribute_key) {ex}', "sketch"),
+             "{{attribute_key}}")],
+           "|estimate - exact| / exact; empty when the latest windows' points differ by more than 1% (a source "
+           "missed a merge) or exact has no answer.", w=24, x=0, good_high=False)
+    y += 7
 
 
 
