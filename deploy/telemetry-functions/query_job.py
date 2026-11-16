@@ -26,7 +26,7 @@ complete in each pipeline:
   `asap_cardinality_state`).
 
 Every approach answers over the last RANGE_S seconds (RANGE_WINDOWS windows
-of WINDOW_SECONDS: the last 10 minutes), updated once per window. Timing, per
+of WINDOW_SECONDS: the last 5 minutes), updated once per window. Timing, per
 answer and approach (label `method`), from data generated to the query result:
 
 * `asap_window_wait_seconds`: RANGE_S for all three: the range's oldest point
@@ -66,7 +66,7 @@ the same time as the pipelines' own per-window gauges. The job also exposes
 its own CPU time and resident memory. Only the top-k and cardinality use cases
 have a raw answer here; for the others it only times the backend queries.
 
-Configuration (environment): USE_CASE, WINDOW_SECONDS (60), RANGE_WINDOWS (10), K (20), PHI (0.01),
+Configuration (environment): USE_CASE, WINDOW_SECONDS (60), RANGE_WINDOWS (5), K (20), PHI (0.01),
 RAW_SOURCES (2), PROMETHEUS (monitoring), PORT (9100).
 """
 import json
@@ -90,7 +90,7 @@ IDENTIFIER_RATIO, GROWTH, CLASS_BASELINE_WINDOWS, MIN_POINTS = 0.9, 0.2, 10, 100
 USE_CASE = os.environ.get("USE_CASE", "topk")
 WINDOW_S = int(os.environ.get("WINDOW_SECONDS", "60"))
 # Windows each answer covers (`range_windows` in the detectors' configs).
-RANGE_WINDOWS = int(os.environ.get("RANGE_WINDOWS", "10"))
+RANGE_WINDOWS = int(os.environ.get("RANGE_WINDOWS", "5"))
 RANGE_S = RANGE_WINDOWS * WINDOW_S
 K = int(os.environ.get("K", "20"))
 PHI = float(os.environ.get("PHI", "0.01"))

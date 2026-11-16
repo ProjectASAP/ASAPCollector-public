@@ -82,8 +82,8 @@ class Timing(unittest.TestCase):
 
     def test_every_approach_waits_for_the_range(self):
         query_job.report_timing("raw", 1200, 0.02, 30.0)
-        self.assertEqual(self.got(), {"asap_window_wait_seconds": 600.0, "asap_data_available_seconds": 600.02,
-                                      "asap_result_age_seconds": 630.02})
+        self.assertEqual(self.got(), {"asap_window_wait_seconds": 300.0, "asap_data_available_seconds": 300.02,
+                                      "asap_result_age_seconds": 330.02})
 
     def test_no_query_no_result_age(self):
         query_job.report_timing("raw", 1200, 0.01, None)

@@ -56,9 +56,9 @@ def scaled_copy(directory, into):
         text = src.read_text()
         text = text.replace("window_size: 60s", f"window_size: {WINDOW_S}s")
         text = text.replace("window: 60s", f"window: {WINDOW_S}s")
-        # Answers per window, not over the last 10 windows: the checks compare
+        # Answers per window, not over the last 5 windows: the checks compare
         # each window's answers with its points.
-        text = text.replace("range_windows: 10", "range_windows: 1")
+        text = text.replace("range_windows: 5", "range_windows: 1")
         # The timeouts for a missing source (5 s, exact-merge 60 s) are not scaled: merges emit as
         # soon as both sources sent a window, and shared CI runners can be slow.
         text = re.sub(r"\n\s*- \{after_seconds: \d+, (signals_per_second|attribute: [^,]+, cardinality): \d+\}", "", text)

@@ -23,7 +23,7 @@ groups:
             type: urn:asap:processor:sketch_detector
             config:
               cardinality: {baseline_windows: 10, identifier_ratio: 0.9, growth: 0.2}
-              range_windows: 10
+              range_windows: 5
           to_prometheus:
             type: exporter:otlp_http
             config:

@@ -69,20 +69,20 @@ series per minute at the top rate, which `prometheus-raw` is not built for
 (its memory is capped by `PROMETHEUS_RAW_MEMORY`); the demo shows where it
 stops answering.
 
-**Answers over the last 10 minutes.** Every approach answers over the last 10
-minutes, once a minute (`range_windows: 10` in the top-k and cardinality
+**Answers over the last 5 minutes.** Every approach answers over the last 5
+minutes, once a minute (`range_windows: 5` in the top-k and cardinality
 detectors, `RANGE_WINDOWS` for the query job): the detectors keep each
-series' last 10 one-minute windows and merge them (sketches: merge 10
-fixed-size sketches; exact: add up 10 full count maps), and raw queries
-`[10m]` of raw points. Accuracy compares these 10-minute answers.
+series' last 5 one-minute windows and merge them (sketches: merge 5
+fixed-size sketches; exact: add up 5 full count maps), and raw queries
+`[5m]` of raw points. Accuracy compares these 5-minute answers.
 
 **From data generated to query result**, gauges per answer with the same
 definitions for all three approaches:
 
 1. Range wait (`asap_window_wait_seconds`) and delay before data is
    available for query (`asap_data_available_seconds`, which includes the
-   wait): every approach answers over the last 10 minutes, once a minute, so the
-   range's oldest point waits 10 minutes for the range to end (all three). Then
+   wait): every approach answers over the last 5 minutes, once a minute, so the
+   range's oldest point waits 5 minutes for the range to end (all three). Then
    sketch and exact wait until the detector sent the answer to its Prometheus
    (Prometheus stores it milliseconds later), raw until `prometheus-raw`
    acknowledged the range's last point (raw-sink, shown as "otlp-forwarder",
