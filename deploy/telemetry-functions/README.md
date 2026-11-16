@@ -97,7 +97,7 @@ acknowledged).
 pipeline Prometheus, itself and the query job, so the dashboards show CPU and
 memory per component and per approach: sketch and exact count their four stages
 and their Prometheus, store and query its sinks, `prometheus-raw` and the query
-job; the monitoring Prometheus is shown on its own.
+job. The monitoring Prometheus belongs to no approach and is not shown.
 
 The merges count a window's messages, not distinct sources: a source that sends
 a window twice (a retried request, or a branch restarted or reconfigured

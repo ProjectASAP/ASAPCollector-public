@@ -327,13 +327,6 @@ def resources():
     per_approach("bits per second into each stage", bits, "bps",
                  "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / "
                  "exact-merge: sketches / exact maps. into detector / exact-detector: merged windows.", log=True)
-    ts("Monitoring Prometheus (not part of any approach): CPU cores",
-       [('sum(rate(process_cpu_seconds_total{job="prometheus"}[1m]))', "Prometheus")], unit="short",
-       desc="The Prometheus this dashboard reads: stage telemetry, copies of the sketch and exact answers, the "
-       "query job's results.")
-    ts("Monitoring Prometheus (not part of any approach): resident memory",
-       [('max(process_resident_memory_bytes{job="prometheus"})', "Prometheus")], unit="bytes", x=12)
-    y += 8
 
 
 KEYS = ("http.route", "http.method", "k8s.pod.name", "user.id")
