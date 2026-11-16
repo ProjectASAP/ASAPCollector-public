@@ -139,6 +139,7 @@ services:
     environment:
       USE_CASE: "${USE_CASE:-latency}"
       WINDOW_SECONDS: "${WINDOW_SECONDS:-60}"
+      RANGE_WINDOWS: "${RANGE_WINDOWS:-10}"
     cpuset: "${CPU_QUERY_JOB:-16}"
     depends_on: [prometheus, prometheus-sketch, prometheus-exact, prometheus-raw]
   # Outside the pipelines: compares the sketch and exact top-k answers.

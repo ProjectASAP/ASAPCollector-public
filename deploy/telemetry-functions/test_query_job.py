@@ -80,18 +80,13 @@ class Timing(unittest.TestCase):
     def got(self):
         return {name: v for (name, _), (v, _) in query_job.samples.items()}
 
-    def test_windowed_approach_waits_one_window(self):
-        query_job.report_timing("exact", 120, 11.0, 2.0)
-        self.assertEqual(self.got(), {"asap_window_wait_seconds": 60.0, "asap_data_available_seconds": 71.0,
-                                      "asap_result_age_seconds": 73.0})
-
-    def test_raw_has_no_window_wait(self):
-        query_job.report_timing("raw", 120, 0.01, 17.0, windowed=False)
-        self.assertEqual(self.got(), {"asap_window_wait_seconds": 0.0, "asap_data_available_seconds": 0.01,
-                                      "asap_result_age_seconds": 17.01})
+    def test_every_approach_waits_for_the_range(self):
+        query_job.report_timing("raw", 1200, 0.02, 30.0)
+        self.assertEqual(self.got(), {"asap_window_wait_seconds": 600.0, "asap_data_available_seconds": 600.02,
+                                      "asap_result_age_seconds": 630.02})
 
     def test_no_query_no_result_age(self):
-        query_job.report_timing("raw", 120, 0.01, None, windowed=False)
+        query_job.report_timing("raw", 1200, 0.01, None)
         self.assertNotIn("asap_result_age_seconds", self.got())
 
 
@@ -104,6 +99,8 @@ class RulesMatchDetectorConfigs(unittest.TestCase):
                          (query_job.IDENTIFIER_RATIO, query_job.GROWTH, query_job.CLASS_BASELINE_WINDOWS))
         topk = open(os.path.join(here, "topk", "detector.yaml")).read()
         self.assertEqual(int(re.search(r"novelty_windows: (\d+)", topk)[1]), query_job.NOVELTY_WINDOWS)
+        for config in (card, topk):
+            self.assertEqual(int(re.search(r"range_windows: (\d+)", config)[1]), query_job.RANGE_WINDOWS)
 
 
 if __name__ == "__main__":

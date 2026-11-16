@@ -22,7 +22,7 @@ groups:
                 http: {listening_addr: "0.0.0.0:4318", wait_for_result: false}
           detector:
             type: urn:asap:processor:sketch_detector
-            config: {k: 20, novelty_windows: 10}
+            config: {k: 20, novelty_windows: 10, range_windows: 10}
           fanout:
             type: processor:fanout
             outputs: [answers, accuracy]

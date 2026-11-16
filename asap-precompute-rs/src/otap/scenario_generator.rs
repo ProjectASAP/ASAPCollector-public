@@ -95,6 +95,11 @@ pub struct ScenarioConfig {
     /// Changes that start at a time since the scenario start.
     #[serde(default)]
     pub changes: Vec<Change>,
+    /// When set, the rate changes (`signals_per_second`) repeat with this
+    /// period: the rate at second `s` is the rate at `s % rate_cycle_seconds`,
+    /// so a ramp up and down runs again and again. Other changes happen once.
+    #[serde(default)]
+    pub rate_cycle_seconds: Option<u64>,
 }
 
 /// How one attribute's values are drawn.
@@ -275,6 +280,11 @@ impl Scenario {
 
     /// Data points per second at scenario second `second`.
     pub fn rate_at(&self, second: u64) -> usize {
+        let second = self
+            .cfg
+            .rate_cycle_seconds
+            .filter(|c| *c > 0)
+            .map_or(second, |c| second % c);
         self.cfg
             .changes
             .iter()
@@ -652,5 +662,21 @@ mod tests {
         let mut fresh = Scenario::new(config(cfg)).unwrap();
         assert_eq!(late.batch(42, 2, 5), fresh.batch(42, 2, 5));
         assert_ne!(fresh.batch(42, 1, 5), fresh.batch(42, 2, 5));
+    }
+
+    #[test]
+    fn rate_changes_repeat_with_the_cycle() {
+        let s = Scenario::new(config(
+            r#"{"signals_per_second":10,"metric_name":"m","value":{"uniform":{"min":0,"max":1}},
+                "attributes":[],"rate_cycle_seconds":30,
+                "changes":[{"after_seconds":10,"signals_per_second":20},
+                           {"after_seconds":20,"signals_per_second":15}]}"#,
+        ))
+        .unwrap();
+        let rates: Vec<usize> = [0, 10, 20, 29, 30, 40, 55, 61]
+            .iter()
+            .map(|t| s.rate_at(*t))
+            .collect();
+        assert_eq!(rates, vec![10, 20, 15, 15, 10, 20, 15, 10]);
     }
 }

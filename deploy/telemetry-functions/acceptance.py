@@ -56,6 +56,9 @@ def scaled_copy(directory, into):
         text = src.read_text()
         text = text.replace("window_size: 60s", f"window_size: {WINDOW_S}s")
         text = text.replace("window: 60s", f"window: {WINDOW_S}s")
+        # Answers per window, not over the last 10 windows: the checks compare
+        # each window's answers with its points.
+        text = text.replace("range_windows: 10", "range_windows: 1")
         # The timeouts for a missing source (5 s, exact-merge 60 s) are not scaled: merges emit as
         # soon as both sources sent a window, and shared CI runners can be slow.
         text = re.sub(r"\n\s*- \{after_seconds: \d+, (signals_per_second|attribute: [^,]+, cardinality): \d+\}", "", text)
@@ -80,7 +83,7 @@ class Stack:
         # A CI runner has about 16 GB; the raw pipeline's store gets 4.
         env = dict(os.environ, PIPELINES=str(self.pipelines), COMMON=str(self.common),
                    SCENARIO_START=str(self.start), PROMETHEUS_RAW_MEMORY="4g",
-                   USE_CASE=self.use_case, WINDOW_SECONDS=str(WINDOW_S))
+                   USE_CASE=self.use_case, WINDOW_SECONDS=str(WINDOW_S), RANGE_WINDOWS="1")
         cmd = self.docker + ["compose", "-f", str(HERE / "compose.yaml"), *args]
         return subprocess.run(cmd, env=env, capture_output=True, text=True, check=True)
 

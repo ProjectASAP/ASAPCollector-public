@@ -69,17 +69,24 @@ series per minute at the top rate, which `prometheus-raw` is not built for
 (its memory is capped by `PROMETHEUS_RAW_MEMORY`); the demo shows where it
 stops answering.
 
-**From data generated to query result**, gauges per window with the same
+**Answers over the last 10 minutes.** Every approach answers over the last 10
+minutes, once a minute (`range_windows: 10` in the top-k and cardinality
+detectors, `RANGE_WINDOWS` for the query job): the detectors keep each
+series' last 10 one-minute windows and merge them (sketches: merge 10
+fixed-size sketches; exact: add up 10 full count maps), and raw queries
+`[10m]` of raw points. Accuracy compares these 10-minute answers.
+
+**From data generated to query result**, gauges per answer with the same
 definitions for all three approaches:
 
-1. Window wait (`asap_window_wait_seconds`) and delay before data is
+1. Range wait (`asap_window_wait_seconds`) and delay before data is
    available for query (`asap_data_available_seconds`, which includes the
-   wait): sketch and exact compute per 1-minute window, so a window's answer
-   exists only after the window (60 s, the configured window) ends and then
-   the detector sent it to its Prometheus (Prometheus stores it milliseconds
-   later). Raw has no window: raw-sink (shown as
-   "otlp-forwarder") forwards each point as it arrives; its delay is until
-   `prometheus-raw` acknowledged the window's last point.
+   wait): every approach answers over the last 10 minutes, once a minute, so the
+   range's oldest point waits 10 minutes for the range to end (all three). Then
+   sketch and exact wait until the detector sent the answer to its Prometheus
+   (Prometheus stores it milliseconds later), raw until `prometheus-raw`
+   acknowledged the range's last point (raw-sink, shown as "otlp-forwarder",
+   forwards each point as it arrives).
 2. Query latency (`asap_query_seconds`): the query that returns the window's
    answer from the approach's own Prometheus; sketch and exact read the stored
    answer (estimates only, so both read the same series; sketch's lower and
@@ -139,9 +146,9 @@ the JSON.
 | `USE_CASE` | Sketch | Scenario | Dashboard |
 | --- | --- | --- | --- |
 | `latency` | KLL per route | latency over 20 routes | `/d/asap-latency`: p50/p99 with bound vs exact |
-| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source doubles every 5 minutes (5k to 80k points/s) and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: input rate and distinct values per key (numbers), distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, the sketch's error per key (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
+| `cardinality` | HLL per attribute key (`per_attribute: ["*"]`) | `user.id` unique, `k8s.pod.name` growing 5%/min, `http.route` and `http.method` fixed; the rate per source ramps up and back down every 40 minutes, again and again (5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each), and `http.route` explodes from 20 to 20,000 values at minute 10 | `/d/asap-cardinality`: input rate and distinct values per key (numbers), distinct values per key of all three approaches side by side (with error against exact and each detector's class), class events, the sketch's error per key (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
 | `drift` | KLL per route | `http.route-3`'s median triples at minute 10 | `/d/asap-drift`: KS distance from the last 5 windows, drift events |
-| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source doubles every 5 minutes (5k to 80k points/s), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: input rate and distinct routes (numbers), top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), the sketch's heavy-hitter precision/recall/F1/ARE (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
+| `topk` | Count-Min (4 x 512) + top-20 heap per attribute key | Zipf routes; the rate per source ramps up and back down every 40 minutes, again and again (5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each), a new route takes 15% of traffic at minute 10, routes grow from 100,000 to 1,000,000 at minute 15 | `/d/asap-topk`: input rate and distinct routes (numbers), top-10 of all three approaches side by side (one table: rank, count and error against exact per approach), the sketch's heavy-hitter precision/recall/F1/ARE (gauges), data generated to query result per approach (one stacked bar each), CPU / memory / network of each approach (bars) |
 
 **Cardinality classes.** Each detector classifies every attribute key per
 window from its last 10 windows (`cardinality:` in `detector.yaml`):

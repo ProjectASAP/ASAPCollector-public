@@ -78,9 +78,9 @@ use otel_arrow_dfe_pdata::OtapPayload;
 use serde::Deserialize;
 
 use super::answer_nodes::{
-    default_grace, default_k, default_novelty_windows, default_quantiles, default_window,
-    detector_timing, emit, gauges_pdata, invalid, now_ms, observations, send_gauges, series_key,
-    stage_timing, upstream_timing,
+    default_grace, default_k, default_novelty_windows, default_quantiles, default_range_windows,
+    default_window, detector_timing, emit, gauges_pdata, invalid, merged_range, now_ms,
+    observations, send_gauges, series_key, stage_timing, upstream_timing, RecentWindows,
 };
 use super::codec::{decode_each, OtapSketchEncoder};
 use crate::answers::{
@@ -157,6 +157,20 @@ pub struct ExactDetectorConfig {
     /// Windows whose top keys form the novelty baseline.
     #[serde(default = "default_novelty_windows")]
     pub novelty_windows: usize,
+    /// Windows each answer covers, as in `sketch_detector`.
+    #[serde(default = "default_range_windows")]
+    pub range_windows: usize,
+}
+
+/// Adds up exact windows of one series into one.
+fn merge_exact(
+    windows: &VecDeque<SketchEnvelope>,
+) -> Result<Vec<u8>, crate::precompute::PrecomputeError> {
+    let mut merged = ExactWindow::default();
+    for w in windows {
+        merged.merge(ExactWindow::decode(&w.payload)?);
+    }
+    Ok(merged.encode())
 }
 
 /// `raw_sink` configuration.
@@ -441,6 +455,7 @@ impl local::Processor<OtapPdata> for ExactMerge {
 
 struct ExactDetector {
     config: ExactDetectorConfig,
+    range: RecentWindows,
     cardinality: CardinalityClassifier,
     novelty: NoveltyTracker,
     drift: DriftTracker,
@@ -538,7 +553,14 @@ impl local::Processor<OtapPdata> for ExactDetector {
                 continue;
             };
             let _ = windows.insert((env.window_start_ms, env.window_end_ms));
-            let (gauges, new) = self.answer(*env);
+            let env = match merged_range(self.range.push(*env), merge_exact) {
+                Ok(range) => range,
+                Err(e) => {
+                    effects.info(&format!("exact_detector: {e}")).await;
+                    continue;
+                }
+            };
+            let (gauges, new) = self.answer(env);
             out.extend(gauges);
             events.extend(new);
         }
@@ -963,6 +985,7 @@ static EXACT_DETECTOR: ProcessorFactory<OtapPdata> = ProcessorFactory {
         let config: ExactDetectorConfig = config(&node_config)?;
         Ok(ProcessorWrapper::local(
             ExactDetector {
+                range: RecentWindows::new(config.range_windows),
                 cardinality: CardinalityClassifier::new(config.cardinality.clone()),
                 novelty: NoveltyTracker::new(config.novelty_windows),
                 drift: DriftTracker::new(config.drift.clone()),
@@ -1106,6 +1129,7 @@ mod tests {
         let config: ExactDetectorConfig =
             serde_json::from_value(serde_json::json!({"k": 2})).unwrap();
         let mut detector = ExactDetector {
+            range: RecentWindows::new(config.range_windows),
             cardinality: CardinalityClassifier::new(config.cardinality.clone()),
             novelty: NoveltyTracker::new(config.novelty_windows),
             drift: DriftTracker::new(config.drift.clone()),
@@ -1288,5 +1312,33 @@ mod tests {
         let _ = raw.assign_slots(&[point(7_000, "/a", "u0", 1.0)]);
         assert_eq!(raw.slots.keys().copied().collect::<Vec<_>>(), vec![7_000]);
         assert!(metrics_pdata(&batch, &[0, 1, 0, 2]).is_ok());
+    }
+
+    #[test]
+    fn exact_range_adds_up_the_last_windows_of_a_series() {
+        let window = |end: u64, route: &str, n: u64| {
+            let mut w = ExactWindow::default();
+            *w.counts.entry(route.to_string()).or_default() += n;
+            w.points = n;
+            SketchEnvelope {
+                metric_name: "m".into(),
+                window_start_ms: end - 60_000,
+                window_end_ms: end,
+                count: n,
+                payload: w.encode(),
+                ..Default::default()
+            }
+        };
+        let mut range = RecentWindows::new(2);
+        let _ = range.push(window(60_000, "/a", 3));
+        let _ = range.push(window(120_000, "/b", 4));
+        let merged = merged_range(range.push(window(180_000, "/a", 5)), merge_exact).unwrap();
+        // The oldest window fell out: /b 4 + /a 5 over [60 s, 180 s).
+        assert_eq!(
+            (merged.window_start_ms, merged.window_end_ms, merged.count),
+            (60_000, 180_000, 9)
+        );
+        let w = ExactWindow::decode(&merged.payload).unwrap();
+        assert_eq!((w.counts["/a"], w.counts["/b"], w.points), (5, 4, 9));
     }
 }

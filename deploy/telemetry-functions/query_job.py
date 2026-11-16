@@ -25,17 +25,17 @@ complete in each pipeline:
   detectors do (`asap_event{method="raw"}`, `asap_topk_new`,
   `asap_cardinality_state`).
 
-Timing, per window and approach (label `method`), from data generated to the
-query result:
+Every approach answers over the last RANGE_S seconds (RANGE_WINDOWS windows
+of WINDOW_SECONDS: the last 10 minutes), updated once per window. Timing, per
+answer and approach (label `method`), from data generated to the query result:
 
-* `asap_window_wait_seconds`: the window length (WINDOW_SECONDS) for sketch
-  and exact, which compute per window, so a window's answer exists only after
-  the window ends; 0 for raw, which has no window.
-* `asap_data_available_seconds`: the window wait plus the time after it until
-  the data is queryable. sketch and exact: until the detector sent the window's
+* `asap_window_wait_seconds`: RANGE_S for all three: the range's oldest point
+  waits that long for the range to end.
+* `asap_data_available_seconds`: the range wait plus the time after the range's
+  end until the data is queryable. sketch and exact: until the detector sent the
   answer to its Prometheus (Prometheus stores it milliseconds later). raw: until
-  prometheus-raw acknowledged the window's last point, after the window's end.
-* `asap_query_seconds`: the query that returns the window's answer, on the
+  prometheus-raw acknowledged the range's last point.
+* `asap_query_seconds`: the query that returns the answer, on the
   approach's own Prometheus (for sketch and exact only the estimates, so both
   read the same series; sketch's bounds are extra).
 * `asap_result_age_seconds`: data available plus query latency, as if the
@@ -66,7 +66,7 @@ the same time as the pipelines' own per-window gauges. The job also exposes
 its own CPU time and resident memory. Only the top-k and cardinality use cases
 have a raw answer here; for the others it only times the backend queries.
 
-Configuration (environment): USE_CASE, WINDOW_SECONDS (60), K (20), PHI (0.01),
+Configuration (environment): USE_CASE, WINDOW_SECONDS (60), RANGE_WINDOWS (10), K (20), PHI (0.01),
 RAW_SOURCES (2), PROMETHEUS (monitoring), PORT (9100).
 """
 import json
@@ -89,6 +89,9 @@ NOVELTY_WINDOWS = 10
 IDENTIFIER_RATIO, GROWTH, CLASS_BASELINE_WINDOWS, MIN_POINTS = 0.9, 0.2, 10, 100
 USE_CASE = os.environ.get("USE_CASE", "topk")
 WINDOW_S = int(os.environ.get("WINDOW_SECONDS", "60"))
+# Windows each answer covers (`range_windows` in the detectors' configs).
+RANGE_WINDOWS = int(os.environ.get("RANGE_WINDOWS", "10"))
+RANGE_S = RANGE_WINDOWS * WINDOW_S
 K = int(os.environ.get("K", "20"))
 PHI = float(os.environ.get("PHI", "0.01"))
 # Largest relative difference between sketch's and exact's points in a window for both to be compared.
@@ -178,15 +181,15 @@ def heavy_hitter_accuracy(points, exact, reported_list):
             "reported": len(reported), "are": sum(errors) / tp if tp else None}
 
 
-def report_timing(method, end, after_s, query_s, windowed=True):
-    """Window wait, data available and query result for one window: `after_s`
-    is the time after the window's end until its data was queryable."""
+def report_timing(method, end, after_s, query_s):
+    """Range wait, data available and query result for the answer ending at
+    `end`: `after_s` is the time after the range's end until its data was
+    queryable."""
     labels = {"method": method}
-    wait = float(WINDOW_S) if windowed else 0.0
-    put("asap_window_wait_seconds", labels, wait, end)
-    put("asap_data_available_seconds", labels, wait + after_s, end)
+    put("asap_window_wait_seconds", labels, float(RANGE_S), end)
+    put("asap_data_available_seconds", labels, RANGE_S + after_s, end)
     if query_s is not None:
-        put("asap_result_age_seconds", labels, wait + after_s + query_s, end)
+        put("asap_result_age_seconds", labels, RANGE_S + after_s + query_s, end)
 
 
 def time_prometheus_answer(method, end):
@@ -205,8 +208,9 @@ def time_prometheus_answer(method, end):
 
 
 def raw_points(end):
-    """Points of the window that prometheus-raw acknowledged (both sources)."""
-    return sum(v for _, v in at_window('asap_points{method="raw"}', end))
+    """Points of the range ending at `end` that prometheus-raw acknowledged (both sources)."""
+    rows = prom(f'sum(sum_over_time(asap_points{{method="raw"}}[{RANGE_S}s]))', at=end)
+    return float(rows[0]["value"][1]) if rows else 0.0
 
 
 def flag_incomplete(end):
@@ -215,7 +219,7 @@ def flag_incomplete(end):
 
 
 def raw_at_window_end(query, end):
-    """Instant PromQL query on prometheus-raw over window [end - WINDOW_S, end):
+    """Instant PromQL query on prometheus-raw over [end - RANGE_S, end):
     PromQL ranges are (t - W, t], so evaluate at the window's last millisecond."""
     return prom(query, at=end - 0.001, base=PIPELINE_PROMETHEUS["raw"], timeout=300)
 
@@ -317,7 +321,7 @@ def raw_distinct(end):
     window_points = raw_points(end)
     for key in sorted({r["attribute_key"] for r, _ in exact}):
         label = key.replace(".", "_")
-        query = f'count(count by ({label}) (count_over_time({RAW_METRIC}{{{label}!=""}}[{WINDOW_S}s])))'
+        query = f'count(count by ({label}) (count_over_time({RAW_METRIC}{{{label}!=""}}[{RANGE_S}s])))'
 
         labels = {"method": "raw", "attribute_key": key}
         t0 = time.monotonic()
@@ -348,7 +352,7 @@ def raw_distinct(end):
 
 
 def raw_topk(end):
-    """Top-k of window [end - WINDOW_S, end) from prometheus-raw; its query seconds when done, else None."""
+    """Top-k of [end - RANGE_S, end) from prometheus-raw; its query seconds when done, else None."""
     exact_rows = at_window(f'asap_topk{{method="exact",{TOPK_SELECTOR}}}', end)
     exact_points = sum(v for _, v in at_window(
         f'asap_points{{method="exact",attribute_key="{ATTRIBUTE}"}}', end))
@@ -356,7 +360,7 @@ def raw_topk(end):
         return None
     flag_incomplete(end)
     query = (f"topk({K}, sum by ({RAW_LABEL}) "
-             f"(count_over_time({RAW_METRIC}[{WINDOW_S}s])))")
+             f"(count_over_time({RAW_METRIC}[{RANGE_S}s])))")
     t0 = time.monotonic()
     rows = raw_at_window_end(query, end)
     latency = time.monotonic() - t0
@@ -425,9 +429,9 @@ def raw_step():
         query_s = raw_answer(end) if raw_answer else None
         if raw_answer is None or query_s is not None:
             done["raw"].add(end)
-            # No window: only the time until prometheus-raw stored the last point.
+            # Until prometheus-raw stored the range's last point.
             stored = [v for _, v in at_window('asap_answer_delay{method="raw"}', end)]
-            report_timing("raw", end, max(stored), query_s, windowed=False)
+            report_timing("raw", end, max(stored), query_s)
 
 
 def escape(value):

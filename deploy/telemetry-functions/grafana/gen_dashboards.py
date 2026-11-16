@@ -38,8 +38,8 @@ def traffic(shape_title, shape_expr, shape_legend, shape_desc):
     """The current volume and shape of the input, as numbers."""
     global y
     stat("Input: points per second (both sources)",
-         'max(sum by (method) (last_over_time(asap_points{method=~"sketch|exact",attribute_key="http.route"}[2m]))) / 60',
-         "points/s", "Points per second of the latest window, both sources together.", 8, 0)
+         'sum(last_over_time(asap_points{method="raw"}[2m])) / 60',
+         "points/s", "Points per second of the latest minute, both sources together.", 8, 0)
     stat(shape_title, shape_expr, shape_legend, shape_desc, 16, 8)
     y += 4
 
@@ -136,40 +136,41 @@ def topk():
             ("Sources A and B", "generator-a/b"),
             ("Summarize each minute: Count-Min sketch + top-20 list", "branch-a/b"),
             ("Combine A and B", "merge"),
-            ("Top routes, and which are new", "detector"),
+            ("Merge the last 10 minutes; top routes, and which are new", "detector"),
             ("Store the answer", "prometheus-sketch"),
             ("Query: read the answer", "query-job")], "asap_topk{method=&quot;sketch&quot;, bound=&quot;estimate&quot;}[60s]"),
         ("Exact", "count every route each minute", orange, [
             ("Sources A and B (same points)", "exact-generator-a/b"),
             ("Count every route each minute", "exact-branch-a/b"),
             ("Add up A and B", "exact-merge"),
-            ("Top routes, and which are new", "exact-detector"),
+            ("Add up the last 10 minutes; top routes, and which are new", "exact-detector"),
             ("Store the answer", "prometheus-exact"),
             ("Query: read the answer", "query-job")], "asap_topk{method=&quot;exact&quot;, bound=&quot;estimate&quot;}[60s]"),
         ("Raw", "store every point, compute when asked", grey, [
             ("Sources A and B (same points)", "raw-generator-a/b"),
             ("Forward each point as it arrives (OTLP forwarder, no window)", "raw-sink-a/b"),
             ("Store every point", "prometheus-raw"),
-            ("Query: compute the top 20 of the last 60 s", "query-job")], "topk(20, sum by (http_route) (count_over_time(http_server_request_duration[60s])))"),
-    ], ["Same input for all three. Traffic grows over 30 minutes: the rate per source doubles every 5 minutes "
-        "(5k to 80k points/s), <code>/new/hot-route</code> takes 15% of traffic at minute 10, and the number of "
-        "routes grows from 100,000 to 1,000,000 at minute 15. Every step is one container pinned to one CPU; each "
+            ("Query: compute the top 20 of the last 10 minutes", "query-job")], "topk(20, sum by (http_route) (count_over_time(http_server_request_duration[10m])))"),
+    ], ["Same input for all three. The rate per source ramps up and back down every 40 minutes, again and again "
+        "(5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each). Once: <code>/new/hot-route</code> takes "
+        "15% of traffic at minute 10, and the number of routes grows from 100,000 to 1,000,000 at minute 15. Every step is one container pinned to one CPU; each "
         "approach has its own Prometheus.",
         "Raw adds a <code>point_slot</code> label so points of one route in the same millisecond stay separate "
         "samples (Prometheus keeps one sample per series and millisecond). hh-accuracy compares Sketch with Exact; "
         "query-job compares Raw with Exact and times every approach&#39;s query.",
-        "Sketch and Exact read the stored top 20 of the minute (evaluated at the minute&#39;s end, keeping the "
-        "samples stamped with it). Raw computes it from every raw point of the minute (evaluated 1 ms before the "
-        "minute&#39;s end, because PromQL ranges include their end)."])
-    add({"type": "text", "title": "Three ways to answer: which routes get the most requests each minute, and which are new?",
+        "Every approach answers over the last 10 minutes, once a minute. Sketch and Exact read the stored answer "
+        "(evaluated at the minute&#39;s end, keeping the samples stamped with it). Raw computes it from every raw "
+        "point of the last 10 minutes (evaluated 1 ms before the minute&#39;s end, because PromQL ranges include "
+        "their end)."])
+    add({"type": "text", "title": "Three ways to answer, every minute: which routes got the most requests in the last 10 minutes, and which are new?",
          "options": {"mode": "html", "content": html}}, 24, 10, 0)
     y += 10
-    traffic("Data shape: distinct routes in the latest window",
+    traffic("Data shape: distinct routes in the last 10 minutes",
             'max(last_over_time(asap_distinct{method="exact",attribute_key="http.route"}[2m]))', "distinct routes",
             "From the exact pipeline.")
 
     row("Accuracy against exact")
-    gauges("Sketch heavy hitters (routes with >= 1% of the window's points), latest window",
+    gauges("Sketch heavy hitters (routes with >= 1% of the points), last 10 minutes",
            [(f'last_over_time(asap_hh_{m}{{method="sketch"}}[5m])', name)
             for m, name in (("precision", "precision"), ("recall", "recall"), ("f1", "F1"))],
            "Sketch against exact. Truth: exact counts >= 1% of the window's points.", w=16, x=0, good_high=True)
@@ -209,7 +210,7 @@ def topk():
 
 
 
-        add({"type": "table", "title": "Top-10 routes of the three approaches, latest window Raw answered (union of their top-10s)",
+        add({"type": "table", "title": "Top-10 routes of the last 10 minutes, the latest answer Raw computed (union of the three top-10s)",
              "description": "One row per route in any approach's top-10, all from the latest window Raw has "
                             "answered (query-job republishes sketch and exact for it), which lags behind when "
                             "prometheus-raw is slow; the panel on the right shows which window. Error is (count - exact) / exact; "
@@ -251,24 +252,24 @@ def timing(raw_query):
     window wait (the configured window; none for Raw), time until
     the data is queryable, and the query."""
     global y
-    row("From data generated to query result (latest window)")
+    row("From data generated to query result (latest answer)")
     def named(e):
         for method, name in NAMES.items():
             e = f'label_replace({e}, "approach", "{name}", "method", "{method}")'
         return e
     latest = lambda m: f'max by (method) (last_over_time({m}[5m]))'
     segments = [
-        ("wait for the window to end", latest("asap_window_wait_seconds")),
+        ("wait for the 10-minute range to end", latest("asap_window_wait_seconds")),
         ("then until data is queryable",
          f'{latest("asap_data_available_seconds")} - on (method) {latest("asap_window_wait_seconds")}'),
         ("query", 'max by (method) (last_over_time(asap_query_seconds[5m]))'),
     ]
     add({"type": "barchart", "title": "Data generated -> query result: where the time goes", "datasource": PROM,
-         "description": "1. Window wait: sketch and exact compute per 1-minute window (the configured window), "
-                        "so a window's answer exists only after the window ends; Raw has no window. "
-                        "2. Then until the data is queryable: sketch and exact until the detector wrote the window's "
-                        "answer to their Prometheus; Raw until prometheus-raw acknowledged the window's "
-                        "last point (otlp-forwarder forwards each point as it arrives). 3. The query that returns "
+         "description": "Every approach answers over the last 10 minutes, once a minute. 1. The range's oldest "
+                        "point waits 10 minutes for the range to end (all three). 2. Then until the data is "
+                        "queryable: sketch and exact until the detector wrote the answer to their Prometheus; Raw "
+                        "until prometheus-raw acknowledged the range's last point (otlp-forwarder forwards each "
+                        "point as it arrives). 3. The query that returns "
                         "the answer on the approach's own Prometheus: sketch and exact read the stored answer "
                         f"(estimates only); Raw computes it from every raw sample ({raw_query}).",
          "targets": [{"refId": chr(65 + i), "expr": named(e), "format": "table", "instant": True}
@@ -367,37 +368,37 @@ def cardinality():
             ("Sources A and B", "generator-a/b"),
             ("Summarize each minute: one HyperLogLog per attribute", "branch-a/b"),
             ("Combine A and B", "merge"),
-            ("Distinct counts, and each attribute&#39;s class", "detector"),
+            ("Merge the last 10 minutes; distinct counts and classes", "detector"),
             ("Store the answer", "prometheus-sketch"),
             ("Query: read the answer", "query-job")], "asap_distinct{method=&quot;sketch&quot;, bound=&quot;estimate&quot;}[60s]"),
         ("Exact", "keep every value each minute", orange, [
             ("Sources A and B (same points)", "exact-generator-a/b"),
             ("Keep every value of every attribute each minute", "exact-branch-a/b"),
             ("Add up A and B", "exact-merge"),
-            ("Distinct counts, and each attribute&#39;s class", "exact-detector"),
+            ("Add up the last 10 minutes; distinct counts and classes", "exact-detector"),
             ("Store the answer", "prometheus-exact"),
             ("Query: read the answer", "query-job")], "asap_distinct{method=&quot;exact&quot;, bound=&quot;estimate&quot;}[60s]"),
         ("Raw", "store every point, compute when asked", grey, [
             ("Sources A and B (same points)", "raw-generator-a/b"),
             ("Forward each point as it arrives (OTLP forwarder, no window)", "raw-sink-a/b"),
             ("Store every point", "prometheus-raw"),
-            ("Query: count distinct values per attribute over the last 60 s", "query-job")], "count(count by (user_id) (count_over_time(http_server_request_duration{user_id!=&quot;&quot;}[60s]))), one per attribute"),
+            ("Query: count distinct values per attribute over the last 10 minutes", "query-job")], "count(count by (user_id) (count_over_time(http_server_request_duration{user_id!=&quot;&quot;}[10m]))), one per attribute"),
     ], ["Same input for all three. Four attributes: <code>http.route</code> and <code>http.method</code> stable, "
-        "<code>k8s.pod.name</code> growing 5%/min, <code>user.id</code> unique per point. Traffic grows over 30 "
-        "minutes: the rate per source doubles every 5 minutes (5k to 80k points/s), and at minute 10 "
+        "<code>k8s.pod.name</code> growing 5%/min, <code>user.id</code> unique per point. The rate per source ramps "
+        "up and back down every 40 minutes, again and again (5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each). Once: at minute 10 "
         "<code>http.route</code> explodes from 20 to 20,000 values. Every step is one container pinned to one CPU; "
         "each approach has its own Prometheus.",
         "<b>Class</b> (per attribute and minute, from the last 10 minutes; every approach applies the same rules to "
         "its own counts): <b>identifier-like</b> when distinct / points is at least 0.9, i.e. nearly every point has "
         "a new value; else <b>growing</b> when distinct is more than 20% above the mean of the last 10 minutes "
         "(needs 3); else <b>stable</b>. Not classified below 100 points.",
-        "Sketch and Exact read the stored distinct counts of the minute (evaluated at the minute&#39;s end, keeping "
-        "the samples stamped with it). Raw computes each from every raw point of the minute (evaluated 1 ms before "
-        "the minute&#39;s end)."])
-    add({"type": "text", "title": "Three ways to answer: how many distinct values does each attribute have each minute?",
+        "Every approach answers over the last 10 minutes, once a minute. Sketch and Exact read the stored distinct "
+        "counts (evaluated at the minute&#39;s end, keeping the samples stamped with it). Raw computes each from every "
+        "raw point of the last 10 minutes (evaluated 1 ms before the minute&#39;s end)."])
+    add({"type": "text", "title": "Three ways to answer, every minute: how many distinct values did each attribute have in the last 10 minutes?",
          "options": {"mode": "html", "content": html}}, 24, 11, 0)
     y += 11
-    traffic("Data shape: distinct values per key in the latest window",
+    traffic("Data shape: distinct values per key in the last 10 minutes",
             'max by (attribute_key) (last_over_time(asap_distinct{method="exact"}[2m])) or max by (attribute_key) '
             '(last_over_time(asap_distinct{method="sketch",bound="estimate"}[2m]))', "{{attribute_key}}",
             "From the exact pipeline; the sketch's estimate for a key exact has not answered recently.")
@@ -415,7 +416,7 @@ def cardinality():
                 f" and on () ({complete})")
 
     est = 'max by (attribute_key) (asap_distinct{method="sketch",bound="estimate"})'
-    gauges("Sketch (HLL): relative error of the distinct count per key, latest window compared",
+    gauges("Sketch (HLL): relative error of the distinct count per key, last 10 minutes",
            [(same_window(f'abs({est} - on (attribute_key) {ex}) / on (attribute_key) {ex}', "sketch"),
              "{{attribute_key}}")],
            "|estimate - exact| / exact; empty when the latest windows' points differ by more than 1% (a source "
@@ -444,7 +445,7 @@ def cardinality():
                    "Value #B": "Sketch estimate", "Value #D": "Sketch error", "sketch_class": "Sketch class",
                    "Value #C": "Raw", "Value #E": "Raw error", "reason": "Raw refused because"}
         hidden = ["Time", "Value #F", "Value #G", "Value #H"] + [f"Time {i}" for i in range(1, 9)]
-        add({"type": "table", "title": "Distinct values per attribute key, latest window Raw answered",
+        add({"type": "table", "title": "Distinct values per attribute key in the last 10 minutes, the latest answer Raw computed",
              "description": "All from the latest window Raw has answered (query-job republishes sketch and "
                             "exact for it), which lags behind when prometheus-raw is slow; the panel on the right shows "
                             "which window. Error is (count - exact) / exact; when one method's window holds more than 1% fewer points than the other's (a source missed its merge), that method's count and class are left empty, and so are the errors that compare with it. Class: the detector's verdict from the last 10 windows "
