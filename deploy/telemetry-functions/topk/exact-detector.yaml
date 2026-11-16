@@ -32,9 +32,8 @@ groups:
           to_prometheus:
             type: exporter:otlp_http
             config:
-              endpoint: http://prometheus:9090
-              metrics_endpoint: http://prometheus:9090/api/v1/otlp/v1/metrics
-              logs_endpoint: http://loki:3100/otlp/v1/logs
+              endpoint: http://prometheus-exact:9090
+              metrics_endpoint: http://prometheus-exact:9090/api/v1/otlp/v1/metrics
               client_pool_size: 1
               max_in_flight: 1
               http: {timeout: 30s, compression: none}

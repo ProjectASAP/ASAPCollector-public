@@ -7,9 +7,8 @@ import sys
 
 USE_CASE, OUT = sys.argv[1], sys.argv[2]
 PROM = {"type": "prometheus", "uid": f"asap-prometheus-{USE_CASE}"}
-LOKI = {"type": "loki", "uid": f"asap-loki-{USE_CASE}"}
 COLORS = {"sketch": "#5794f2", "exact": "#ff9830", "store and query": "#8e8e8e",
-          "raw": "#8e8e8e", "Prometheus (shared)": "#73bf69"}
+          "raw": "#8e8e8e"}
 panels = []
 y = 0
 
@@ -93,6 +92,26 @@ def window_compared(h):
          "fieldConfig": {"defaults": {"unit": "dateTimeAsIsoNoDateIfToday"}, "overrides": []}}, 4, h, 20)
 
 
+def events(kind, title):
+    """Table of the `asap_event` gauges of `kind` in the dashboard's time range."""
+    global y
+    add({"type": "table", "title": title, "datasource": PROM,
+         "description": "Detectors (sketch, exact) and the query job (store and query) write each event as an "
+                        "asap_event gauge at its window's end. Newest first.",
+         "targets": [{"refId": "A", "format": "table", "instant": True,
+                      "expr": f'timestamp(last_over_time(asap_event{{kind="{kind}"}}[$__range])) * 1000'}],
+         "transformations": [{"id": "organize", "options": {
+             "includeByName": {"Value": True, "method": True, "message": True},
+             "indexByName": {"Value": 0, "method": 1, "message": 2},
+             "renameByName": {"Value": "Window end", "method": "Approach", "message": "Event"}}}],
+         "options": {"showHeader": True, "sortBy": [{"displayName": "Window end", "desc": True}]},
+         "fieldConfig": {"defaults": {"custom": {"align": "auto"}},
+                         "overrides": [by_name("Window end", {"id": "unit", "value": "dateTimeAsIso"},
+                                               {"id": "custom.width", "value": 190}),
+                                       by_name("Approach", {"id": "custom.width", "value": 100})]}}, 24, 8, 0)
+    y += 8
+
+
 def topk():
     global y
     html = ('<table style="width:100%;border-collapse:separate;border-spacing:0 6px;border:none">'
@@ -100,23 +119,23 @@ def topk():
                     box("branch-a/b", "Count-Min 4&times;512 + top-20 heap per 1-min window", *blue),
                     box("merge", "both sources&#39; sketches per window", *blue),
                     box("detector", "top-20 with bounds; new heavy hitters", *blue),
-                    box("Prometheus", "query: method=&quot;sketch&quot;", *backend)])
+                    box("prometheus-sketch", "query: the stored top-20", *backend)])
             + flow([box("exact-generator-a/b", "same points", *orange),
                     box("exact-branch-a/b", "route &rarr; count map per 1-min window", *orange),
                     box("exact-merge", "adds both sources&#39; maps: every key", *orange),
                     box("exact-detector", "exact top-20; new heavy hitters", *orange),
-                    box("Prometheus", "query: method=&quot;exact&quot;", *backend)])
+                    box("prometheus-exact", "query: the stored top-20", *backend)])
             + flow([box("raw-generator-a/b", "same points", *grey),
-                    box("raw-sink-a/b", "the only stage: every point into the log store", *grey),
-                    box("loki-raw", "stores every raw point", *grey),
-                    box("query-job", "LogQL top-20 once per window", *grey),
-                    box("Prometheus", "answer: method=&quot;raw&quot;", *backend)])
+                    box("raw-sink-a/b", "the only stage: forwards every point", *grey),
+                    box("prometheus-raw", "stores every raw point, one sample each", *grey),
+                    box("query-job", "PromQL top-20 once per window; new heavy hitters", *grey)])
             + "</table>"
             "<p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Traffic grows over 30 minutes: "
             "the rate per source doubles every 5 minutes (5k to 80k points/s), <code>/new/hot-route</code> takes 15% "
             "of traffic at minute 10, and the number of routes grows from 100,000 to 1,000,000 at minute 15. "
-            "hh-accuracy compares the sketch with exact; query-job compares store and query with exact and times "
-            "every approach's backend query.</small></p>")
+            "Each approach writes to its own Prometheus. raw-sink adds a <code>point_slot</code> label so points of one "
+            "series at the same millisecond stay separate samples. hh-accuracy compares the sketch with exact; "
+            "query-job compares store and query with exact and times every approach's query.</small></p>")
     add({"type": "text", "title": "Three approaches to the same question: which routes are heavy hitters, and which are new?",
          "options": {"mode": "html", "content": html}}, 24, 10, 0)
     y += 10
@@ -152,8 +171,8 @@ def topk():
 
     add({"type": "table", "title": "Top-10 routes of the three approaches, latest window store and query answered (union of their top-10s)",
          "description": "One row per route in any approach's top-10, all from the latest window store and query has "
-                        "answered (query-job republishes sketch and exact for it), which lags behind when the log "
-                        "store is slow; the panel on the right shows which window. Error is (count - exact) / exact; "
+                        "answered (query-job republishes sketch and exact for it), which lags behind when "
+                        "prometheus-raw is slow; the panel on the right shows which window. Error is (count - exact) / exact; "
                         "empty when the route is outside that approach's reported top-20.",
          "datasource": PROM,
          "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
@@ -185,7 +204,7 @@ def topk():
     y += 12
     for i, (method, title) in enumerate([("sketch", "Sketch (CMS + heap): top-10 routes, latest window"),
                                          ("exact", "Exact: top-10 routes, latest window"),
-                                         ("raw", "Store and query (LogQL over loki-raw): top-10 routes, latest window")]):
+                                         ("raw", "Store and query (PromQL over prometheus-raw): top-10 routes, latest window")]):
         sel = f'asap_topk{{method="{method}",bound="estimate",rank=~"[1-9]|10"}}'
         add({"type": "bargauge", "title": title, "datasource": PROM,
              "targets": [{"refId": "A", "expr": f"sort_desc({latest(sel)})", "legendFormat": "#{{rank}} {{key}}",
@@ -195,10 +214,7 @@ def topk():
              "fieldConfig": {"defaults": {"decimals": 0, "color": {"mode": "fixed", "fixedColor": COLORS[method]}},
                              "overrides": []}}, 8, 10, 8 * i)
     y += 10
-    add({"type": "logs", "title": "New heavy hitters (Loki events from both detectors)", "datasource": LOKI,
-         "targets": [{"refId": "A", "expr": '{service_name="asap-detector"} | event_kind="novelty"'}],
-         "options": {"showTime": True, "wrapLogMessage": True, "sortOrder": "Descending"}}, 24, 8, 0)
-    y += 8
+    events("novelty", "New heavy hitters (events of all three approaches, from Prometheus)")
 
     row("Accuracy against exact")
     ts("Heavy hitters (routes with >= 1% of the window's points): precision, recall, F1",
@@ -206,7 +222,7 @@ def topk():
         ('asap_hh_f1{method="sketch"}', "sketch F1"), ('asap_hh_precision{method="raw"}', "store and query precision"),
         ('asap_hh_recall{method="raw"}', "store and query recall"), ('asap_hh_f1{method="raw"}', "store and query F1")],
        unit="percentunit", desc="Truth: exact counts >= 1% of the window's points. Store and query loses accuracy "
-       "only when points never reached the log store.", min0=False)
+       "only when points never reached prometheus-raw.", min0=False)
     ts("Average relative count error of the heavy hitters found (ARE)",
        [('asap_hh_are{method="sketch"}', "sketch"), ('asap_hh_are{method="raw"}', "store and query")],
        unit="percentunit", x=12, names=("sketch", "store and query"))
@@ -218,72 +234,74 @@ def topk():
          "{{method}}"),
         ('sum(last_over_time(asap_points{method="raw"}[2m])) / 60', "store and query")],
        unit="short", desc="Both sources together. The generators skip batches a pipeline cannot take, so a "
-       "pipeline that falls behind delivers less. Store and query: points loki-raw acknowledged within 50 s of the "
-       "window's end. A pipeline that stops reporting shows a gap after 2 minutes.", names=("sketch", "exact", "store and query"))
+       "pipeline that falls behind delivers less. Store and query: points prometheus-raw acknowledged within 50 s of "
+       "the window's end. A pipeline that stops reporting shows a gap after 2 minutes.", names=("sketch", "exact", "store and query"))
     ts("Data shape: distinct routes per window (exact)",
        [('asap_distinct{method="exact",attribute_key="http.route"}', "distinct routes")], unit="short", x=12)
     y += 8
 
 
 
-def freshness(RAW_QUERY):
+def latency_and_freshness(raw_query):
     global y
-    row("Freshness: from a sample's generation to the queryable answer")
-    ts("Total freshness of a window's first sample",
-       [('60 + max(asap_answer_delay{method="sketch"}) + max(asap_query_seconds{method="sketch"})', "sketch"),
-        ('60 + max(asap_answer_delay{method="exact"}) + max(asap_query_seconds{method="exact"})', "exact"),
-        ('60 + max(asap_answer_delay{method="raw"}) + max(asap_query_seconds{method="raw"})', "store and query")],
-       unit="s", w=24, h=7, names=("sketch", "exact", "store and query"),
-       desc="Window wait (up to 60 s for the first sample) + the pipeline until the answer is stored + the backend "
-       "query that returns it.")
-    y += 7
+    row("Query latency and data freshness (reported separately)")
+    ts("Query latency: time to run the query that returns a window's answer",
+       [(f'max(asap_query_seconds{{method="{m}"}})', n) for m, n in
+        (("sketch", "sketch"), ("exact", "exact"), ("raw", "store and query"))],
+       unit="s", log=True, names=("sketch", "exact", "store and query"), last=True,
+       desc="Measured by query-job once per window against each approach's own Prometheus. sketch and exact read "
+       f"the stored answer; store and query computes it from every raw sample ({raw_query}). Includes refused and "
+       "timed-out queries.")
+    ts("Data freshness (ingestion lag): load time - event creation time, per point",
+       [(f'max(asap_freshness_seconds{{method="{m}",quantile="{q}"}})', f"{n} p{int(float(q) * 100)}")
+        for m, n in (("sketch", "sketch"), ("exact", "exact"), ("raw", "store and query"))
+        for q in ("0.5", "0.99")],
+       unit="s", x=12, last=True,
+       desc="How long a point takes from its creation to being in its approach's Prometheus, p50 and p99 over the "
+       "window's points. store and query: Prometheus's acknowledgement of the point minus its event time, measured "
+       "for every point by raw-sink. sketch and exact: a point is in Prometheus once its window's answer is, so its "
+       "lag is the time to the window's end plus the window's answer delay (points arrive evenly over the window). "
+       "Query latency is not included.")
+    y += 8
     for i, method in enumerate(("sketch", "exact")):
         st = lambda metric, stage: f'max(asap_stage_{metric}{{method="{method}",stage="{stage}"}})'
-        ts(f"{'Sketch' if method == 'sketch' else 'Exact'}: latency breakdown per window",
-           [('0 * max(asap_answer_delay{method="%s"}) + 60' % method, "window wait"),
-            (st("received", "merge"), "branch + to merge"),
+        ts(f"{'Sketch' if method == 'sketch' else 'Exact'}: answer delay breakdown per window",
+           [(st("received", "merge"), "branch + to merge"),
             (f'{st("emitted", "merge")} - {st("received", "merge")}', "merge (waits for both sources)"),
             (f'{st("received", "detector")} - {st("emitted", "merge")}', "to detector"),
-            (f'{st("emitted", "detector")} - {st("received", "detector")}', "detector"),
-            (f'max(asap_query_seconds{{method="{method}"}})', "Prometheus query")],
+            (f'{st("emitted", "detector")} - {st("received", "detector")}', "detector")],
            unit="s", stack=True, w=8, x=8 * i,
-           desc="Seconds per segment. branch + to merge: the window's end until the last source's sketch reached the "
-           "merge. merge: waiting for the other source's sketch (5 s timeout).")
-    ts("Store and query: latency breakdown per window",
-       [('0 * max(asap_answer_delay{method="raw"}) + 60', "window wait"),
-        ('max(asap_answer_delay{method="raw"})', "into loki-raw (last point acknowledged)"),
-        ('max(asap_query_seconds{method="raw"})', RAW_QUERY)],
+           desc="Seconds per segment after the window's end, until the answer goes to Prometheus. branch + to merge: "
+           "the window's end until the last source's sketch reached the merge. merge: waiting for the other "
+           "source's sketch (5 s timeout).")
+    ts("Store and query: time to store the window's last point",
+       [('max(asap_answer_delay{method="raw"})', "into prometheus-raw (last point acknowledged)")],
        unit="s", stack=True, w=8, x=16,
-       desc="Seconds per segment. into loki-raw: the window's end until loki-raw acknowledged its last point (or "
-       "raw-sink's 50 s timeout). The query time includes refused and timed-out queries; with several queries per "
-       "window it is their sum.")
+       desc="The window's end until prometheus-raw acknowledged its last point (or raw-sink's 50 s timeout).")
     y += 8
 
 
-
 APPROACHES = [
-    # (title, collector stages, process jobs scraped directly)
-    ("Sketch", "branch-.|merge|detector", None),
-    ("Exact", "exact-(branch-.|merge|detector)", None),
-    ("Store and query", "raw-sink-.", "loki-raw|query-job"),
+    # (title, collector stages, its Prometheus and other processes scraped directly)
+    ("Sketch", "branch-.|merge|detector", "prometheus-sketch"),
+    ("Exact", "exact-(branch-.|merge|detector)", "prometheus-exact"),
+    ("Store and query", "raw-sink-.", "prometheus-raw|query-job"),
 ]
 
 
 def cpu(sel, jobs):
     return (f'sum by (stage) (rate(cpu_time_total{{job="collectors",stage=~"{sel}",otel_scope_pipeline_id="main"}}[1m]))'
-            + (f' or sum by (stage) (rate(process_cpu_seconds_total{{job=~"{jobs}"}}[1m]))' if jobs else ""))
+            + (f' or sum by (stage) (rate(process_cpu_seconds_total{{stage=~"{jobs}"}}[1m]))' if jobs else ""))
 
 
 def mem(sel, jobs):
     return (f'max by (stage) (memory_rss{{job="collectors",stage=~"{sel}"}})'
-            + (f' or max by (stage) (process_resident_memory_bytes{{job=~"{jobs}"}})' if jobs else ""))
+            + (f' or max by (stage) (process_resident_memory_bytes{{stage=~"{jobs}"}})' if jobs else ""))
 
 
 def bits(sel, jobs):
     return (f'sum by (stage) (rate(payload_size_bytes_total{{job="collectors",stage=~"{sel}",'
-            f'otel_scope_node_type="receiver"}}[2m])) * 8'
-            + (' or label_replace(sum(rate(loki_distributor_bytes_received_total[2m])) * 8, '
-               '"stage", "loki-raw", "", "")' if jobs else ""))
+            f'otel_scope_node_type="receiver"}}[2m])) * 8')
 
 
 def per_approach(title, query, unit, desc, log=False):
@@ -301,17 +319,18 @@ def resources():
     global y
     row("Resources per approach (generators and observers excluded)")
     per_approach("CPU cores per component", cpu, "short",
-                 "Pipeline stages from the engine's CPU time; loki-raw and query-job from their process CPU time. "
+                 "Pipeline stages from the engine's CPU time; each approach's Prometheus and query-job from their "
+                 "process CPU time. "
                  "total: the whole approach.")
     per_approach("resident memory per component", mem, "bytes", "total: the whole approach.")
     per_approach("bits per second into each stage", bits, "bps",
                  "into branch-a/b, exact-branch-a/b, raw-sink-a/b: raw points from the generators. into merge / "
-                 "exact-merge: sketches / exact maps. into detector / exact-detector: merged windows. into loki-raw: "
-                 "raw log records.", log=True)
-    ts("Shared by all three: Prometheus CPU cores",
+                 "exact-merge: sketches / exact maps. into detector / exact-detector: merged windows.", log=True)
+    ts("Monitoring Prometheus (not part of any approach): CPU cores",
        [('sum(rate(process_cpu_seconds_total{job="prometheus"}[1m]))', "Prometheus")], unit="short",
-       desc="Prometheus holds the answers of all three approaches and the monitoring data.")
-    ts("Shared by all three: Prometheus resident memory",
+       desc="The Prometheus this dashboard reads: stage telemetry, copies of the sketch and exact answers, the "
+       "query job's results.")
+    ts("Monitoring Prometheus (not part of any approach): resident memory",
        [('max(process_resident_memory_bytes{job="prometheus"})', "Prometheus")], unit="bytes", x=12)
     y += 8
 
@@ -326,24 +345,23 @@ def cardinality():
                     box("branch-a/b", "HLL per attribute key per 1-min window", *blue),
                     box("merge", "both sources&#39; HLLs per window", *blue),
                     box("detector", "distinct counts with bounds; class per key", *blue),
-                    box("Prometheus", "query: method=&quot;sketch&quot;", *backend)])
+                    box("prometheus-sketch", "query: the stored counts", *backend)])
             + flow([box("exact-generator-a/b", "same points", *orange),
                     box("exact-branch-a/b", "value &rarr; count map per key per 1-min window", *orange),
                     box("exact-merge", "adds both sources&#39; maps: every value", *orange),
                     box("exact-detector", "exact distinct counts and classes", *orange),
-                    box("Prometheus", "query: method=&quot;exact&quot;", *backend)])
+                    box("prometheus-exact", "query: the stored counts", *backend)])
             + flow([box("raw-generator-a/b", "same points", *grey),
-                    box("raw-sink-a/b", "the only stage: every point into the log store", *grey),
-                    box("loki-raw", "stores every raw point", *grey),
-                    box("query-job", "LogQL distinct count per key once per window", *grey),
-                    box("Prometheus", "answer: method=&quot;raw&quot;", *backend)])
+                    box("raw-sink-a/b", "the only stage: forwards every point", *grey),
+                    box("prometheus-raw", "stores every raw point, one sample each", *grey),
+                    box("query-job", "PromQL distinct count per key once per window; classes", *grey)])
             + "</table>"
             "<p style=\"margin:4px 0 0 0\"><small>Every stage is one pinned container. Four attributes: "
             "<code>http.route</code> and <code>http.method</code> stable, <code>k8s.pod.name</code> growing 5%/min, "
             "<code>user.id</code> unique per point. Traffic grows over 30 minutes: the rate per source doubles every "
             "5 minutes (5k to 80k points/s), and at minute 10 <code>http.route</code> explodes from 20 to 20,000 "
-            "values. query-job compares store and query with exact and times every approach&#39;s backend "
-            "query.</small></p>"
+            "values. Each approach writes to its own Prometheus; query-job compares store and query with exact "
+            "and times every approach&#39;s query.</small></p>"
             "<p style=\"margin:4px 0 0 0\"><small><b>Class</b> (per key and window, from the last 10 windows; "
             "exact and sketch use the same rules on their own counts, so a different class means the sketch's error "
             "crossed a threshold): <b>identifier-like</b> when distinct / points is at least 0.9, i.e. nearly every "
@@ -375,10 +393,10 @@ def cardinality():
     hidden = ["Time", "Value #F", "Value #G", "Value #H"] + [f"Time {i}" for i in range(1, 9)]
     add({"type": "table", "title": "Distinct values per attribute key, latest window store and query answered",
          "description": "All from the latest window store and query has answered (query-job republishes sketch and "
-                        "exact for it), which lags behind when the log store is slow; the panel on the right shows "
+                        "exact for it), which lags behind when prometheus-raw is slow; the panel on the right shows "
                         "which window. Error is (count - exact) / exact; when one method's window holds more than 1% fewer points than the other's (a source missed its merge), that method's count and class are left empty, and so are the errors that compare with it. Class: the detector's verdict from the last 10 windows "
-                        "(stable, growing, identifier-like). Store+query refused because: why Loki refused, timed out "
-                        "or returned nothing for the key's LogQL query, which leaves its count empty.",
+                        "(stable, growing, identifier-like). Store+query refused because: why prometheus-raw refused, "
+                        "timed out or returned nothing for the key's PromQL query, which leaves its count empty.",
          "datasource": PROM,
          "targets": [{"refId": chr(65 + i), "expr": e, "format": "table", "instant": True}
                      for i, e in enumerate(compare)],
@@ -398,10 +416,7 @@ def cardinality():
                                                {"id": "decimals", "value": 2})]}}, 20, 7, 0)
     window_compared(7)
     y += 7
-    add({"type": "logs", "title": "Class changes (Loki events from both detectors)", "datasource": LOKI,
-         "targets": [{"refId": "A", "expr": '{service_name="asap-detector"} | event_kind="cardinality"'}],
-         "options": {"showTime": True, "wrapLogMessage": True, "sortOrder": "Descending"}}, 24, 8, 0)
-    y += 8
+    events("cardinality", "Class changes (events of all three approaches, from Prometheus)")
 
     row("Accuracy against exact")
     ex = 'max by (attribute_key) (asap_distinct{method="exact"})'
@@ -418,7 +433,7 @@ def cardinality():
              "{{attribute_key}}")],
            unit="percentunit", x=12 * i,
            desc="|estimate - exact| / exact per window." + (
-               " Store and query is exact while every point reaches the log store." if method == "raw" else ""))
+               " Store and query is exact while every point reaches prometheus-raw." if method == "raw" else ""))
     y += 8
 
     row("Traffic over time: volume and shape")
@@ -427,8 +442,8 @@ def cardinality():
          "{{method}}"),
         ('sum(last_over_time(asap_points{method="raw"}[2m])) / 60', "store and query")],
        unit="short", desc="Both sources together. The generators skip batches a pipeline cannot take, so a "
-       "pipeline that falls behind delivers less. Store and query: points loki-raw acknowledged within 50 s of the "
-       "window's end. A pipeline that stops reporting shows a gap after 2 minutes.", names=("sketch", "exact", "store and query"))
+       "pipeline that falls behind delivers less. Store and query: points prometheus-raw acknowledged within 50 s of "
+       "the window's end. A pipeline that stops reporting shows a gap after 2 minutes.", names=("sketch", "exact", "store and query"))
     ts("Data shape: distinct values per key per window (exact), log scale",
        [('max by (attribute_key) (asap_distinct{method="exact"})', "{{attribute_key}}")], unit="short", x=12,
        log=True)
@@ -436,7 +451,8 @@ def cardinality():
 
 
 {"topk": topk, "cardinality": cardinality}[USE_CASE]()
-freshness({"topk": "LogQL top-k query", "cardinality": "LogQL distinct counts (one query per key)"}[USE_CASE])
+latency_and_freshness({"topk": "one PromQL top-k query",
+                       "cardinality": "one PromQL distinct count per key, summed"}[USE_CASE])
 resources()
 TITLES = {"topk": "Heavy hitters: sketch vs exact vs store and query (real collector containers)",
           "cardinality": "Cardinality: sketch vs exact vs store and query (real collector containers)"}

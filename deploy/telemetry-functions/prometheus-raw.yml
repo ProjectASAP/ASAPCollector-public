@@ -1,0 +1,14 @@
+# Prometheus of the raw pipeline (store and query): every raw point arrives
+# here over OTLP from raw-sink-a/b, one sample per point, and the query job
+# answers from it with PromQL. It scrapes nothing.
+global:
+  scrape_interval: 5s
+otlp:
+  # The two sources send the same series; their resource attribute `source`
+  # keeps them apart.
+  promote_resource_attributes: [source]
+storage:
+  tsdb:
+    # raw-sink keeps 4 requests in flight, so a series' samples can arrive
+    # slightly out of order.
+    out_of_order_time_window: 30m

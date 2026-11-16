@@ -1,6 +1,6 @@
 # One Grafana for every demo (http://localhost:${GRAFANA_PORT:-3000}). Each use case's
-# dashboard reads the Prometheus and Loki of its own demo (`tf-<use case>-prometheus-1`,
-# `tf-<use case>-loki-1`); run.sh connects this container to a demo's network when it
+# dashboard reads the monitoring Prometheus of its own demo (`tf-<use case>-prometheus-1`);
+# run.sh connects this container to a demo's network when it
 # starts the demo.
 services:
   grafana:

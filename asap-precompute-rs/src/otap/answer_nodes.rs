@@ -32,9 +32,6 @@ use serde::Deserialize;
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{
     AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
 };
-use otel_arrow_dfe_pdata::proto::opentelemetry::logs::v1::{
-    LogRecord, LogsData, ResourceLogs, ScopeLogs, SeverityNumber,
-};
 use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
     Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics,
 };
@@ -248,47 +245,30 @@ pub(super) fn gauges_pdata(envs: &[SketchEnvelope]) -> Result<OtapPdata, String>
     Ok(OtapPdata::new_todo_context(payload))
 }
 
-/// Detection events as OTLP log records (for Loki or any log backend).
-fn events_pdata(events: &[Event]) -> Result<OtapPdata, String> {
-    let records = events
+/// Detection events as `asap.event` gauges (value 1 at the window's end),
+/// labelled `method`, `kind`, the event's attributes and `message` (one
+/// readable sentence), so the metrics store that holds the answers holds the
+/// events too.
+pub(super) fn event_gauges(events: &[Event]) -> Vec<SketchEnvelope> {
+    events
         .iter()
         .map(|e| {
-            let mut attributes = vec![
-                OtlpKeyValue::new("event.kind", AnyValue::new_string(e.kind.clone())),
-                OtlpKeyValue::new("method", AnyValue::new_string(e.method.clone())),
+            let mut labels = vec![
+                KeyValue::new("method", e.method.clone()),
+                KeyValue::new("kind", e.kind.clone()),
+                KeyValue::new("message", e.body.clone()),
             ];
-            attributes.extend(e.attributes.iter().map(|kv| {
-                OtlpKeyValue::new(kv.key.clone(), AnyValue::new_string(kv.value.clone()))
-            }));
-            LogRecord::build()
-                .time_unix_nano(e.window_end_ms * 1_000_000)
-                .observed_time_unix_nano(e.window_end_ms * 1_000_000)
-                .severity_number(SeverityNumber::Info)
-                .severity_text("INFO")
-                // The method is part of the line: Loki drops a second entry with
-                // the same stream, timestamp and line, and sketch and exact events
-                // can otherwise read the same.
-                .body(AnyValue::new_string(format!("[{}] {}", e.method, e.body)))
-                .attributes(attributes)
-                .finish()
+            labels.extend(e.attributes.iter().cloned());
+            SketchEnvelope {
+                labels,
+                metric_name: "asap.event".into(),
+                window_start_ms: e.window_end_ms,
+                window_end_ms: e.window_end_ms,
+                value: 1.0,
+                ..Default::default()
+            }
         })
-        .collect::<Vec<_>>();
-    let data = LogsData::new(vec![ResourceLogs::new(
-        Resource::build()
-            .attributes(vec![OtlpKeyValue::new(
-                "service.name",
-                AnyValue::new_string("asap-detector"),
-            )])
-            .finish(),
-        vec![ScopeLogs::new(
-            InstrumentationScope::build().name("asap.events").finish(),
-            records,
-        )],
-    )]);
-    let payload: OtapPayload = OtlpProtoMessage::Logs(data)
-        .try_into()
-        .map_err(|e| format!("{e:?}"))?;
-    Ok(OtapPdata::new_todo_context(payload))
+        .collect()
 }
 
 pub(super) async fn emit(
@@ -296,22 +276,14 @@ pub(super) async fn emit(
     events: &[Event],
     effects: &mut local::EffectHandler<OtapPdata>,
 ) -> Result<(), Error> {
-    if !envs.is_empty() {
-        let envs = with_delay(envs, now_ms());
-        match gauges_pdata(&envs) {
-            Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
-            Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
-        }
+    if envs.is_empty() && events.is_empty() {
+        return Ok(());
     }
-    if !events.is_empty() {
-        match events_pdata(events) {
-            Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
-            Err(e) => {
-                effects
-                    .info(&format!("answers: event encode failed: {e}"))
-                    .await
-            }
-        }
+    let mut envs = with_delay(envs, now_ms());
+    envs.extend(event_gauges(events));
+    match gauges_pdata(&envs) {
+        Ok(pdata) => effects.send_message_with_source_node(pdata).await?,
+        Err(e) => effects.info(&format!("answers: encode failed: {e}")).await,
     }
     Ok(())
 }

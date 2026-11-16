@@ -717,7 +717,7 @@ mod tests {
     }
 }
 
-/// A detection result worth telling a person about, emitted as a log record.
+/// A detection result worth telling a person about, emitted as an `asap.event` gauge.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Event {
     /// Window the event refers to.

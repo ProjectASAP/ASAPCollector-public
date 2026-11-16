@@ -13,8 +13,13 @@
 //! * `urn:asap:processor:exact_detector` computes each merged window's exact
 //!   answers and events, with `method="exact"`: the ground truth.
 //! * `urn:asap:processor:raw_sink` ends the raw pipeline, which only forwards
-//!   raw points: it writes every point as one log record to a store through
-//!   its `logs` output and watches the store's acknowledgements. Once its
+//!   raw points: it writes every point unchanged as one Gauge sample to a
+//!   metrics store (Prometheus) through its `metrics` output and watches the
+//!   store's acknowledgements. A metrics store keeps one sample per series and
+//!   millisecond, and the points of a generator batch share one timestamp, so
+//!   each point also gets a `point_slot` label: 0 for the first point of its
+//!   series at that millisecond, 1 for the second, and so on. No point is
+//!   dropped, and a query sums over `point_slot`. Once its
 //!   source has sent a point past a window's end (or `grace` after the end if
 //!   the source idles) and the store answered every message of the window,
 //!   it reports on its `latency` output when the store
@@ -34,7 +39,7 @@
 //!   config: {quantiles: [0.5, 0.99], k: 10}
 //! raw_sink:
 //!   type: urn:asap:processor:raw_sink
-//!   outputs: [logs, latency]
+//!   outputs: [metrics, latency]
 //!   config: {window: 60s, grace: 5s}
 //! ```
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -61,8 +66,8 @@ use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::{
     AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue,
 };
-use otel_arrow_dfe_pdata::proto::opentelemetry::logs::v1::{
-    LogRecord, LogsData, ResourceLogs, ScopeLogs,
+use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::{
+    Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics,
 };
 use otel_arrow_dfe_pdata::proto::opentelemetry::resource::v1::Resource;
 use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
@@ -91,8 +96,10 @@ pub const EXACT_MERGE_URN: &str = "urn:asap:processor:exact_merge";
 pub const EXACT_DETECTOR_URN: &str = "urn:asap:processor:exact_detector";
 /// Registered URN of the raw pipeline's sink.
 pub const RAW_SINK_URN: &str = "urn:asap:processor:raw_sink";
-/// `raw_sink` output with the log records for the store.
-const LOGS_PORT: &str = "logs";
+/// `raw_sink` output with the raw points for the store.
+const METRICS_PORT: &str = "metrics";
+/// Label telling apart the points of one series at the same millisecond.
+pub const POINT_SLOT_LABEL: &str = "point_slot";
 /// `raw_sink` output with the latency gauges.
 const LATENCY_PORT: &str = "latency";
 
@@ -560,14 +567,18 @@ struct RawSink {
     emitted_until: u64,
     /// Latest event time (ms) the source has sent.
     sent_until_ms: u64,
+    /// Points already sent per (millisecond, series), for `point_slot`; only
+    /// the last few seconds are kept.
+    slots: HashMap<(u64, String), u32>,
     timer_started: bool,
 }
 
-/// One log record per raw point: event time, the value as the body, the
-/// point's attributes.
-fn logs_pdata(points: &[Observation]) -> Result<OtapPdata, String> {
-    let mut by_resource: BTreeMap<Vec<(String, String)>, Vec<LogRecord>> = BTreeMap::new();
-    for p in points {
+/// Every raw point as one Gauge sample with its event time, value, resource
+/// and attributes, plus `point_slot` from `slots` (one per point, in order).
+fn metrics_pdata(points: &[Observation], slots: &[u32]) -> Result<OtapPdata, String> {
+    type ByMetric = BTreeMap<String, Vec<NumberDataPoint>>;
+    let mut by_resource: BTreeMap<Vec<(String, String)>, ByMetric> = BTreeMap::new();
+    for (p, slot) in points.iter().zip(slots) {
         let resource = p
             .resource_labels
             .iter()
@@ -577,38 +588,89 @@ fn logs_pdata(points: &[Observation]) -> Result<OtapPdata, String> {
             .labels
             .iter()
             .map(|kv| OtlpKeyValue::new(kv.key.clone(), AnyValue::new_string(kv.value.clone())))
+            .chain([OtlpKeyValue::new(
+                POINT_SLOT_LABEL,
+                AnyValue::new_string(slot.to_string()),
+            )])
             .collect();
-        by_resource.entry(resource).or_default().push(
-            LogRecord::build()
-                .time_unix_nano(p.timestamp_ms * 1_000_000)
-                .body(AnyValue::new_double(p.value.float))
-                .attributes(attributes)
-                .finish(),
-        );
+        by_resource
+            .entry(resource)
+            .or_default()
+            .entry(p.metric.clone())
+            .or_default()
+            .push(
+                NumberDataPoint::build()
+                    .time_unix_nano(p.timestamp_ms * 1_000_000)
+                    .value_double(p.value.float)
+                    .attributes(attributes)
+                    .finish(),
+            );
     }
-    let resource_logs: Vec<ResourceLogs> = by_resource
+    let resource_metrics: Vec<ResourceMetrics> = by_resource
         .into_iter()
-        .map(|(resource, records)| {
+        .map(|(resource, by_metric)| {
             let attributes: Vec<OtlpKeyValue> = resource
                 .into_iter()
                 .map(|(k, v)| OtlpKeyValue::new(k, AnyValue::new_string(v)))
                 .collect();
-            ResourceLogs::new(
+            let metrics: Vec<Metric> = by_metric
+                .into_iter()
+                .map(|(name, points)| {
+                    Metric::build()
+                        .name(name)
+                        .data_gauge(Gauge::new(points))
+                        .finish()
+                })
+                .collect();
+            ResourceMetrics::new(
                 Resource::build().attributes(attributes).finish(),
-                vec![ScopeLogs::new(
+                vec![ScopeMetrics::new(
                     InstrumentationScope::build().name("asap.raw").finish(),
-                    records,
+                    metrics,
                 )],
             )
         })
         .collect();
-    let payload: OtapPayload = OtlpProtoMessage::Logs(LogsData::new(resource_logs))
+    let payload: OtapPayload = OtlpProtoMessage::Metrics(MetricsData::new(resource_metrics))
         .try_into()
         .map_err(|e| format!("{e:?}"))?;
     Ok(OtapPdata::new_todo_context(payload))
 }
 
+/// Identity of a point's series in the store: metric, resource and attributes.
+fn raw_series(p: &Observation) -> String {
+    let mut resource: Vec<_> = p
+        .resource_labels
+        .iter()
+        .map(|kv| (&kv.key, &kv.value))
+        .collect();
+    let mut labels: Vec<_> = p.labels.iter().map(|kv| (&kv.key, &kv.value)).collect();
+    resource.sort();
+    labels.sort();
+    format!("{}|{resource:?}|{labels:?}", p.metric)
+}
+
 impl RawSink {
+    /// `point_slot` of every point, in order: how many points of the same
+    /// series at the same millisecond came before it.
+    fn assign_slots(&mut self, points: &[Observation]) -> Vec<u32> {
+        let slots = points
+            .iter()
+            .map(|p| {
+                let next = self
+                    .slots
+                    .entry((p.timestamp_ms, raw_series(p)))
+                    .or_insert(0);
+                *next += 1;
+                *next - 1
+            })
+            .collect();
+        // Points arrive in time order: older milliseconds get no more points.
+        let horizon = self.sent_until_ms.saturating_sub(10_000);
+        self.slots.retain(|(ms, _), _| *ms >= horizon);
+        slots
+    }
+
     /// Registers a message about to go to the store; returns its id.
     fn send(&mut self, points: &[Observation]) -> u64 {
         let size = self.config.window.as_millis().max(1) as u64;
@@ -753,13 +815,14 @@ impl local::Processor<OtapPdata> for RawSink {
                 if points.is_empty() {
                     return Ok(());
                 }
-                match logs_pdata(&points) {
-                    Ok(mut logs) => {
+                let slots = self.assign_slots(&points);
+                match metrics_pdata(&points, &slots) {
+                    Ok(mut raw) => {
                         let id = self.send(&points);
                         let calldata = CallData::from_vec(vec![Context8u8::from(id)]);
-                        effects.subscribe_to(Interests::ACKS_OR_NACKS, calldata, &mut logs);
+                        effects.subscribe_to(Interests::ACKS_OR_NACKS, calldata, &mut raw);
                         effects
-                            .send_message_to(LOGS_PORT, logs)
+                            .send_message_to(METRICS_PORT, raw)
                             .await
                             .map_err(Error::from)?;
                     }
@@ -904,6 +967,7 @@ static RAW_SINK: ProcessorFactory<OtapPdata> = ProcessorFactory {
                 next_id: 0,
                 emitted_until: 0,
                 sent_until_ms: 0,
+                slots: HashMap::new(),
                 timer_started: false,
             },
             node,
@@ -1073,6 +1137,7 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
+            slots: HashMap::new(),
             timer_started: false,
         };
         let stored = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
@@ -1103,6 +1168,7 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
+            slots: HashMap::new(),
             timer_started: false,
         };
         let last = raw.send(&[point(59_900, "/a", "u1", 1.0)]);
@@ -1135,6 +1201,7 @@ mod tests {
             next_id: 0,
             emitted_until: 0,
             sent_until_ms: 0,
+            slots: HashMap::new(),
             timer_started: false,
         };
         let first = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
@@ -1156,5 +1223,30 @@ mod tests {
             get(&out, "asap.raw.transit", ("quantile", "0.99")),
             Some(1.3)
         );
+    }
+
+    #[test]
+    fn raw_sink_gives_points_of_one_series_and_millisecond_their_own_slot() {
+        let mut raw = RawSink {
+            config: serde_json::from_value(serde_json::json!({})).unwrap(),
+            windows: BTreeMap::new(),
+            in_flight: HashMap::new(),
+            next_id: 0,
+            emitted_until: 0,
+            sent_until_ms: 0,
+            slots: HashMap::new(),
+            timer_started: false,
+        };
+        let batch = [
+            point(1_000, "/a", "u0", 1.0),
+            point(1_000, "/a", "u0", 2.0),
+            point(1_000, "/b", "u0", 3.0),
+            point(1_000, "/a", "u0", 4.0),
+        ];
+        assert_eq!(raw.assign_slots(&batch), vec![0, 1, 0, 2]);
+        // A later message at the same millisecond continues the count.
+        assert_eq!(raw.assign_slots(&batch[..1]), vec![3]);
+        assert_eq!(raw.assign_slots(&[point(1_001, "/a", "u0", 1.0)]), vec![0]);
+        assert!(metrics_pdata(&batch, &[0, 1, 0, 2]).is_ok());
     }
 }
