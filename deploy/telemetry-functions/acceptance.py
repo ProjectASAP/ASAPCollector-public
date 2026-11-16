@@ -192,8 +192,9 @@ def cardinality_checks(stack, t):
     yield check("identifier and stable keys classified as generated",
                 all(state.get((k, m)) == s for k, s in want.items() for m in ("sketch", "exact")), str(want))
     grew = stack.vector('max_over_time(asap_cardinality_state{state="growing",attribute_key="k8s.pod.name"}[10m])')
-    yield check("growing key (k8s.pod.name) classified growing by both",
-                {m["method"] for m, v in grew if v == 1} == {"sketch", "exact"},
+    # Raw has no detector: the query job applies the same rules to its answers.
+    yield check("growing key (k8s.pod.name) classified growing by all three",
+                {m["method"] for m, v in grew if v == 1} == {"sketch", "exact", "raw"},
                 f"growing seen by {sorted(m['method'] for m, v in grew if v == 1)}")
     distinct = {(m["attribute_key"], m["method"]): v
                 for m, v in stack.vector(f'asap_distinct{{bound=~"estimate|"}} @ {t}')}
