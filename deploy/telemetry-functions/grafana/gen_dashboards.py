@@ -157,8 +157,8 @@ def topk():
             ("Query: compute the top 20 of the last 5 minutes", "query-job")], "topk(20, sum by (client_address) (count_over_time(http_server_request_duration[5m])))"),
     ], ["Same input for all three. The rate per source ramps up and back down every 40 minutes, again and again "
         "(5k, 10k, 20k, 40k, 80k, 40k, 20k, 10k points/s, 5 minutes each). Requests come from client addresses drawn "
-        "Zipf(1.0) over 20 million IPv4 addresses: about 1 million distinct per 5 minutes at the lowest rate, about 7 "
-        "million at the highest. Once: a new client, <code>203.0.113.7</code>, takes 15% of traffic at minute 10. Every step is one container pinned to one CPU; each "
+        "Zipf(1.1) over 100,000 IPv4 addresses. Once: a new client, <code>203.0.113.7</code>, takes 15% of traffic at "
+        "minute 10, and the number of addresses grows from 100,000 to 1,000,000 at minute 15. Every step is one container pinned to one CPU; each "
         "approach has its own Prometheus.",
         "Raw adds a <code>point_slot</code> label so points of one client address in the same millisecond stay separate "
         "samples (Prometheus keeps one sample per series and millisecond). hh-accuracy compares Sketch with Exact; "

@@ -1,9 +1,9 @@
-# Source b: requests from client addresses (IPv4) drawn Zipf(1.0) over 20
-# million addresses, the "top talkers" question: about 1 million distinct
-# addresses per 5 minutes at the lowest rate, about 7 million at the highest.
-# The rate per source ramps up and back down every 40 minutes, again and again:
-# 5k -> 10k -> 20k -> 40k -> 80k -> 40k -> 20k -> 10k points/s, 5 minutes each.
-# Once: a new client (203.0.113.7) takes 15% of traffic at minute 10.
+# Source b: requests from client addresses (IPv4) drawn Zipf(1.1), the "top
+# talkers" question. The rate per source ramps up and back down every 40
+# minutes, again and again: 5k -> 10k -> 20k -> 40k -> 80k -> 40k -> 20k -> 10k
+# points/s, 5 minutes each. Once: a new client (203.0.113.7) takes 15% of
+# traffic at minute 10, and the number of addresses grows from 100,000 to
+# 1,000,000 at minute 15.
 version: otel_dataflow/v1
 engine:
   http_admin:
@@ -26,7 +26,7 @@ groups:
               metric_name: http.server.request.duration
               resource_attributes: {service.name: checkout, source: "b"}
               attributes:
-                - {key: client.address, cardinality: 20000000, zipf: 1.0, ipv4: true}
+                - {key: client.address, cardinality: 100000, zipf: 1.1, ipv4: true}
               value: {lognormal: {median: 50.0, sigma: 0.6}}
               # The rate ramps up and back down every 40 minutes, again and again.
               rate_cycle_seconds: 2400
@@ -39,6 +39,7 @@ groups:
                 - {after_seconds: 1500, signals_per_second: 40000}
                 - {after_seconds: 1800, signals_per_second: 20000}
                 - {after_seconds: 2100, signals_per_second: 10000}
+                - {after_seconds: 900, attribute: client.address, cardinality: 1000000}
           export:
             type: exporter:otlp_http
             config:
