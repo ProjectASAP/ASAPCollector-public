@@ -349,11 +349,16 @@ def resources():
     bars("Memory: whole approach",
          [(name, mem(whole(ingest, after), procs)) for name, _, ingest, after, procs in APPROACHES],
          "bytes", "Resident memory of every component of the approach, its Prometheus included.", 12, 0)
-    bars("Network after ingest: bits per second into merge and detector",
-         [(name, f'sum(rate(payload_size_bytes_total{{job="collectors",stage=~"{after}",'
-                 f'otel_scope_node_type="receiver"}}[2m])) * 8') for name, _, _, after, _ in APPROACHES if after],
-         "bps", "What the sources ship after ingest: sketches (sketch) or exact maps (exact). Store and query ships "
-         "raw points straight into prometheus-raw.", 12, 12)
+    received = lambda stages: (f'sum(rate(payload_size_bytes_total{{job="collectors",stage=~"{stages}",'
+                               f'otel_scope_node_type="receiver"}}[2m])) * 8')
+    bars("Network: total bits per second of the whole approach",
+         [(name, total(received(whole(ingest, after)),
+                       *(['sum(rate(asap_raw_sent_bytes{method="raw"}[3m])) * 8'] if name == "store and query" else [])))
+          for name, _, ingest, after, _ in APPROACHES],
+         "bps", "Every hop of the approach: the raw points from the generators into its first stage, then "
+         "sketch and exact: sketches / exact maps into merge and merged windows into detector; store and query: "
+         "every raw point from raw-sink into prometheus-raw. The answers into the approach's Prometheus (a few "
+         "kilobytes per window) are not counted.", 12, 12)
     y += 7
 
 

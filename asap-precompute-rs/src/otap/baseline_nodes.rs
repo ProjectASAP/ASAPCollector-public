@@ -25,7 +25,8 @@
 //!   it reports on its `latency` output when the store
 //!   acknowledged the window's last point (`asap.answer.delay`,
 //!   `method="raw"`), the per-point time from event to acknowledgement
-//!   (`asap.raw.transit`) and rejected points (`asap.raw.failed`).
+//!   (`asap.raw.transit`), rejected points (`asap.raw.failed`) and the running
+//!   total of bytes sent to the store (`asap.raw.sent.bytes`).
 //!
 //! ```yaml
 //! exact_branch:
@@ -573,6 +574,8 @@ struct RawSink {
     /// `point_slot`; milliseconds older than `grace` before the latest are
     /// dropped.
     slots: BTreeMap<u64, HashMap<u64, u32>>,
+    /// Encoded bytes of every message sent to the store so far.
+    sent_bytes: u64,
     timer_started: bool,
 }
 
@@ -796,6 +799,8 @@ impl RawSink {
             ));
             out.push(metric("asap.points", &[], w.transit_s.len() as f64));
             out.push(metric("asap.raw.failed", &[], w.failed as f64));
+            // Running total, so `rate()` gives the bytes per second into the store.
+            out.push(metric("asap.raw.sent.bytes", &[], self.sent_bytes as f64));
             if !w.transit_s.is_empty() {
                 w.transit_s.sort_unstable_by(f64::total_cmp);
                 let at =
@@ -840,6 +845,7 @@ impl local::Processor<OtapPdata> for RawSink {
                 let slots = self.assign_slots(&points);
                 match metrics_pdata(&points, &slots) {
                     Ok(mut raw) => {
+                        self.sent_bytes += raw.num_bytes().unwrap_or(0) as u64;
                         let id = self.send(&points);
                         let calldata = CallData::from_vec(vec![Context8u8::from(id)]);
                         effects.subscribe_to(Interests::ACKS_OR_NACKS, calldata, &mut raw);
@@ -990,6 +996,7 @@ static RAW_SINK: ProcessorFactory<OtapPdata> = ProcessorFactory {
                 emitted_until: 0,
                 sent_until_ms: 0,
                 slots: BTreeMap::new(),
+                sent_bytes: 0,
                 timer_started: false,
             },
             node,
@@ -1160,6 +1167,7 @@ mod tests {
             emitted_until: 0,
             sent_until_ms: 0,
             slots: BTreeMap::new(),
+            sent_bytes: 0,
             timer_started: false,
         };
         let stored = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
@@ -1191,6 +1199,7 @@ mod tests {
             emitted_until: 0,
             sent_until_ms: 0,
             slots: BTreeMap::new(),
+            sent_bytes: 0,
             timer_started: false,
         };
         let last = raw.send(&[point(59_900, "/a", "u1", 1.0)]);
@@ -1224,6 +1233,7 @@ mod tests {
             emitted_until: 0,
             sent_until_ms: 0,
             slots: BTreeMap::new(),
+            sent_bytes: 0,
             timer_started: false,
         };
         let first = raw.send(&[point(10_000, "/a", "u0", 1.0)]);
@@ -1257,6 +1267,7 @@ mod tests {
             emitted_until: 0,
             sent_until_ms: 0,
             slots: BTreeMap::new(),
+            sent_bytes: 0,
             timer_started: false,
         };
         let batch = [

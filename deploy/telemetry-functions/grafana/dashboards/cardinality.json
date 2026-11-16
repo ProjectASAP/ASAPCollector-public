@@ -1244,23 +1244,29 @@
     },
     {
       "type": "bargauge",
-      "title": "Network after ingest: bits per second into merge and detector",
+      "title": "Network: total bits per second of the whole approach",
       "datasource": {
         "type": "prometheus",
         "uid": "asap-prometheus-cardinality"
       },
-      "description": "What the sources ship after ingest: sketches (sketch) or exact maps (exact). Store and query ships raw points straight into prometheus-raw.",
+      "description": "Every hop of the approach: the raw points from the generators into its first stage, then sketch and exact: sketches / exact maps into merge and merged windows into detector; store and query: every raw point from raw-sink into prometheus-raw. The answers into the approach's Prometheus (a few kilobytes per window) are not counted.",
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"merge|detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
+          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"branch-.|merge|detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0))",
           "legendFormat": "sketch",
           "instant": true
         },
         {
           "refId": "B",
-          "expr": "sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"exact-merge|exact-detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8",
+          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"exact-branch-.|exact-merge|exact-detector\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0))",
           "legendFormat": "exact",
+          "instant": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(payload_size_bytes_total{job=\"collectors\",stage=~\"raw-sink-.\",otel_scope_node_type=\"receiver\"}[2m])) * 8 or vector(0)) + (sum(rate(asap_raw_sent_bytes{method=\"raw\"}[3m])) * 8 or vector(0))",
+          "legendFormat": "store and query",
           "instant": true
         }
       ],
