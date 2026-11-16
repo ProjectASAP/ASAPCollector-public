@@ -214,7 +214,6 @@ def topk():
              "fieldConfig": {"defaults": {"decimals": 0, "color": {"mode": "fixed", "fixedColor": COLORS[method]}},
                              "overrides": []}}, 8, 10, 8 * i)
     y += 10
-    events("novelty", "New heavy hitters (events of all three approaches, from Prometheus)")
 
     row("Accuracy against exact")
     ts("Heavy hitters (routes with >= 1% of the window's points): precision, recall, F1",

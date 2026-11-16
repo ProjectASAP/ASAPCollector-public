@@ -448,98 +448,6 @@
       "id": 7
     },
     {
-      "type": "table",
-      "title": "New heavy hitters (events of all three approaches, from Prometheus)",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "asap-prometheus-topk"
-      },
-      "description": "Detectors (sketch, exact) and the query job (store and query) write each event as an asap_event gauge whose value is its window's end. Newest first.",
-      "targets": [
-        {
-          "refId": "A",
-          "format": "table",
-          "instant": true,
-          "expr": "last_over_time(asap_event{kind=\"novelty\"}[$__range]) * 1000"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "includeByName": {
-              "Value": true,
-              "method": true,
-              "message": true
-            },
-            "indexByName": {
-              "Value": 0,
-              "method": 1,
-              "message": 2
-            },
-            "renameByName": {
-              "Value": "Window end",
-              "method": "Approach",
-              "message": "Event"
-            }
-          }
-        }
-      ],
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          {
-            "displayName": "Window end",
-            "desc": true
-          }
-        ]
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto"
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Window end"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "dateTimeAsIso"
-              },
-              {
-                "id": "custom.width",
-                "value": 190
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Approach"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 100
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 33
-      },
-      "id": 8
-    },
-    {
       "type": "row",
       "title": "Accuracy against exact",
       "collapsed": false,
@@ -548,9 +456,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 33
       },
-      "id": 9
+      "id": 8
     },
     {
       "type": "timeseries",
@@ -615,9 +523,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 42
+        "y": 34
       },
-      "id": 10
+      "id": 9
     },
     {
       "type": "timeseries",
@@ -694,9 +602,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 42
+        "y": 34
       },
-      "id": 11
+      "id": 10
     },
     {
       "type": "row",
@@ -707,9 +615,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 50
+        "y": 42
       },
-      "id": 12
+      "id": 11
     },
     {
       "type": "timeseries",
@@ -801,9 +709,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 51
+        "y": 43
       },
-      "id": 13
+      "id": 12
     },
     {
       "type": "timeseries",
@@ -844,9 +752,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 51
+        "y": 43
       },
-      "id": 14
+      "id": 13
     },
     {
       "type": "row",
@@ -857,9 +765,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 59
+        "y": 51
       },
-      "id": 15
+      "id": 14
     },
     {
       "type": "timeseries",
@@ -931,9 +839,9 @@
         "h": 9,
         "w": 8,
         "x": 0,
-        "y": 60
+        "y": 52
       },
-      "id": 16
+      "id": 15
     },
     {
       "type": "timeseries",
@@ -1036,9 +944,9 @@
         "h": 9,
         "w": 8,
         "x": 8,
-        "y": 60
+        "y": 52
       },
-      "id": 17
+      "id": 16
     },
     {
       "type": "timeseries",
@@ -1110,9 +1018,9 @@
         "h": 9,
         "w": 8,
         "x": 16,
-        "y": 60
+        "y": 52
       },
-      "id": 18
+      "id": 17
     },
     {
       "type": "timeseries",
@@ -1179,9 +1087,9 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 69
+        "y": 61
       },
-      "id": 19
+      "id": 18
     },
     {
       "type": "timeseries",
@@ -1248,9 +1156,9 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 69
+        "y": 61
       },
-      "id": 20
+      "id": 19
     },
     {
       "type": "timeseries",
@@ -1302,9 +1210,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 69
+        "y": 61
       },
-      "id": 21
+      "id": 20
     },
     {
       "type": "row",
@@ -1315,9 +1223,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 77
+        "y": 69
       },
-      "id": 22
+      "id": 21
     },
     {
       "type": "timeseries",
@@ -1366,9 +1274,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 78
+        "y": 70
       },
-      "id": 23
+      "id": 22
     },
     {
       "type": "timeseries",
@@ -1417,9 +1325,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 78
+        "y": 70
       },
-      "id": 24
+      "id": 23
     },
     {
       "type": "timeseries",
@@ -1468,9 +1376,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 78
+        "y": 70
       },
-      "id": 25
+      "id": 24
     },
     {
       "type": "timeseries",
@@ -1519,9 +1427,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 90
+        "y": 82
       },
-      "id": 26
+      "id": 25
     },
     {
       "type": "timeseries",
@@ -1570,9 +1478,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 90
+        "y": 82
       },
-      "id": 27
+      "id": 26
     },
     {
       "type": "timeseries",
@@ -1621,9 +1529,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 90
+        "y": 82
       },
-      "id": 28
+      "id": 27
     },
     {
       "type": "timeseries",
@@ -1670,9 +1578,9 @@
         "h": 12,
         "w": 8,
         "x": 0,
-        "y": 102
+        "y": 94
       },
-      "id": 29
+      "id": 28
     },
     {
       "type": "timeseries",
@@ -1719,9 +1627,9 @@
         "h": 12,
         "w": 8,
         "x": 8,
-        "y": 102
+        "y": 94
       },
-      "id": 30
+      "id": 29
     },
     {
       "type": "timeseries",
@@ -1768,9 +1676,9 @@
         "h": 12,
         "w": 8,
         "x": 16,
-        "y": 102
+        "y": 94
       },
-      "id": 31
+      "id": 30
     }
   ]
 }
