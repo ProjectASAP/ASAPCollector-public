@@ -46,18 +46,20 @@ def input_shape(title, expr, legend, desc):
     SHAPE = (title, expr, legend, desc)
 
 
-def gauges(title, exprs, desc, w, x, good_high, h=7):
-    """One gauge per series, green toward the good end (accuracy 100%, error 0%)."""
+def gauges(title, exprs, desc, w, x, good_high, h=7, limits=None):
+    """One gauge per series, green toward the good end (accuracy 100%, error 0%).
+    For errors, `limits` = (orange from, red from); default (2%, 5%)."""
+    orange, red = limits or (0.02, 0.05)
     steps = ([{"color": "red", "value": None}, {"color": "orange", "value": 0.8}, {"color": "green", "value": 0.9}]
              if good_high else
-             [{"color": "green", "value": None}, {"color": "orange", "value": 0.02}, {"color": "red", "value": 0.05}])
+             [{"color": "green", "value": None}, {"color": "orange", "value": orange}, {"color": "red", "value": red}])
     add({"type": "gauge", "title": title, "datasource": PROM, "description": desc,
          "targets": [{"refId": chr(65 + i), "expr": e, "legendFormat": legend, "instant": True}
                      for i, (e, legend) in enumerate(exprs)],
          "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
                      "showThresholdLabels": False, "showThresholdMarkers": True},
          "fieldConfig": {"defaults": {"unit": "percentunit", "decimals": 1, "min": 0,
-                                      "max": 1 if good_high else 0.1,
+                                      "max": 1 if good_high else 2 * red,
                                       "thresholds": {"mode": "absolute", "steps": steps}},
                          "overrides": []}}, w, h, x)
 
@@ -179,8 +181,9 @@ def topk():
             for m, name in (("precision", "precision"), ("recall", "recall"), ("f1", "F1"))],
            "Sketch against exact. Truth: exact counts >= 1% of the window's points.", w=16, x=0, good_high=True)
     gauges("Sketch average relative count error of the heavy hitters found (ARE)",
-           [('last_over_time(asap_hh_are{method="sketch"}[5m])', "ARE")], "Mean |estimate - exact| / exact.",
-           w=8, x=16, good_high=False)
+           [('last_over_time(asap_hh_are{method="sketch"}[5m])', "ARE")],
+           "Mean |estimate - exact| / exact. Green below 5%, orange 5% to 10%, red above 10%.",
+           w=8, x=16, good_high=False, limits=(0.05, 0.10))
     y += 7
 
     def answers():
