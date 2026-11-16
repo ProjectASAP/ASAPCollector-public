@@ -248,9 +248,9 @@ def topk():
 
 
 def timing(raw_query):
-    """One stacked bar per approach, from data generated to the query result:
-    window wait (the configured window; none for Raw), time until
-    the data is queryable, and the query."""
+    """One stacked bar per approach, from data generated to the query result
+    (5-minute range wait, time until the data is queryable, the query), and the
+    same without the shared range wait over time."""
     global y
     row("From data generated to query result (latest answer)")
     def named(e):
@@ -294,6 +294,33 @@ def timing(raw_query):
                              by_name(segments[2][0], {"id": "color", "value": {"mode": "fixed", "fixedColor": "#5794f2"}})]}},
         24, 8, 0)
     y += 8
+    add({"type": "timeseries", "title": "Time after the 5-minute range ends until the answer, over time (log scale)",
+         "datasource": PROM,
+         "description": "Data generated -> query result, minus the 5-minute wait for the range to end: that wait "
+                        "is the same for all three approaches, so it is subtracted. What is left is the time until "
+                        "the data is queryable plus the query, per answer (once a minute). The input rate (right "
+                        "axis) ramps up and down, so the chart shows how each approach scales. Log scale: the values "
+                        "go from milliseconds to minutes.",
+         "targets": [{"refId": chr(65 + i), "expr": f'max(asap_result_age_seconds{{method="{m}"}} - '
+                                                     f'asap_window_wait_seconds{{method="{m}"}})',
+                      "legendFormat": NAMES[m]}
+                     for i, m in enumerate(("sketch", "exact", "raw"))]
+                    + [{"refId": "D", "expr": 'sum(last_over_time(asap_points{method="raw"}[2m])) / 60',
+                        "legendFormat": "input points/s"}],
+         "fieldConfig": {"defaults": {"unit": "s", "custom": {"spanNulls": True, "lineWidth": 2,
+                                                              "scaleDistribution": {"type": "log", "log": 10}}},
+                         "overrides": [
+                             *[by_name(NAMES[m], {"id": "color", "value": {"mode": "fixed", "fixedColor": COLORS[m]}})
+                               for m in ("sketch", "exact", "raw")],
+                             by_name("input points/s", {"id": "unit", "value": "short"},
+                                     {"id": "custom.axisPlacement", "value": "right"},
+                                     {"id": "custom.scaleDistribution", "value": {"type": "linear"}},
+                                     {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [6, 6]}},
+                                     {"id": "custom.lineWidth", "value": 1},
+                                     {"id": "color", "value": {"mode": "fixed", "fixedColor": "#73bf69"}})]},
+         "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]},
+                     "tooltip": {"mode": "multi", "sort": "none"}}}, 24, 9, 0)
+    y += 9
 
 
 APPROACHES = [
