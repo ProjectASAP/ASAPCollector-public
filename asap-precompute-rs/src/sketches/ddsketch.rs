@@ -83,6 +83,8 @@ impl Sketch for DDSketchWrapper {
 }
 
 impl QuantileSketch for DDSketchWrapper {
+    /// `q` = 0 and 1 read the extreme buckets (within `alpha`); the sketch
+    /// keeps no exact min or max.
     fn quantile(&self, q: f64) -> f64 {
         self.sk
             .get_value_at_quantile(q.clamp(0.0, 1.0))

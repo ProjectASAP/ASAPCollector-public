@@ -17,7 +17,7 @@ pub struct CMSWrapper {
 
 impl CMSWrapper {
     /// Construct a CMS with `rows` hash rows (clamped to `1..=MATRIX_MAX_ROWS`,
-    /// the number of independent sketchlib row seeds) and `cols` columns.
+    /// the most rows an ASAPv1 payload carries) and `cols` columns.
     pub fn new(rows: usize, cols: usize) -> Self {
         Self {
             sk: Cms::with_dimensions(rows.clamp(1, MATRIX_MAX_ROWS), cols.max(1)),

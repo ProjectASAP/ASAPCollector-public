@@ -66,12 +66,23 @@ impl Sketch for KLLWrapper {
     }
 
     /// Uses sketchlib's level-aware merge so each retained item keeps its
-    /// `2^level` weight after compaction.
+    /// `2^level` weight after compaction. A payload with another `k` or `m`
+    /// is refused here, because sketchlib's `Kll::merge` panics on it.
     fn merge_snapshot(&mut self, bytes: &[u8]) -> Result<(), PrecomputeError> {
         if bytes.is_empty() {
             return Ok(());
         }
-        self.sk.merge(&Self::from_snapshot(bytes)?.sk);
+        let other = Self::from_snapshot(bytes)?.sk;
+        if (self.sk.k(), self.sk.m()) != (other.k(), other.m()) {
+            return Err(PrecomputeError::Other(format!(
+                "KLLWrapper merge: k/m mismatch: (k={}, m={}) vs (k={}, m={})",
+                self.sk.k(),
+                self.sk.m(),
+                other.k(),
+                other.m()
+            )));
+        }
+        self.sk.merge(&other);
         Ok(())
     }
 
@@ -188,5 +199,23 @@ mod tests {
         assert_eq!(target.inner().count(), source.inner().count());
         let p50 = target.quantile(0.5);
         assert!((23_000.0..=27_000.0).contains(&p50), "p50={p50}");
+    }
+
+    /// An inbound payload built with another `k` is refused with an error;
+    /// sketchlib's `Kll::merge` panics on a `k`/`m` mismatch.
+    #[test]
+    fn merge_with_different_k_returns_error() {
+        let mut source = KLLWrapper::new(100, Some(42));
+        source.update_batch((0..1_000).map(f64::from));
+        let mut target = KLLWrapper::new(200, Some(99));
+        target.update_batch((0..10).map(f64::from));
+        let problem = target
+            .merge(&source)
+            .expect_err("k mismatch must not merge");
+        assert!(
+            problem.to_string().contains("k/m mismatch"),
+            "got {problem}"
+        );
+        assert_eq!(target.inner().count(), 10);
     }
 }
