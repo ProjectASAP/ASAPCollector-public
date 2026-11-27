@@ -1,7 +1,8 @@
 //! DDSketch wrapper over [`asap_sketchlib::DdSketch`].
 //!
 //! Implements [`Sketch`] + [`QuantileSketch`]. Snapshots are sketchlib's
-//! ASAPv1 envelope (kind `0x05 0x00`).
+//! ASAPv1 envelope (kind `0x05 0x01`: the bucket stores and the zero count;
+//! sum, min and max are not part of the state).
 
 use asap_sketchlib::DdSketch;
 
