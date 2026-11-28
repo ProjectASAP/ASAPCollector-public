@@ -17,9 +17,11 @@
 //!   metrics store (Prometheus) through its `metrics` output and watches the
 //!   store's acknowledgements. A metrics store keeps one sample per series and
 //!   millisecond, and the points of a generator batch share one timestamp, so
-//!   each point also gets a `point_slot` label: 0 for the first point of its
-//!   series at that millisecond, 1 for the second, and so on. No point is
-//!   dropped, and a query sums over `point_slot`. Once its
+//!   every point after the first of its series at that millisecond gets a
+//!   `point_slot` label: 1 for the second, 2 for the third, and so on; the
+//!   first keeps its series unchanged. No point is dropped, and a query sums
+//!   over `point_slot`. Every point is forwarded as a Gauge, also one that
+//!   arrived as a Sum (counter). Once its
 //!   source has sent a point past a window's end (or `grace` after the end if
 //!   the source idles) and the store answered every message of the window,
 //!   it reports on its `latency` output when the store
@@ -602,7 +604,10 @@ struct RawSink {
 }
 
 /// Every raw point as one Gauge sample with its event time, value, resource
-/// and attributes, plus `point_slot` from `slots` (one per point, in order).
+/// and attributes, plus `point_slot` from `slots` (one per point, in order)
+/// when the slot is above 0. Points decode to plain values, so a Sum input
+/// (a counter) is forwarded as a Gauge too and loses its monotonic flag and
+/// temporality.
 fn metrics_pdata(points: &[Observation], slots: &[u32]) -> Result<OtapPdata, String> {
     type ByMetric = BTreeMap<String, Vec<NumberDataPoint>>;
     let mut by_resource: BTreeMap<Vec<(String, String)>, ByMetric> = BTreeMap::new();
@@ -612,14 +617,15 @@ fn metrics_pdata(points: &[Observation], slots: &[u32]) -> Result<OtapPdata, Str
             .iter()
             .map(|kv| (kv.key.clone(), kv.value.clone()))
             .collect();
+        // Slot 0 keeps the point's own series; only later points of the same
+        // series and millisecond need the label to stay apart.
         let attributes: Vec<OtlpKeyValue> = p
             .labels
             .iter()
             .map(|kv| OtlpKeyValue::new(kv.key.clone(), AnyValue::new_string(kv.value.clone())))
-            .chain([OtlpKeyValue::new(
-                POINT_SLOT_LABEL,
-                AnyValue::new_string(slot.to_string()),
-            )])
+            .chain((*slot > 0).then(|| {
+                OtlpKeyValue::new(POINT_SLOT_LABEL, AnyValue::new_string(slot.to_string()))
+            }))
             .collect();
         by_resource
             .entry(resource)
@@ -1312,6 +1318,40 @@ mod tests {
         let _ = raw.assign_slots(&[point(7_000, "/a", "u0", 1.0)]);
         assert_eq!(raw.slots.keys().copied().collect::<Vec<_>>(), vec![7_000]);
         assert!(metrics_pdata(&batch, &[0, 1, 0, 2]).is_ok());
+    }
+
+    #[test]
+    fn raw_sink_labels_only_points_after_the_first_of_a_millisecond() {
+        let batch = [
+            point(1_000, "/a", "u0", 1.0),
+            point(1_000, "/a", "u0", 2.0),
+            point(1_000, "/a", "u0", 3.0),
+            point(1_000, "/b", "u0", 4.0),
+        ];
+        let pdata = metrics_pdata(&batch, &[0, 1, 2, 0]).unwrap();
+        let decoded = super::super::codec::decode_pdata_to_observations(pdata).unwrap();
+        let mut slots: Vec<(f64, Option<String>)> = decoded
+            .observations
+            .iter()
+            .map(|o| {
+                let slot = o.labels.iter().find(|kv| kv.key == POINT_SLOT_LABEL);
+                (o.value.float, slot.map(|kv| kv.value.clone()))
+            })
+            .collect();
+        slots.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Slot 0 is the point's own series, unchanged: a store sees no
+        // extra label unless points of one series share a millisecond.
+        assert_eq!(
+            slots,
+            vec![
+                (1.0, None),
+                (2.0, Some("1".to_string())),
+                (3.0, Some("2".to_string())),
+                (4.0, None),
+            ]
+        );
+        let first = decoded.observations.iter().find(|o| o.value.float == 1.0);
+        assert_eq!(first.unwrap().labels, batch[0].labels);
     }
 
     #[test]
