@@ -1,7 +1,8 @@
 //! DDSketch wrapper over [`asap_sketchlib::DdSketch`].
 //!
 //! Implements [`Sketch`] + [`QuantileSketch`]. Snapshots are sketchlib's
-//! ASAPv1 envelope (kind `0x05 0x00`).
+//! ASAPv1 envelope (kind `0x05 0x01`: the bucket stores and the zero count;
+//! sum, min and max are not part of the state).
 
 use asap_sketchlib::DdSketch;
 
@@ -82,6 +83,8 @@ impl Sketch for DDSketchWrapper {
 }
 
 impl QuantileSketch for DDSketchWrapper {
+    /// `q` = 0 and 1 read the extreme buckets (within `alpha`); the sketch
+    /// keeps no exact min or max.
     fn quantile(&self, q: f64) -> f64 {
         self.sk
             .get_value_at_quantile(q.clamp(0.0, 1.0))
