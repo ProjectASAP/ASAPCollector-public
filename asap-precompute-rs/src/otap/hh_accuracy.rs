@@ -6,7 +6,12 @@
 //!
 //! Gauges, labelled with the series labels, `phi` and `method="sketch"`: `asap.hh.precision`,
 //! `asap.hh.recall`, `asap.hh.f1`, `asap.hh.are` (average relative count error
-//! over the true positives), `asap.hh.truth` and `asap.hh.reported`. A window
+//! over the true positives), `asap.hh.truth` and `asap.hh.reported`. Precision
+//! allows the sketch's error bound, read from its lower bounds (estimate minus
+//! lower bound: e / columns * points for Count-Min): a reported key is a false
+//! positive only when its exact count is below the threshold minus that bound
+//! (see [`heavy_hitter_accuracy`]). The bound scales with the sketch's points
+//! and the threshold with exact's; both pipelines see the same points. A window
 //! whose exact top-k may hide more heavy hitters (`k` entries, all above the
 //! threshold) gets only `asap.hh.incomplete`.
 //!
@@ -68,6 +73,22 @@ struct Answers {
     points: Option<f64>,
     /// `(rank, key, count)`.
     top: Vec<(u32, String, f64)>,
+    /// `(rank, lower bound)`: only the sketch reports them.
+    lower: Vec<(u32, f64)>,
+}
+
+impl Answers {
+    /// The largest estimate minus lower bound: the sketch's error bound in
+    /// points (0 without lower bounds).
+    fn overcount_bound_points(&self) -> f64 {
+        self.lower
+            .iter()
+            .filter_map(|(rank, lower)| {
+                let (_, _, estimate) = self.top.iter().find(|t| t.0 == *rank)?;
+                Some(estimate - lower)
+            })
+            .fold(0.0, f64::max)
+    }
 }
 
 /// Window end, then series labels (without `method`, `key`, `rank`, `bound`).
@@ -88,8 +109,10 @@ fn label<'a>(obs: &'a Observation, key: &str) -> Option<&'a str> {
 impl HhAccuracy {
     /// Records one detector answer: a top-k estimate or a window's points.
     fn observe(&mut self, obs: &Observation) {
-        let topk = obs.metric == "asap.topk" && label(obs, "bound") == Some("estimate");
-        if !topk && obs.metric != "asap.points" {
+        let bound = label(obs, "bound");
+        let topk = obs.metric == "asap.topk" && bound == Some("estimate");
+        let lower_bound = obs.metric == "asap.topk" && bound == Some("lower");
+        if !topk && !lower_bound && obs.metric != "asap.points" {
             return;
         }
         let method = match label(obs, "method") {
@@ -110,8 +133,12 @@ impl HhAccuracy {
         } else {
             &mut entry.1
         };
-        if topk {
-            let rank = label(obs, "rank").and_then(|r| r.parse().ok());
+        let rank = label(obs, "rank").and_then(|r| r.parse().ok());
+        if lower_bound {
+            answers
+                .lower
+                .extend(rank.map(|rank| (rank, obs.value.float)));
+        } else if topk {
             if let (Some(rank), Some(key)) = (rank, label(obs, "key")) {
                 answers.top.push((rank, key.to_string(), obs.value.float));
             }
@@ -162,7 +189,15 @@ impl HhAccuracy {
             ..Default::default()
         };
         let (k, phi) = (self.config.k, self.config.phi);
-        let Some(acc) = heavy_hitter_accuracy(phi, points, k, &list(exact), &list(sketch)) else {
+        let overcount_bound_points = sketch.overcount_bound_points();
+        let Some(acc) = heavy_hitter_accuracy(
+            phi,
+            points,
+            overcount_bound_points,
+            k,
+            &list(exact),
+            &list(sketch),
+        ) else {
             return vec![gauge("asap.hh.incomplete", 1.0)];
         };
         let mut out = vec![
@@ -272,12 +307,13 @@ mod tests {
         node.observe(&answer("sketch", "asap.points", &[], 1000.0));
         node.observe(&top("sketch", "1", "a", 410.0));
         node.observe(&top("sketch", "2", "d", 105.0));
-        // The sketch's lower bounds are not estimates.
+        // The sketch's lower bounds are not estimates; they give its error
+        // bound (5 points), too small for d (90 < 100 - 5).
         node.observe(&answer(
             "sketch",
             "asap.topk",
             &[("rank", "1"), ("key", "a"), ("bound", "lower")],
-            300.0,
+            405.0,
         ));
         assert!(node.ready().is_empty(), "waits for exact");
         node.observe(&answer("exact", "asap.points", &[], 1000.0));
@@ -294,5 +330,38 @@ mod tests {
                 .contains(&KeyValue::new("attribute.key", "http.route"))
             && e.labels.contains(&KeyValue::new("phi", "0.1"))));
         assert!(node.open.is_empty());
+    }
+
+    #[test]
+    fn takes_the_count_min_error_bound_from_the_sketch_lower_bounds() {
+        // 100,000 points, phi 1%: the sketch's lower bounds sit e / columns *
+        // points below its estimates (531 points for 512 columns).
+        let mut node = HhAccuracy {
+            config: HhAccuracyConfig { phi: 0.01, k: 20 },
+            open: BTreeMap::new(),
+        };
+        let bound = std::f64::consts::E / 512.0 * 100_000.0;
+        let top = |method: &str, rank: &str, key: &str, kind: &str, v: f64| {
+            answer(
+                method,
+                "asap.topk",
+                &[("rank", rank), ("key", key), ("bound", kind)],
+                v,
+            )
+        };
+        node.observe(&answer("sketch", "asap.points", &[], 100_000.0));
+        node.observe(&top("sketch", "1", "a", "estimate", 5_000.0));
+        node.observe(&top("sketch", "1", "a", "lower", 5_000.0 - bound));
+        node.observe(&top("sketch", "2", "route-9", "estimate", 1_004.0));
+        node.observe(&top("sketch", "2", "route-9", "lower", 1_004.0 - bound));
+        node.observe(&answer("exact", "asap.points", &[], 100_000.0));
+        node.observe(&top("exact", "1", "a", "estimate", 5_000.0));
+        node.observe(&top("exact", "2", "route-9", "estimate", 958.0));
+        let out = node.ready();
+        let get = |m: &str| out.iter().find(|e| e.metric_name == m).map(|e| e.value);
+        // route-9 (0.958%) is within the bound of 1%: not a false positive.
+        assert_eq!(get("asap.hh.precision"), Some(1.0));
+        assert_eq!(get("asap.hh.reported"), Some(2.0));
+        assert_eq!(get("asap.hh.truth"), Some(1.0));
     }
 }

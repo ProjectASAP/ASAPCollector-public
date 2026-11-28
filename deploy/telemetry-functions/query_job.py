@@ -164,9 +164,11 @@ def replace(name, rows, end_s):
         put(name, labels, value, end_s)
 
 
-def heavy_hitter_accuracy(points, exact, reported_list):
+def heavy_hitter_accuracy(points, exact, reported_list, overcount_bound_points=0.0):
     """As `answers::heavy_hitter_accuracy`; None when the exact list may hide
-    more heavy hitters."""
+    more heavy hitters. `overcount_bound_points`: the answer's error bound in
+    points (0 for raw, whose counts are exact); a reported key is a false
+    positive only when its exact count is below the threshold minus it."""
     threshold = PHI * points
     if len(exact) >= K and min((c for _, c in exact), default=float("inf")) >= threshold:
         return None
@@ -174,7 +176,9 @@ def heavy_hitter_accuracy(points, exact, reported_list):
     reported = [(k, c) for k, c in reported_list if c >= threshold]
     errors = [abs(c - truth[k]) / truth[k] for k, c in reported if k in truth]
     tp = len(errors)
-    precision = tp / len(reported) if reported else 1.0
+    counts = dict(exact)
+    within_bound = sum(1 for k, _ in reported if k in counts and counts[k] >= threshold - overcount_bound_points)
+    precision = within_bound / len(reported) if reported else 1.0
     recall = tp / len(truth) if truth else 1.0
     f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
     return {"precision": precision, "recall": recall, "f1": f1, "truth": len(truth),
