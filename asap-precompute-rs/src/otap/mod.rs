@@ -25,6 +25,8 @@ pub mod planner_views;
 #[cfg(feature = "otap-engine")]
 pub mod processor;
 #[cfg(feature = "otap-engine")]
+pub mod raw_forward;
+#[cfg(feature = "otap-engine")]
 pub mod scenario_generator;
 #[cfg(feature = "otap-engine")]
 pub mod window_merge;

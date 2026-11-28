@@ -342,8 +342,8 @@ lookup key, never re-derived from `metric`/`labels`.
 
 The control plane describes the views of an installed ASAPPlanner plan that
 it assigns to the collector in `collector-views.json` (loaded and checked by
-`otap::planner_views`; `asap_sketches` will read it once building the views'
-states is wired). A view's
+`otap::planner_views`; the `raw_forward` processor reads it today, and
+`asap_sketches` will once building the views' states is wired). A view's
 state uses the received samples' OTAP structure, not the `sketch.*` carrier
 above:
 
