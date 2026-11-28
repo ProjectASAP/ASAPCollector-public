@@ -163,9 +163,11 @@ pub struct AsapSketchesUserConfig {
     #[serde(default)]
     pub per_attribute: Vec<String>,
     /// Admit only points matching every entry, each
-    /// `{name, op: "=" | "!=", value}` as a PromQL label matcher, with
-    /// `name: "__name__"` for the metric name and any other name a
-    /// data-point attribute. With `per_attribute`, only `__name__`.
+    /// `{name, op: "=" | "!=", value}` (all three required) as a PromQL
+    /// label matcher: `name: "__name__"` matches the metric name, any
+    /// other name a data-point attribute (resource attributes cannot be
+    /// matched). With `per_attribute`, only `__name__`. Inbound sketch
+    /// envelopes are not filtered.
     #[serde(default)]
     pub matchers: Vec<crate::matchers::LabelMatcher>,
 }
@@ -226,8 +228,8 @@ const fn default_transmit_sketch() -> bool {
 /// How long after a tumbling window's end the idle timer waits before closing it.
 const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
-/// Tumbling windows close within a second of their end even when idle;
-/// sliding windows emit once per slide.
+/// Idle tumbling windows close within `IDLE_CLOSE_GRACE` plus a second of
+/// their end; sliding windows emit once per slide.
 fn timer_period(config: &PluginConfig) -> Duration {
     if config.window_slide.is_zero() {
         config.window_size.min(Duration::from_secs(1))
@@ -381,7 +383,7 @@ impl AsapSketchesProcessor {
     /// closes a tumbling window on time; the wall clock only closes windows
     /// of idle streams, so it waits a grace for points still queued upstream
     /// (e.g. on a contended host).
-    fn tick_now_ms(&self) -> u64 {
+    fn idle_close_now_ms(&self) -> u64 {
         let now_ms = asap_wall_clock_ms();
         if self.plugin_config.window_slide.is_zero() {
             now_ms.saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64)
@@ -391,8 +393,8 @@ impl AsapSketchesProcessor {
     }
 
     /// Encodes and emits one window's worth of envelopes, if any —
-    /// shared by the `TimerTick` (regular flush) and `Shutdown`
-    /// (final drain) paths. `envs` empty is a no-op, matching
+    /// shared by the PData (windows the batch closed), `TimerTick` (idle
+    /// close) and `Shutdown` (final drain) paths. `envs` empty is a no-op, matching
     /// `Precompute::tick`/`drain`'s own "nothing to flush" contract.
     ///
     /// [`OtapSketchEncoder`] builds the real `OtapPdata` directly from
@@ -509,13 +511,18 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                         .info(&format!("asap_sketches: observe failed: {e}"))
                         .await;
                 }
-                // Emit the tumbling windows this batch closed, and completed
-                // upstream panes promptly instead of a whole slide later.
-                let envs = self.precompute.tick(self.tick_now_ms());
+                // Emit the tumbling windows this batch's points closed (idle
+                // windows wait for the timer), and completed upstream panes
+                // promptly instead of a whole slide later.
+                let envs = if self.plugin_config.window_slide.is_zero() {
+                    self.precompute.take_closed()
+                } else {
+                    self.precompute.tick(self.idle_close_now_ms())
+                };
                 self.emit_envelopes(&envs, effect_handler).await
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
-                let envs = self.precompute.tick(self.tick_now_ms());
+                let envs = self.precompute.tick(self.idle_close_now_ms());
                 self.emit_envelopes(&envs, effect_handler).await
             }
             Message::Control(NodeControlMsg::Shutdown { .. }) => {

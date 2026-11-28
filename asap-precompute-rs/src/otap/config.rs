@@ -126,7 +126,8 @@ pub struct PluginConfig {
     pub aggregate_by: Vec<String>,
     /// Attribute keys sketched as their own series; `"*"` = every attribute.
     pub per_attribute: Vec<String>,
-    /// Points admitted: all must match (metric name via `__name__`).
+    /// Admits only points matching every matcher; `name: "__name__"`
+    /// matches the metric name.
     pub matchers: Vec<LabelMatcher>,
 }
 
@@ -213,7 +214,6 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         window: WindowSpec {
             size: config.window_size,
             slide: config.window_slide,
-            ..Default::default()
         },
         matchers: config.matchers.clone(),
         aggregate_by: config.aggregate_by.clone(),

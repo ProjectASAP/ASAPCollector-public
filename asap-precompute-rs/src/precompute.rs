@@ -38,7 +38,7 @@ pub trait Sketch: Send + Sync {
         self.merge_snapshot(&other.snapshot()?)
     }
 
-    /// Zeros the sketch in place. Used by window rotation and by
+    /// Zeros the sketch in place. Used by
     /// sketch object pools.
     fn reset(&mut self);
 
@@ -236,7 +236,15 @@ pub trait Precompute: Send + Sync {
     /// "now"; a window `(start, end]` is due once `now_ms > end`.
     fn tick(&self, now_ms: u64) -> Vec<SketchEnvelope>;
 
-    /// Forces rotation of the active window regardless of
+    /// Returns the envelopes of the windows later samples closed since
+    /// the last call, without closing any window by time. A host calls
+    /// it after each batch; idle windows wait for [`Self::tick`]. The
+    /// default returns nothing, for runtimes that only close by time.
+    fn take_closed(&self) -> Vec<SketchEnvelope> {
+        Vec::new()
+    }
+
+    /// Closes every open window regardless of
     /// wall-clock time and returns any envelopes that result.
     ///
     /// Use this on shutdown paths to flush pending observations
@@ -249,7 +257,7 @@ pub trait Precompute: Send + Sync {
 
     /// Atomically swaps the active config.
     ///
-    /// The in-flight window is preserved (matchers / `aggregate_by`
+    /// Open windows are preserved (matchers / `aggregate_by`
     /// may change, but bytes already accumulated stay where they
     /// are).
     fn update_config(&self, cs: &PrecomputeConfigSet);
@@ -387,7 +395,11 @@ impl PrecomputeImpl {
     /// Walks the closed windows' series, serializes each into a
     /// [`SketchEnvelope`], and
     /// updates the rolling stats counters.
-    fn finish_rotate(&self, closed: Vec<ClosedWindow>, now_ms: u64) -> Vec<SketchEnvelope> {
+    fn emit_closed_windows(
+        &self,
+        closed: Vec<ClosedWindow>,
+        last_tick_ms: u64,
+    ) -> Vec<SketchEnvelope> {
         if closed.is_empty() {
             return Vec::new();
         }
@@ -412,7 +424,7 @@ impl PrecomputeImpl {
         stats.output_envelopes = stats
             .output_envelopes
             .saturating_add(envelopes.len() as u64);
-        stats.last_tick_ms = now_ms;
+        stats.last_tick_ms = last_tick_ms;
         stats.last_emitted_envelopes = envelopes.len() as u64;
         envelopes
     }
@@ -608,13 +620,19 @@ impl Precompute for PrecomputeImpl {
             None => return Vec::new(),
         };
         let closed = self.lock_state().window.tick(now_ms, &cfg);
-        self.finish_rotate(closed, now_ms)
+        self.emit_closed_windows(closed, now_ms)
+    }
+
+    fn take_closed(&self) -> Vec<SketchEnvelope> {
+        let closed = self.lock_state().window.take_closed();
+        let last_tick_ms = closed.last().map_or(0, |w| w.end_ms);
+        self.emit_closed_windows(closed, last_tick_ms)
     }
 
     fn drain(&self) -> Vec<SketchEnvelope> {
         let closed = self.lock_state().window.drain();
         let now_ms = closed.last().map_or(0, |w| w.end_ms);
-        self.finish_rotate(closed, now_ms)
+        self.emit_closed_windows(closed, now_ms)
     }
 
     fn active_config(&self) -> Option<PrecomputeConfig> {

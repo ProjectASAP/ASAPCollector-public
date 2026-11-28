@@ -17,7 +17,6 @@ fn config() -> PrecomputeConfig {
         window: WindowSpec {
             size: Duration::from_millis(30),
             slide: Duration::from_millis(10),
-            ..Default::default()
         },
         ..Default::default()
     }

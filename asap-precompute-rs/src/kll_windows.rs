@@ -3,9 +3,9 @@
 //! A pane is a tumbling interval `(start, end]`, as a Prometheus range
 //! selector: a sample at `t` belongs to the pane ending at
 //! [`window_end_ms`], and a pane is complete once time passes its end.
-//! Range queries merge complete
-//! sketches rather than quantiles or raw observations. Exact time selection
-//! requires pane-aligned bounds; the quantile itself has KLL rank error.
+//! Range queries merge complete sketches rather than quantiles or raw
+//! observations. Exact time selection requires pane-aligned bounds; the
+//! quantile itself has KLL rank error.
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -39,7 +39,7 @@ pub struct KllWindowStore {
     config: PrecomputeConfig,
     pane_ms: u64,
     retention_ms: u64,
-    closed_until: u64,
+    closed_through_ms: u64,
     panes: BTreeMap<u64, HashMap<String, PaneSeries>>,
     k: i32,
     seed: Option<u64>,
@@ -92,7 +92,7 @@ impl KllWindowStore {
             config,
             pane_ms,
             retention_ms,
-            closed_until: 0,
+            closed_through_ms: 0,
             panes: BTreeMap::new(),
             k: k as i32,
             seed,
@@ -111,17 +111,17 @@ impl KllWindowStore {
         window_end_ms(now_ms, self.pane_ms).saturating_sub(self.pane_ms)
     }
 
-    /// Mark complete every pane ending at or before `boundary`.
-    fn close_through(&mut self, boundary: u64) {
-        if boundary <= self.closed_until {
+    /// Mark complete every pane ending at or before `end_ms`.
+    fn close_through(&mut self, end_ms: u64) {
+        if end_ms <= self.closed_through_ms {
             return;
         }
-        self.closed_until = boundary;
-        let cutoff = self.closed_until.saturating_sub(self.retention_ms);
+        self.closed_through_ms = end_ms;
+        let cutoff = self.closed_through_ms.saturating_sub(self.retention_ms);
         self.panes = self.panes.split_off(&cutoff);
     }
 
-    /// Number of nonempty panes currently retained (including the active pane).
+    /// Number of nonempty panes currently retained (including the open pane).
     pub fn retained_panes(&self) -> usize {
         self.panes.len()
     }
@@ -146,8 +146,8 @@ impl KllWindowStore {
         {
             return Err(invalid("expected a finite scalar observation"));
         }
-        // Its pane ends at or before `closed_until` (a multiple of the pane).
-        if observation.timestamp_ms <= self.closed_until {
+        // Its pane ends at or before `closed_through_ms` (a multiple of the pane).
+        if observation.timestamp_ms <= self.closed_through_ms {
             return Err(PrecomputeError::LateData);
         }
         let start = observation
@@ -201,7 +201,7 @@ impl KllWindowStore {
         }
         // Decode before changing state: invalid payloads cannot advance retention.
         let sketch = KLLWrapper::from_snapshot(&envelope.payload)?;
-        let cutoff = self.closed_until.saturating_sub(self.retention_ms);
+        let cutoff = self.closed_through_ms.saturating_sub(self.retention_ms);
         if envelope.window_start_ms < cutoff {
             return Err(PrecomputeError::LateData);
         }
@@ -252,7 +252,7 @@ impl KllWindowStore {
 
     /// Merge all complete panes in `(start_ms, end_ms]` into one full KLL per
     /// series. Queries never consume or mutate stored sketches. Bounds must
-    /// align to panes, lie within retention, and exclude the active pane.
+    /// align to panes, lie within retention, and exclude the open pane.
     /// Missing panes mean no observations, not interpolated samples.
     pub fn query(
         &self,
@@ -267,8 +267,8 @@ impl KllWindowStore {
                 "query bounds must describe a nonempty aligned range",
             ));
         }
-        if end_ms > self.closed_until
-            || start_ms < self.closed_until.saturating_sub(self.retention_ms)
+        if end_ms > self.closed_through_ms
+            || start_ms < self.closed_through_ms.saturating_sub(self.retention_ms)
         {
             return Err(invalid("query includes an open or expired pane"));
         }

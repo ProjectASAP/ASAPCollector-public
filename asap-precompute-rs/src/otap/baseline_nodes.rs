@@ -240,10 +240,10 @@ impl ExactBranch {
         }
         let size = self.config.window.as_millis().max(1) as u64;
         let end = window_end_ms(obs.timestamp_ms, size);
-        let start = end - size;
         if end <= self.emitted_until {
             return;
         }
+        let start = end.saturating_sub(size);
         let state = self.windows.entry(end).or_default();
         let template = |labels: Vec<KeyValue>| SketchEnvelope {
             schema_version: 1,
@@ -330,7 +330,8 @@ impl local::Processor<OtapPdata> for ExactBranch {
                 out.unwrap_or_default()
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
-                self.close(now_ms().saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64))
+                // Windows ending before now - grace, as the sketch pipeline.
+                self.close(now_ms().saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64 + 1))
             }
             Message::Control(NodeControlMsg::Shutdown { .. }) => self.close(u64::MAX),
             _ => Vec::new(),

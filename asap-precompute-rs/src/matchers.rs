@@ -61,15 +61,6 @@ impl LabelMatcher {
         }
     }
 
-    /// Returns [`MatchOp::Equal`] — the default operator.
-    ///
-    /// Spelled out as a function (rather than only relying on
-    /// `<MatchOp as Default>::default()`) so callers and tests can
-    /// reference the canonical default explicitly.
-    pub fn default_op() -> MatchOp {
-        MatchOp::Equal
-    }
-
     /// Rejects a matcher with an empty name.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty() {
@@ -288,12 +279,6 @@ pub fn per_attribute<E>(
 mod tests {
     use super::*;
     use crate::observation::ObservationValue;
-
-    #[test]
-    fn default_op_returns_equal() {
-        assert_eq!(LabelMatcher::default_op(), MatchOp::Equal);
-        assert_eq!(MatchOp::default(), MatchOp::Equal);
-    }
 
     #[test]
     fn empty_matchers_admit_everything() {

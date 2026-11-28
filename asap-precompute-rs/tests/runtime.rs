@@ -6,7 +6,7 @@
 //! Coverage:
 //!   - `series_key` byte-equivalence (golden literal strings).
 //!   - End-to-end observe → tick cycle.
-//!   - `Drain` rotates partial-window state.
+//!   - `Drain` closes partial-window state.
 
 use std::time::Duration;
 
@@ -256,7 +256,7 @@ fn stats_account_observations() {
 }
 
 // ----------------------------------------------------------------
-// 3. Drain rotates partial-window state.
+// 3. Drain closes partial-window state.
 
 #[test]
 fn drain_flushes_mid_window_observations() {
@@ -607,9 +607,9 @@ fn later_samples_close_each_window_they_pass() {
     for ts in [5_000, 15_000, 25_000] {
         p.observe(&sample_at(ts)).expect("observe");
     }
-    // Both closed windows are returned by the next tick, whatever its time.
+    // Both closed windows are returned without closing anything by time.
     assert_eq!(
-        windows(&p.tick(25_000)),
+        windows(&p.take_closed()),
         vec![(0, 10_000, 1), (10_000, 20_000, 1)]
     );
     assert_eq!(windows(&p.drain()), vec![(20_000, 30_000, 1)]);
@@ -639,14 +639,49 @@ fn out_of_order_sample_goes_to_its_own_open_window_and_is_dropped_once_closed() 
 fn sample_after_an_idle_close_is_dropped_and_the_next_window_opens_on_demand() {
     let p = ten_second_windows();
     p.observe(&sample_at(5_000)).expect("observe");
-    // The idle timer closes (0 s, 10 s] long after its end.
+    // The idle timer at 42 s closes (0 s, 10 s] and every window ending
+    // before 42 s, even those that never opened.
     assert_eq!(windows(&p.tick(42_000)), vec![(0, 10_000, 1)]);
+    for late in [10_000, 10_001, 40_000] {
+        assert!(matches!(
+            p.observe(&sample_at(late)),
+            Err(PrecomputeError::LateData)
+        ));
+    }
+    // (40 s, 50 s] is still open.
+    p.observe(&sample_at(40_001)).expect("open window");
+    assert_eq!(windows(&p.drain()), vec![(40_000, 50_000, 1)]);
+}
+
+#[test]
+fn envelopes_of_one_window_from_several_sources_merge_in_any_order() {
+    // A merge stage: a source's next window must not close the window
+    // another source has not sent yet.
+    let p = ten_second_windows();
+    let env = |end: u64, source: &str| asap_precompute_rs::SketchEnvelope {
+        schema_version: 1,
+        sketch_type: SketchType::DDSketch,
+        agg_id: 1,
+        labels: vec![KeyValue::new("k", "a")],
+        window_start_ms: end - 10_000,
+        window_end_ms: end,
+        payload: source.as_bytes().to_vec(),
+        count: 1,
+        ..Default::default()
+    };
+    p.observe_envelope(&env(10_000, "a"))
+        .expect("a, first window");
+    p.observe_envelope(&env(20_000, "a"))
+        .expect("a, second window");
+    p.observe_envelope(&env(10_000, "b"))
+        .expect("b, first window");
+    assert_eq!(windows(&p.tick(10_001)), vec![(0, 10_000, 2)]);
+    // Once the idle timer closed it, the window is late.
     assert!(matches!(
-        p.observe(&sample_at(10_000)),
+        p.observe_envelope(&env(10_000, "c")),
         Err(PrecomputeError::LateData)
     ));
-    // The window after the closed one still accepts samples.
-    p.observe(&sample_at(10_001)).expect("next window");
+    assert_eq!(p.stats().dropped_late, 1);
     assert_eq!(windows(&p.drain()), vec![(10_000, 20_000, 1)]);
 }
 
@@ -738,7 +773,7 @@ fn max_series_drop_returns_overflow() {
 }
 
 // ----------------------------------------------------------------
-// update_config swap preserves in-flight window.
+// update_config swap preserves open windows.
 
 #[test]
 fn update_config_swaps_active() {

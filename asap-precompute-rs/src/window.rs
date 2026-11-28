@@ -1,7 +1,6 @@
 //! Per-[`crate::precompute::Precompute`] window manager.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::config::{OnOverflow, PrecomputeConfig};
 use crate::envelope::SketchEnvelope;
@@ -14,10 +13,8 @@ use crate::precompute::{BoxedObserver, PrecomputeError, Sketch, SketchFactory, S
 /// labels needed to reconstruct the [`SketchEnvelope`] at flush
 /// time.
 pub struct SeriesEntry {
-    /// Running sketch for this series. Owned here; the window calls
-    /// `Sketch::reset` on rotation when the entry is recycled in
-    /// place, OR drops the reference when `MaxSeries` triggers
-    /// eviction.
+    /// Running sketch for this series. Owned here; serialized when its
+    /// window closes, or dropped when `MaxSeries` triggers eviction.
     pub sketch: Box<dyn Sketch>,
     /// Resource-scope attribute set captured when the series was
     /// first observed. Stored alongside `labels` so the adapter's
@@ -32,7 +29,7 @@ pub struct SeriesEntry {
     /// [`crate::config::OnOverflow::EvictOldest`].
     pub last_seen_ms: u64,
     /// Total observation count accumulated for this series in the
-    /// active window. Incremented once per scalar observation;
+    /// window. Incremented once per scalar observation;
     /// envelope-valued observations contribute the upstream
     /// envelope's `count` when present (so chained pre-aggregation
     /// preserves the running sample count). Copied into
@@ -51,28 +48,35 @@ pub struct ClosedWindow {
     pub end_ms: u64,
 }
 
+/// An open window's start and series; the map key is its end.
+struct OpenWindow {
+    /// Exclusive lower bound of the window (Unix ms).
+    start_ms: u64,
+    /// Map from series-key (see [`crate::matchers::series_key`]) to entry.
+    series: HashMap<String, SeriesEntry>,
+}
+
 /// General tumbling-window manager. Retained KLL panes and sliding
 /// estimates use [`crate::kll_windows`] instead.
 ///
 /// Windows follow Prometheus range selectors: a window is `(start, end]`
 /// and a sample at `t` belongs to the window ending at [`window_end_ms`].
-/// One window is open at a time. It closes when a sample later than its
-/// end arrives or when [`Self::tick`] is called past its end (the idle
-/// timer); a sample whose window has closed is late.
+/// A sample closes every window that ended before it, and [`Self::tick`]
+/// closes every window that ended before `now_ms` (the idle timer); a
+/// sample or envelope whose window has closed is late. An upstream
+/// envelope goes to the window holding its end but closes nothing, so
+/// envelopes from several sources may arrive in any order until the
+/// idle timer closes their window.
 ///
 /// Locking is owned by the enclosing [`std::sync::Mutex`] in
 /// [`crate::precompute::PrecomputeImpl`]; this struct itself is
 /// `!Sync`-by-content (HashMap of boxed dyn Sketch) and relies on the
 /// outer mutex to serialize access.
 pub struct WindowState {
-    /// Map from series-key (see [`crate::matchers::series_key`]) to
-    /// the open window's series entry.
-    pub(crate) series: HashMap<String, SeriesEntry>,
-    /// `[start_ms, end_ms]` of the open window `(start, end]`;
-    /// `None` until a sample opens one.
-    pub(crate) open_window_ms: Option<[u64; 2]>,
+    /// Open windows by end (Unix ms).
+    open: BTreeMap<u64, OpenWindow>,
     /// Every window ending at or before this has closed (Unix ms).
-    pub(crate) closed_through_ms: u64,
+    closed_through_ms: u64,
     /// Windows closed since the last [`Self::tick`] or [`Self::drain`].
     closed: Vec<ClosedWindow>,
     /// Reused buffer for the series key of the observation being routed.
@@ -85,12 +89,9 @@ impl Default for WindowState {
     }
 }
 
-/// Returns the active window size in milliseconds, or zero for
-/// unsized (Batch) configs.
+/// Returns the window size in milliseconds, or zero for unsized
+/// (Batch) configs.
 pub(crate) fn window_size_ms(cfg: &PrecomputeConfig) -> u64 {
-    if cfg.window.size == Duration::ZERO {
-        return 0;
-    }
     cfg.window.size.as_millis() as u64
 }
 
@@ -102,71 +103,77 @@ pub fn window_end_ms(timestamp_ms: u64, size_ms: u64) -> u64 {
 }
 
 impl WindowState {
-    /// Constructs an empty window.
+    /// Constructs an empty window manager.
     pub fn new() -> Self {
         Self {
-            series: HashMap::new(),
-            open_window_ms: None,
+            open: BTreeMap::new(),
             closed_through_ms: 0,
             closed: Vec::new(),
             key: String::new(),
         }
     }
 
-    /// Returns the current series count.
+    /// Returns the series count across open windows.
     pub fn active_series_count(&self) -> usize {
-        self.series.len()
+        self.open.values().map(|w| w.series.len()).sum()
     }
 
-    /// Makes the window holding `timestamp_ms` the open one, closing the
-    /// open window if the timestamp is past its end. Returns
-    /// [`PrecomputeError::LateData`] when that window has already closed.
+    /// Returns the end of the window holding `timestamp_ms`, opening it if
+    /// needed, or [`PrecomputeError::LateData`] when it has closed. A
+    /// sample (`closes_earlier`) first closes every window ending before
+    /// its own window starts.
     ///
     /// Batch (unsized) configs keep one window until the next tick.
-    fn open_window_for(
+    fn window_for(
         &mut self,
         timestamp_ms: u64,
+        closes_earlier: bool,
         cfg: &PrecomputeConfig,
-    ) -> Result<(), PrecomputeError> {
+    ) -> Result<u64, PrecomputeError> {
         let size = window_size_ms(cfg);
         if size == 0 {
-            self.open_window_ms
-                .get_or_insert([timestamp_ms, timestamp_ms]);
-            return Ok(());
+            if let Some(&end) = self.open.keys().next() {
+                return Ok(end);
+            }
+            self.open.insert(
+                timestamp_ms,
+                OpenWindow {
+                    start_ms: timestamp_ms,
+                    series: HashMap::new(),
+                },
+            );
+            return Ok(timestamp_ms);
         }
         if timestamp_ms <= self.closed_through_ms {
             return Err(PrecomputeError::LateData);
         }
-        if self
-            .open_window_ms
-            .is_some_and(|[_, end]| timestamp_ms <= end)
-        {
-            return Ok(());
-        }
-        self.close_open_window();
         let end = window_end_ms(timestamp_ms, size);
         let start = end - size;
-        // A sample past `start` closes every window ending at or before it.
-        self.closed_through_ms = start;
-        self.open_window_ms = Some([start, end]);
-        Ok(())
+        if closes_earlier {
+            // Windows that never opened in between are closed too.
+            self.close_through(start);
+        }
+        self.open.entry(end).or_insert_with(|| OpenWindow {
+            start_ms: start,
+            series: HashMap::new(),
+        });
+        Ok(end)
     }
 
-    /// Moves the open window, if any, to the closed list.
-    fn close_open_window(&mut self) {
-        let Some([start_ms, end_ms]) = self.open_window_ms.take() else {
-            return;
-        };
+    /// Closes every open window ending at or before `end_ms`.
+    fn close_through(&mut self, end_ms: u64) {
         self.closed_through_ms = self.closed_through_ms.max(end_ms);
-        if self.series.is_empty() {
-            return;
+        let still_open = self.open.split_off(&(end_ms.saturating_add(1)));
+        for (end_ms, window) in std::mem::replace(&mut self.open, still_open) {
+            if window.series.is_empty() {
+                continue;
+            }
+            self.closed.push(ClosedWindow {
+                series: window.series.into_values().collect(),
+                start_ms: window.start_ms,
+                end_ms,
+            });
         }
-        let series = self.series.drain().map(|(_, entry)| entry).collect();
-        self.closed.push(ClosedWindow {
-            series,
-            start_ms,
-            end_ms,
-        });
     }
 
     /// Routes an observation into its window.
@@ -183,10 +190,15 @@ impl WindowState {
         observer: &BoxedObserver,
         stats: &mut StatsSnapshot,
     ) -> Result<(), PrecomputeError> {
-        self.open_window_for(obs.timestamp_ms, cfg)?;
+        let end = self.window_for(obs.timestamp_ms, true, cfg)?;
+        let series = &mut self
+            .open
+            .get_mut(&end)
+            .expect("window_for opened it")
+            .series;
 
         cfg.write_series_key_for(&mut self.key, obs);
-        if let Some(entry) = self.series.get_mut(self.key.as_str()) {
+        if let Some(entry) = series.get_mut(self.key.as_str()) {
             if obs.timestamp_ms > entry.last_seen_ms {
                 entry.last_seen_ms = obs.timestamp_ms;
             }
@@ -197,7 +209,7 @@ impl WindowState {
         let key = self.key.clone();
 
         // New series — check cap.
-        if cfg.max_series > 0 && self.series.len() as u64 >= cfg.max_series {
+        if cfg.max_series > 0 && series.len() as u64 >= cfg.max_series {
             match cfg.on_overflow {
                 OnOverflow::Drop | OnOverflow::Block => {
                     // Block degrades to Drop: latency-hostile
@@ -209,14 +221,14 @@ impl WindowState {
                     // Find and evict the oldest series.
                     let mut oldest_key: Option<String> = None;
                     let mut oldest_ms: u64 = u64::MAX;
-                    for (k, e) in self.series.iter() {
+                    for (k, e) in series.iter() {
                         if e.last_seen_ms < oldest_ms {
                             oldest_ms = e.last_seen_ms;
                             oldest_key = Some(k.clone());
                         }
                     }
                     if let Some(k) = oldest_key {
-                        self.series.remove(&k);
+                        series.remove(&k);
                         stats.active_series -= 1;
                     }
                 }
@@ -242,16 +254,17 @@ impl WindowState {
             count: 0,
         };
         stats.active_series += 1;
-        let entry = self.series.entry(key).or_insert(entry);
+        let entry = series.entry(key).or_insert(entry);
         observer.observe(entry.sketch.as_mut(), obs)?;
         entry.count += 1;
         Ok(())
     }
 
     /// Merges an inbound envelope's ASAPv1 payload into the matching
-    /// series of the window holding the envelope's end, under the same
-    /// rules as a sample at that time. Envelopes are merged as sketches,
-    /// never expanded to scalar samples.
+    /// series of the window holding the envelope's end. Envelopes are
+    /// merged as sketches, never expanded to scalar samples, and close
+    /// no window: several upstream sources may send one window in any
+    /// order until the idle timer closes it.
     pub fn observe_envelope(
         &mut self,
         env: &SketchEnvelope,
@@ -266,15 +279,20 @@ impl WindowState {
         } else {
             env.window_start_ms
         };
-        self.open_window_for(ref_ms, cfg)?;
+        let end = self.window_for(ref_ms, false, cfg)?;
+        let series = &mut self
+            .open
+            .get_mut(&end)
+            .expect("window_for opened it")
+            .series;
 
         // Native OTAP envelopes preserve resource and data-point labels
         // separately. Keep both in the series identity across merge stages.
         let key = cfg.series_key_for_entry(&env.resource_labels, &env.labels);
 
-        if !self.series.contains_key(&key) {
+        if !series.contains_key(&key) {
             if cfg.max_series > 0
-                && self.series.len() as u64 >= cfg.max_series
+                && series.len() as u64 >= cfg.max_series
                 && matches!(cfg.on_overflow, OnOverflow::Drop | OnOverflow::Block)
             {
                 return Err(PrecomputeError::SeriesCapExceeded);
@@ -287,12 +305,11 @@ impl WindowState {
                 last_seen_ms: ref_ms,
                 count: 0,
             };
-            self.series.insert(key.clone(), entry);
+            series.insert(key.clone(), entry);
             stats.active_series += 1;
         }
 
-        let entry = self
-            .series
+        let entry = series
             .get_mut(&key)
             .expect("series entry must exist after insert");
 
@@ -305,25 +322,34 @@ impl WindowState {
     }
 
     /// Returns the windows closed since the last call: those a later
-    /// sample closed, plus the open window when `now_ms` is past its end
-    /// (`now_ms > end`: a sample at `end` still belongs to it). Unsized
-    /// (Batch) configs close the open window on every tick.
+    /// sample closed, plus every open window ending before `now_ms` (a
+    /// sample at `end` still belongs to its window). Unsized (Batch)
+    /// configs close the open window on every tick.
     pub fn tick(&mut self, now_ms: u64, cfg: &PrecomputeConfig) -> Vec<ClosedWindow> {
         let size = window_size_ms(cfg);
-        if self
-            .open_window_ms
-            .is_some_and(|[_, end]| size == 0 || now_ms > end)
-        {
-            self.close_open_window();
+        if size == 0 {
+            // Batch windows are never late: keep the mark where it was.
+            let closed_through_ms = self.closed_through_ms;
+            self.close_through(u64::MAX);
+            self.closed_through_ms = closed_through_ms;
+        } else {
+            self.close_through(window_end_ms(now_ms, size).saturating_sub(size));
         }
         std::mem::take(&mut self.closed)
     }
 
-    /// Closes the open window regardless of time and returns every
+    /// Returns the windows closed since the last call without closing any.
+    pub fn take_closed(&mut self) -> Vec<ClosedWindow> {
+        std::mem::take(&mut self.closed)
+    }
+
+    /// Closes every open window regardless of time and returns every
     /// closed window. Used by `Precompute::drain` on shutdown paths; a
-    /// later sample in the drained window is late, as after any close.
+    /// later sample in a drained window is late, as after any close.
     pub fn drain(&mut self) -> Vec<ClosedWindow> {
-        self.close_open_window();
+        if let Some(&last_end_ms) = self.open.keys().next_back() {
+            self.close_through(last_end_ms);
+        }
         std::mem::take(&mut self.closed)
     }
 }
@@ -331,12 +357,13 @@ impl WindowState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn window_starts_empty_and_closed() {
         let w = WindowState::new();
         assert_eq!(w.active_series_count(), 0);
-        assert_eq!(w.open_window_ms, None);
+        assert!(w.open.is_empty());
         assert_eq!(w.closed_through_ms, 0);
     }
 
@@ -357,8 +384,8 @@ mod tests {
             },
             ..Default::default()
         };
-        w.open_window_for(15_000, &cfg).unwrap();
-        assert_eq!(w.open_window_ms, Some([10_000, 20_000]));
+        assert_eq!(w.window_for(15_000, true, &cfg).unwrap(), 20_000);
+        assert_eq!(w.open[&20_000].start_ms, 10_000);
         assert_eq!(w.closed_through_ms, 10_000);
     }
 }
