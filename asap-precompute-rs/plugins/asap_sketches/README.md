@@ -41,12 +41,12 @@ Field reference:
 | `output_metric_name` | yes | Metric name stamped onto every emitted envelope. |
 | `agg_id` | optional | Controller-plan join key. Defaults to `0`. |
 | `sketch_params.relative_accuracy` | ddsketch | DDSketch alpha (`0 < α < 1`). Default `0.01`. |
-| `sketch_params.k` | kll | KLL buffer size. Default `200`. |
+| `sketch_params.k` | kll | KLL buffer size, `8 ≤ k ≤ 26602`. Default `200`. |
 | `sketch_params.seed` | kll | Optional deterministic compaction seed. Default unseeded. |
-| `sketch_params.width` | countsketch, cms | Sketch column count. Default `2048`. |
-| `sketch_params.depth` | countsketch, cms | Sketch row count. Default `4`. |
-| `sketch_params.rows` / `columns` | countminsketch_heap | CMS dimensions. Default `4` / `2048`. |
-| `sketch_params.k` | countminsketch_heap | Heavy-hitter heap size. Default `10`. |
+| `sketch_params.width` | countsketch, cms | Sketch column count, `≥ 1`. Default `2048`. |
+| `sketch_params.depth` | countsketch, cms | Sketch row count, `≥ 1`. Default `4`. |
+| `sketch_params.rows` / `columns` | countminsketch_heap | CMS dimensions, `≥ 1`. Default `4` / `2048`. |
+| `sketch_params.k` | countminsketch_heap | Heavy-hitter heap size, `≥ 1`. Default `10`. |
 | `default_key` | optional | CountSketch fallback key when an observation has neither bytes nor labels. Defaults to `output_metric_name`. |
 | `omit_resource_attrs` | optional | Exclude resource attributes from series identity. Default `false`. |
 | `global_aggregation` | optional | Collapse all observations into one series. Default `false`. |
@@ -55,7 +55,15 @@ Field reference:
 | `quantiles` | estimate mode | DDSketch/KLL quantiles to emit, such as `[0.5, 0.99]`. |
 
 HLL uses sketchlib's fixed precision-14 HyperLogLog, so it has no
-`sketch_params`.
+`sketch_params`. A `sketch_params` value outside its range is replaced by
+the default.
+
+`asap-collector --print-capabilities` prints these sketches, with their
+parameter ranges under ASAPPlanner's `SketchParams` names (`alpha`, `k`,
+`precision`, `width`, `depth`, `heap_size`), and the operators the collector
+runs, as JSON in ASAPPlanner's vocabulary
+(`src/otap/capabilities.rs`; golden copy in
+`tests/golden/capabilities.json`).
 
 ## Lifecycle
 

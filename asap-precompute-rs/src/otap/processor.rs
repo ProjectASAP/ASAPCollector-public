@@ -217,11 +217,11 @@ const fn default_transmit_sketch() -> bool {
 }
 
 /// How long after a tumbling window's end the idle timer waits before closing it.
-const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 /// Tumbling windows close within a second of their end even when idle;
 /// sliding windows emit once per slide.
-fn timer_period(config: &PluginConfig) -> Duration {
+pub(crate) fn timer_period(config: &PluginConfig) -> Duration {
     if config.window_slide.is_zero() {
         config.window_size.min(Duration::from_secs(1))
     } else {
