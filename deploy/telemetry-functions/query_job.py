@@ -219,9 +219,9 @@ def flag_incomplete(end):
 
 
 def raw_at_window_end(query, end):
-    """Instant PromQL query on prometheus-raw over [end - RANGE_S, end):
-    PromQL ranges are (t - W, t], so evaluate at the window's last millisecond."""
-    return prom(query, at=end - 0.001, base=PIPELINE_PROMETHEUS["raw"], timeout=300)
+    """Instant PromQL query on prometheus-raw over (end - RANGE_S, end], the
+    pipelines' windows: PromQL ranges are (t - W, t], so evaluate at the end."""
+    return prom(query, at=end, base=PIPELINE_PROMETHEUS["raw"], timeout=300)
 
 
 class RawEvents:
@@ -352,7 +352,7 @@ def raw_distinct(end):
 
 
 def raw_topk(end):
-    """Top-k of [end - RANGE_S, end) from prometheus-raw; its query seconds when done, else None."""
+    """Top-k of (end - RANGE_S, end] from prometheus-raw; its query seconds when done, else None."""
     exact_rows = at_window(f'asap_topk{{method="exact",{TOPK_SELECTOR}}}', end)
     exact_points = sum(v for _, v in at_window(
         f'asap_points{{method="exact",attribute_key="{ATTRIBUTE}"}}', end))

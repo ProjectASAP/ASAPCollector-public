@@ -88,11 +88,13 @@ pub struct SketchEnvelope {
     /// Host-neutral string-string label pairs identifying the
     /// data-point-level (metric × attrs) series.
     pub labels: Vec<KeyValue>,
-    /// Inclusive lower bound of the window the payload summarizes
-    /// (Unix milliseconds).
+    /// Exclusive lower bound of the window `(start, end]` the payload
+    /// summarizes (Unix milliseconds), as a Prometheus range selector and
+    /// an OTLP delta point's `start_time_unix_nano`.
     pub window_start_ms: u64,
-    /// Exclusive upper bound of the window the payload summarizes
-    /// (Unix milliseconds).
+    /// Inclusive upper bound of the window `(start, end]` the payload
+    /// summarizes (Unix milliseconds); a sample at exactly this time is in
+    /// the window. The OTLP point's `time_unix_nano`.
     pub window_end_ms: u64,
     /// ASAPv1 sketch envelope bytes; empty on the estimate path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

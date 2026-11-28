@@ -17,7 +17,6 @@ fn config() -> PrecomputeConfig {
         window: WindowSpec {
             size: Duration::from_millis(30),
             slide: Duration::from_millis(10),
-            ..Default::default()
         },
         ..Default::default()
     }
@@ -43,10 +42,10 @@ fn store() -> KllWindowStore {
 #[test]
 fn aligned_ranges_merge_tumbling_panes_without_consuming_them() {
     let mut s = store();
-    for (time, value) in [(1, 1.), (9, 2.), (10, 3.), (20, 4.)] {
+    for (time, value) in [(1, 1.), (9, 2.), (11, 3.), (20, 4.)] {
         s.observe(&observation(time, value, "checkout")).unwrap();
     }
-    s.advance(30);
+    s.advance(31);
     let all = s.query(0, 30).unwrap();
     assert_eq!(all.len(), 1);
     assert_eq!(all[0].count, 4);
@@ -65,7 +64,7 @@ fn upstream_sources_merge_by_pane_and_preserve_series_identity() {
     for (value, source) in [(1., "checkout"), (3., "checkout"), (100., "other")] {
         let mut upstream = store();
         upstream.observe(&observation(1, value, source)).unwrap();
-        upstream.advance(10);
+        upstream.advance(11);
         receiver
             .merge_pane(&upstream.query(0, 10).unwrap()[0])
             .unwrap();
@@ -104,17 +103,17 @@ fn upstream_sources_merge_by_pane_and_preserve_series_identity() {
 fn expiration_boundaries_idle_gaps_and_late_observations() {
     let mut s = store();
     s.observe(&observation(1, 1., "checkout")).unwrap();
-    s.observe(&observation(10, 2., "checkout")).unwrap();
-    s.advance(30);
+    s.observe(&observation(11, 2., "checkout")).unwrap();
+    s.advance(31);
     assert_eq!(s.query(0, 30).unwrap()[0].count, 2);
     assert!(matches!(
-        s.observe(&observation(29, 3., "checkout")),
+        s.observe(&observation(30, 3., "checkout")),
         Err(PrecomputeError::LateData)
     ));
-    s.advance(40);
+    s.advance(41);
     assert!(s.query(0, 30).is_err());
     assert_eq!(s.query(10, 40).unwrap()[0].count, 1);
-    s.advance(1000);
+    s.advance(1001);
     assert_eq!(s.retained_panes(), 0);
     assert!(s.query(970, 1000).unwrap().is_empty());
     // Backward wall-clock motion cannot reopen expired panes.
@@ -128,7 +127,7 @@ fn sliding_outputs_use_union_of_observations_and_evict_old_panes() {
     for (time, value) in [(1, 1.), (11, 2.), (21, 3.)] {
         p.observe(&observation(time, value, "checkout")).unwrap();
     }
-    let first = p.tick(30);
+    let first = p.tick(31);
     assert_eq!(first.len(), 2);
     assert!(first
         .iter()
@@ -136,7 +135,7 @@ fn sliding_outputs_use_union_of_observations_and_evict_old_panes() {
     assert_eq!(first[0].value, 2.);
     assert!(p.tick(35).is_empty());
     p.observe(&observation(31, 100., "checkout")).unwrap();
-    let second = p.tick(40);
+    let second = p.tick(41);
     assert_eq!(second.len(), 2);
     assert_eq!(second[0].value, 3.);
     assert_eq!(
@@ -160,7 +159,7 @@ fn many_panes_stay_bounded_and_unequal_compacted_panes_keep_weights() {
             .unwrap();
     }
     s.observe(&observation(11, 1_000_000., "checkout")).unwrap();
-    s.advance(20);
+    s.advance(21);
     let estimated = s.estimate(0, 20).unwrap();
     assert_eq!(estimated[0].count, 20_001);
     assert!((estimated[0].value - 10_000.).abs() < 800.);
@@ -181,7 +180,7 @@ fn rolling_can_consume_upstream_panes_and_resets_on_window_change() {
     let p = KllRollingPrecompute::new(config()).unwrap();
     let mut upstream = store();
     upstream.observe(&observation(1, 42., "checkout")).unwrap();
-    upstream.advance(10);
+    upstream.advance(11);
     p.observe_envelope(&upstream.query(0, 10).unwrap()[0])
         .unwrap();
     assert_eq!(p.tick(30)[0].value, 42.);
@@ -239,20 +238,20 @@ fn upstream_timer_waits_for_new_complete_panes() {
     assert!(p.tick(30).is_empty());
     let mut upstream = store();
     upstream.observe(&observation(21, 42., "checkout")).unwrap();
-    upstream.advance(30);
+    upstream.advance(31);
     p.observe_envelope(&upstream.query(20, 30).unwrap()[0])
         .unwrap();
-    let first = p.tick(30);
+    let first = p.tick(31);
     assert_eq!(first[0].window_end_ms, 30);
     assert_eq!(first[0].value, 42.);
     assert!(p.tick(40).is_empty());
     upstream
         .observe(&observation(31, 100., "checkout"))
         .unwrap();
-    upstream.advance(40);
+    upstream.advance(41);
     p.observe_envelope(&upstream.query(30, 40).unwrap()[0])
         .unwrap();
-    let next = p.tick(40);
+    let next = p.tick(41);
     assert_eq!(next[0].count, 2);
     assert_eq!(next[0].window_end_ms, 40);
 }
@@ -264,7 +263,7 @@ fn disjoint_mode_transmits_full_panes_for_downstream_rolling_queries() {
     cfg.transmit_sketch = true;
     let creator = KllRollingPrecompute::new(cfg).unwrap();
     creator.observe(&observation(1, 42., "checkout")).unwrap();
-    let pane = creator.tick(10);
+    let pane = creator.tick(11);
     assert_eq!(pane.len(), 1);
     assert!(pane[0].payload.starts_with(b"ASAPv1"));
     let mut retained = store();
@@ -284,7 +283,34 @@ fn small_high_value_pane_cannot_outweigh_a_large_compacted_low_value_pane() {
     for _ in 0..10 {
         s.observe(&observation(11, 1_000_000., "checkout")).unwrap();
     }
-    s.advance(20);
+    s.advance(21);
     let result = s.quantile_over_time(0, 20, &[0.5, 0.99]).unwrap();
     assert!(result.iter().all(|e| e.value == 1. && e.count == 20_010));
+}
+
+#[test]
+fn pane_boundary_sample_belongs_to_the_pane_ending_there() {
+    // Panes are `(start, end]`, as Prometheus range selectors.
+    let mut s = store();
+    for (time, value) in [(10, 1.), (20, 2.)] {
+        s.observe(&observation(time, value, "checkout")).unwrap();
+    }
+    s.advance(21);
+    assert_eq!(s.query(0, 10).unwrap()[0].count, 1);
+    assert_eq!(s.query(10, 20).unwrap()[0].count, 1);
+}
+
+#[test]
+fn pane_stays_open_at_its_end_and_closes_just_after() {
+    let mut s = store();
+    s.observe(&observation(5, 1., "checkout")).unwrap();
+    s.advance(10);
+    assert!(s.query(0, 10).is_err(), "a sample at 10 may still arrive");
+    s.observe(&observation(10, 2., "checkout")).unwrap();
+    s.advance(11);
+    assert_eq!(s.query(0, 10).unwrap()[0].count, 2);
+    assert!(matches!(
+        s.observe(&observation(10, 3., "checkout")),
+        Err(PrecomputeError::LateData)
+    ));
 }
