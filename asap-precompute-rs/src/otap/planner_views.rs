@@ -1,6 +1,7 @@
 //! The collector views of an installed ASAPPlanner plan, loaded from the
-//! control plane's `collector-views.json` (`planner_views: <path>`;
-//! `asap_sketches` takes it once [`window_state_config`] is built).
+//! control plane's `collector-views.json` (`planner_views: <path>` in the
+//! `raw_forward` config; `asap_sketches` takes it once
+//! [`window_state_config`] is built).
 //!
 //! The file holds the plan's collector sub-DAG in the planner's own serde:
 //!
@@ -70,8 +71,7 @@ pub struct CollectorViewsFile {
     #[allow(dead_code)]
     commit_grace_ms: serde::de::IgnoredAny,
     /// Per metric a `Scan` of the plan reads: whether the backend still
-    /// reads its raw samples; the raw forward drops the metrics marked
-    /// `false`.
+    /// reads its raw samples. `raw_forward` drops the metrics marked `false`.
     pub backend_reads_raw: BTreeMap<String, bool>,
     /// The collector views: the nodes whose states leave the collector.
     pub outputs: Vec<PhysicalASAPNodeId>,
