@@ -130,7 +130,7 @@ pub struct AsapSketchesUserConfig {
     pub window_slide: Option<Duration>,
     /// Stamped onto every emitted envelope.
     pub output_metric_name: String,
-    /// Controller-plan join key. Defaults to 0.
+    /// Processor-side config key; not written to the output. Defaults to 0.
     #[serde(default)]
     pub agg_id: u64,
     /// Sketch-specific tuning knobs. Only the keys relevant to
@@ -468,7 +468,7 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 //
                 // LateData / SeriesCapExceeded are expected outcomes already
                 // tallied in stats, so silent by design. Anything else (e.g.
-                // NoConfig, AggIdMismatch) is a misconfiguration, reported
+                // NoConfig, SketchTypeMismatch) is a misconfiguration, reported
                 // once per batch below.
                 let mut observe = |obs: &Observation| {
                     match precompute.observe(obs) {

@@ -180,16 +180,6 @@ pub enum PrecomputeError {
     /// Precompute has no `PrecomputeConfig`.
     #[error("precompute: no config installed")]
     NoConfig,
-    /// Envelope's `agg_id` doesn't match this Precompute's config.
-    #[error(
-        "precompute: envelope agg_id does not match config: envelope={envelope} config={config}"
-    )]
-    AggIdMismatch {
-        /// Envelope-side `agg_id`.
-        envelope: u64,
-        /// Config-side `agg_id`.
-        config: u64,
-    },
     /// Envelope's `sketch_type` doesn't match this Precompute's
     /// config.
     #[error(
@@ -472,9 +462,10 @@ impl PrecomputeImpl {
                     SketchEnvelope {
                         schema_version: 1,
                         sketch_type: cfg.sketch_type,
-                        agg_id: cfg.agg_id,
+                        view: None,
                         resource_labels: entry.resource_labels.clone(),
                         labels,
+                        source: Arc::clone(&entry.source),
                         window_start_ms: rng[0],
                         window_end_ms: rng[1],
                         // No sketch bytes on the estimate path.
@@ -497,9 +488,10 @@ impl PrecomputeImpl {
         Ok(vec![SketchEnvelope {
             schema_version: 1,
             sketch_type: cfg.sketch_type,
-            agg_id: cfg.agg_id,
+            view: None,
             resource_labels: entry.resource_labels.clone(),
             labels: base_labels,
+            source: Arc::clone(&entry.source),
             window_start_ms: rng[0],
             window_end_ms: rng[1],
             payload,
@@ -575,14 +567,6 @@ impl Precompute for PrecomputeImpl {
             Some(c) => c,
             None => return Err(PrecomputeError::NoConfig),
         };
-        // AggID match — strict. Mismatches are hard errors, not
-        // silent drops.
-        if cfg.agg_id != 0 && env.agg_id != 0 && env.agg_id != cfg.agg_id {
-            return Err(PrecomputeError::AggIdMismatch {
-                envelope: env.agg_id,
-                config: cfg.agg_id,
-            });
-        }
         if cfg.sketch_type != SketchType::Unspecified
             && env.sketch_type != SketchType::Unspecified
             && env.sketch_type != cfg.sketch_type

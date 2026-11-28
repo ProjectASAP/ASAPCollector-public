@@ -52,7 +52,8 @@ fn scalar_input(start: i32, end: i32) -> OtapPdata {
         .map(|value| SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::Unspecified,
-            agg_id: 0,
+            view: None,
+            source: Default::default(),
             resource_labels: vec![],
             labels: vec![KeyValue::new("route", "/checkout")],
             window_start_ms: 1_000,

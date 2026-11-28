@@ -98,7 +98,7 @@ pub struct PluginConfig {
     pub window_slide: Duration,
     /// Output metric name stamped onto every emitted envelope.
     pub output_metric_name: String,
-    /// Controller-plan join key.
+    /// Processor-side config key; not written to the output.
     pub agg_id: u64,
     /// Sketch-specific tuning knobs.
     pub sketch_params: SketchParams,
@@ -335,6 +335,8 @@ pub struct SketchTypeSpec {
     pub input: SketchInput,
     /// Its size parameters, with the ranges `resolve` accepts.
     pub parameters: &'static [SketchParameter],
+    /// The runtime's tag for the sketch, stamped on every envelope.
+    pub sketch_type: SketchType,
     build: fn(&SketchTypeSpec, &PluginConfig) -> SketchDispatch,
 }
 
@@ -379,6 +381,7 @@ const HLL_PRECISION: f64 = 14.0;
 pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
     SketchTypeSpec {
         config_name: SKETCH_TYPE_DDSKETCH,
+        sketch_type: SketchType::DDSketch,
         algorithm: SketchAlgorithm::DDSketch,
         input: SketchInput::Value,
         parameters: &[SketchParameter {
@@ -395,7 +398,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
         build: |spec, config| {
             let alpha = spec.parameter("alpha", config);
             SketchDispatch {
-                sketch_type: SketchType::DDSketch,
+                sketch_type: spec.sketch_type,
                 factory: Box::new(move || Box::new(DDSketchWrapper::new(alpha))),
                 observer: boxed_observer(DDSketchObserver),
             }
@@ -403,6 +406,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
     },
     SketchTypeSpec {
         config_name: SKETCH_TYPE_KLL,
+        sketch_type: SketchType::KLLSketch,
         algorithm: SketchAlgorithm::KLL,
         input: SketchInput::Value,
         parameters: &[SketchParameter {
@@ -425,7 +429,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
                 None
             };
             SketchDispatch {
-                sketch_type: SketchType::KLLSketch,
+                sketch_type: spec.sketch_type,
                 factory: Box::new(move || Box::new(KLLWrapper::new(k, seed))),
                 observer: boxed_observer(KLLObserver),
             }
@@ -433,6 +437,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
     },
     SketchTypeSpec {
         config_name: SKETCH_TYPE_HLL,
+        sketch_type: SketchType::HLLSketch,
         algorithm: SketchAlgorithm::HLL,
         input: SketchInput::Label,
         parameters: &[SketchParameter {
@@ -446,14 +451,15 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
                 le: Some(HLL_PRECISION),
             },
         }],
-        build: |_, _| SketchDispatch {
-            sketch_type: SketchType::HLLSketch,
+        build: |spec, _| SketchDispatch {
+            sketch_type: spec.sketch_type,
             factory: Box::new(|| Box::new(HLLWrapper::new())),
             observer: boxed_observer(HLLObserver),
         },
     },
     SketchTypeSpec {
         config_name: SKETCH_TYPE_COUNTSKETCH,
+        sketch_type: SketchType::CountSketch,
         algorithm: SketchAlgorithm::CountSketch,
         input: SketchInput::Label,
         parameters: &[
@@ -478,7 +484,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
                 .clone()
                 .unwrap_or_else(|| config.output_metric_name.clone());
             SketchDispatch {
-                sketch_type: SketchType::CountSketch,
+                sketch_type: spec.sketch_type,
                 factory: Box::new(move || Box::new(CountSketchWrapper::new(depth, width))),
                 observer: boxed_observer(CountSketchObserver { default_key }),
             }
@@ -486,6 +492,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
     },
     SketchTypeSpec {
         config_name: SKETCH_TYPE_COUNTMINSKETCH,
+        sketch_type: SketchType::CountMinSketch,
         algorithm: SketchAlgorithm::CountMinSketch,
         input: SketchInput::Label,
         parameters: &[
@@ -506,7 +513,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
             let width = spec.parameter("width", config) as usize;
             let depth = spec.parameter("depth", config) as usize;
             SketchDispatch {
-                sketch_type: SketchType::CountMinSketch,
+                sketch_type: spec.sketch_type,
                 factory: Box::new(move || Box::new(CMSWrapper::new(depth, width))),
                 observer: boxed_observer(CMSObserver),
             }
@@ -514,6 +521,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
     },
     SketchTypeSpec {
         config_name: SKETCH_TYPE_COUNTMINSKETCH_HEAP,
+        sketch_type: SketchType::CountMinSketchWithHeap,
         algorithm: SketchAlgorithm::CountMinSketchWithHeap,
         input: SketchInput::Label,
         parameters: &[
@@ -541,7 +549,7 @@ pub const SKETCH_TYPES: &[SketchTypeSpec] = &[
             let depth = spec.parameter("depth", config) as usize;
             let heap_size = spec.parameter("heap_size", config) as usize;
             SketchDispatch {
-                sketch_type: SketchType::CountMinSketchWithHeap,
+                sketch_type: spec.sketch_type,
                 factory: Box::new(move || Box::new(CMSHeapWrapper::new(depth, width, heap_size))),
                 observer: boxed_observer(CMSHeapObserver),
             }

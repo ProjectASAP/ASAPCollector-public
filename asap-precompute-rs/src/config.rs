@@ -14,8 +14,9 @@ use crate::envelope::SketchType;
 use crate::matchers::LabelMatcher;
 use crate::observation::{KeyValue, Observation};
 
-/// Controller-plan join key. One [`PrecomputeConfig`] per `AggId`; the
-/// controller's plan emits a flat list keyed by `AggId`.
+/// Processor-side config key: one [`PrecomputeConfig`] per `AggId` in a
+/// [`PrecomputeConfigSet`], and the prefix of its series keys. Not written
+/// to the output.
 pub type AggId = u64;
 
 /// Picks the windowing strategy.
@@ -192,7 +193,7 @@ fn as_wire_u64(v: f64) -> Option<u64> {
 /// plus `max_series` / `on_overflow`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrecomputeConfig {
-    /// Controller-plan join key. One config per `AggId`.
+    /// Processor-side config key. One config per `AggId`.
     pub agg_id: AggId,
     /// Determines which Sketch implementation handles observations
     /// for this `AggId`.

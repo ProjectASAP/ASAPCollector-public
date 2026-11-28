@@ -1051,6 +1051,7 @@ mod tests {
                 KeyValue::new("user.id", user),
             ],
             value: ObservationValue::float(v),
+            source: Default::default(),
         }
     }
 

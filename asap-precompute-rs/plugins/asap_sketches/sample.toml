@@ -31,8 +31,8 @@ plugin = "asap_sketches"
   ## Output metric name stamped onto every emitted envelope.
   output_metric_name = "http_request_duration_ms"
 
-  ## Aggregation-plan join key. Creation, merge, and estimate processors in
-  ## one logical dataflow must use the same value.
+  ## Processor-side config key (series keys, config pushes); not written to
+  ## the output.
   agg_id = 7
 
   ## Output and series controls. Creation and merge processors keep

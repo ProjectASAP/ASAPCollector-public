@@ -161,7 +161,7 @@ fn compare_op(op: MatchOp) -> CompareOpKind {
 
 /// The serde name of `value`'s enum variant, e.g. `TimeSeries` for
 /// `Source::TimeSeries { .. }`, so the printed names are the planner's.
-fn variant_name<T: Serialize>(value: &T) -> String {
+pub(crate) fn variant_name<T: Serialize>(value: &T) -> String {
     match serde_json::to_value(value).expect("a planner enum serializes") {
         serde_json::Value::String(name) => name,
         serde_json::Value::Object(map) if map.len() == 1 => map.keys().next().unwrap().clone(),

@@ -1,10 +1,30 @@
 //! Runtime sketch envelope: an ASAPv1 sketch payload from
 //! [`asap_sketchlib`] plus the runtime metadata around it (window
-//! bounds, `agg_id`, sketch type, labels, metric name, count,
-//! temporality).
+//! bounds, the collector view it is a state of, sketch type, labels,
+//! metric name, count, temporality).
 
-use crate::config::AggId;
-use crate::observation::KeyValue;
+use std::sync::Arc;
+
+use crate::observation::{KeyValue, SourceDescriptor};
+
+/// The collector view a state belongs to, in ASAPPlanner's terms: within the
+/// installed plan `plan_id`, the view at node `node_id`, whose stored state is
+/// `view_state_key`. The OTAP codec writes it as the state's metric metadata
+/// (`asap.plan_id`, `asap.node_id`, `asap.view_state_key`).
+///
+/// Example: `{plan_id: "9f1c…", node_id: 1, view_state_key:
+/// "{\"definition_id\":\"5597…\",\"window\":{\"tumbling\":{\"width_ms\":5000}},…}"}`.
+#[derive(
+    Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct ViewIdentity {
+    /// `PhysicalASAPDAG::plan_id()` of the installed plan.
+    pub plan_id: String,
+    /// The view's node id in that plan.
+    pub node_id: u64,
+    /// The planner's `ViewStateKey` of the view, as its JSON text.
+    pub view_state_key: String,
+}
 
 /// Identifies which sketch algorithm produced the envelope's payload
 /// bytes. The ASAPv1 payload carries its own kind id; the runtime keeps
@@ -77,9 +97,10 @@ pub struct SketchEnvelope {
     pub schema_version: u32,
     /// Identifies which sketch algorithm produced `payload`.
     pub sketch_type: SketchType,
-    /// Controller-plan join key. Pairs the envelope to a specific
-    /// [`crate::config::PrecomputeConfig`].
-    pub agg_id: AggId,
+    /// The collector view this is a state of; `None` outside
+    /// `planner_views` (a sketch configured by hand).
+    #[serde(default)]
+    pub view: Option<Arc<ViewIdentity>>,
     /// Resource-scope attributes captured at observation time (for
     /// OTel: `pmetric::ResourceMetrics::Resource()` attrs). Carried
     /// in-process so the adapter's encode path can faithfully
@@ -88,6 +109,10 @@ pub struct SketchEnvelope {
     /// Host-neutral string-string label pairs identifying the
     /// data-point-level (metric × attrs) series.
     pub labels: Vec<KeyValue>,
+    /// The scope, unit and description the series' points arrived with; a
+    /// collector view emits its state with them.
+    #[serde(default)]
+    pub source: Arc<SourceDescriptor>,
     /// Exclusive lower bound of the window `(start, end]` the payload
     /// summarizes (Unix milliseconds), as a Prometheus range selector and
     /// an OTLP delta point's `start_time_unix_nano`.
@@ -139,9 +164,18 @@ mod tests {
         let env = SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::DDSketch,
-            agg_id: 42,
+            view: Some(Arc::new(ViewIdentity {
+                plan_id: "p".into(),
+                node_id: 1,
+                view_state_key: "{}".into(),
+            })),
             resource_labels: vec![KeyValue::new("region", "us-east")],
             labels: vec![KeyValue::new("path", "/api")],
+            source: Arc::new(SourceDescriptor {
+                scope_name: "meter".into(),
+                unit: "s".into(),
+                ..Default::default()
+            }),
             window_start_ms: 1_000,
             window_end_ms: 2_000,
             payload: vec![1, 2, 3, 4],

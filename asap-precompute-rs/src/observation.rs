@@ -6,6 +6,8 @@
 //! runtime never sees host-specific types; it only sees [`Observation`]
 //! and [`crate::envelope::SketchEnvelope`].
 
+use std::sync::Arc;
+
 use crate::envelope::SketchEnvelope;
 
 /// Host-neutral input to [`crate::precompute::Precompute::observe`].
@@ -33,6 +35,10 @@ pub struct Observation {
     /// data-point-level series. Order is not significant for matching;
     /// the series-key helper sorts by key for stable hashing.
     pub labels: Vec<KeyValue>,
+    /// The instrumentation scope and metric descriptor the point arrived
+    /// under, kept so a collector view re-emits its state under them.
+    /// Shared by every point of one scope and metric.
+    pub source: Arc<SourceDescriptor>,
     /// The actual measurement. Exactly one of the
     /// `float`/`hash`/`bytes`/`envelope` fields inside is meaningful
     /// per [`ObservationValueKind`].
@@ -55,9 +61,31 @@ impl Observation {
             metric: metric.into(),
             resource_labels,
             labels,
+            source: Arc::default(),
             value,
         }
     }
+}
+
+/// What a received metric stream carries besides its resource, its point
+/// attributes and its points: the instrumentation scope and the metric's unit
+/// and description. A raw forward sends them unchanged, so a collector view
+/// emits its states under the same ones (the backend reads none of them as a
+/// label). Empty for points that did not come from OTLP.
+///
+/// Example: scope `io.opentelemetry.runtime` version `1.2`, unit `ms`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SourceDescriptor {
+    /// `InstrumentationScope.name`.
+    pub scope_name: String,
+    /// `InstrumentationScope.version`.
+    pub scope_version: String,
+    /// `InstrumentationScope.attributes` with string values.
+    pub scope_attributes: Vec<KeyValue>,
+    /// `Metric.unit`.
+    pub unit: String,
+    /// `Metric.description`.
+    pub description: String,
 }
 
 /// A single string-string label pair. Mirrors the `repeated KeyValue`

@@ -188,6 +188,7 @@ fn observe_then_tick_emits_one_envelope_per_series() {
         metric: "http.requests".into(),
         resource_labels: vec![KeyValue::new("service.name", "web")],
         labels: vec![KeyValue::new("method", label)],
+        source: Default::default(),
         value: ObservationValue::float(1.0),
     };
 
@@ -198,7 +199,7 @@ fn observe_then_tick_emits_one_envelope_per_series() {
     let envelopes = p.tick(10_001);
     assert_eq!(envelopes.len(), 2);
     for env in &envelopes {
-        assert_eq!(env.agg_id, 42);
+        assert_eq!(env.view, None, "a hand-configured sketch");
         assert_eq!(env.sketch_type, SketchType::DDSketch);
         assert_eq!(env.window_start_ms, 0);
         assert_eq!(env.window_end_ms, 10_000);
@@ -295,7 +296,7 @@ fn drain_flushes_mid_window_observations() {
     let envs = p.drain();
     assert_eq!(envs.len(), 1);
     let env = &envs[0];
-    assert_eq!(env.agg_id, 7);
+    assert_eq!(env.view, None);
     assert_eq!(env.window_start_ms, 0);
     assert_eq!(env.window_end_ms, 10_000);
     assert_eq!(env.count, 3);
@@ -399,7 +400,6 @@ fn observe_envelope_merges_into_the_window_holding_its_end() {
     let env = asap_precompute_rs::SketchEnvelope {
         schema_version: 1,
         sketch_type: SketchType::DDSketch,
-        agg_id: 5,
         resource_labels: vec![KeyValue::new("service.name", "checkout")],
         labels: vec![KeyValue::new("k", "a")],
         window_start_ms: 0,
@@ -416,39 +416,9 @@ fn observe_envelope_merges_into_the_window_holding_its_end() {
     assert_eq!((out[0].window_start_ms, out[0].window_end_ms), (0, 10_000));
     assert_eq!(out.len(), 1);
     let got = &out[0];
-    assert_eq!(got.agg_id, 5);
     assert_eq!(got.resource_labels, env.resource_labels);
     // entry.count carries the upstream envelope count.
     assert_eq!(got.count, 17);
-}
-
-#[test]
-fn observe_envelope_rejects_agg_id_mismatch() {
-    let cfg = PrecomputeConfig {
-        agg_id: 5,
-        sketch_type: SketchType::DDSketch,
-        mode: AggregationMode::Tumbling,
-        window: WindowSpec {
-            size: Duration::from_secs(10),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let p = PrecomputeImpl::new(
-        Some(cfg),
-        Some(make_factory()),
-        Some(Box::new(FakeObserver)),
-    );
-
-    let env = asap_precompute_rs::SketchEnvelope {
-        schema_version: 1,
-        sketch_type: SketchType::DDSketch,
-        agg_id: 99,
-        payload: b"x".to_vec(),
-        ..Default::default()
-    };
-    let err = p.observe_envelope(&env).unwrap_err();
-    assert!(matches!(err, PrecomputeError::AggIdMismatch { .. }));
 }
 
 // ----------------------------------------------------------------
@@ -661,7 +631,6 @@ fn envelopes_of_one_window_from_several_sources_merge_in_any_order() {
     let env = |end: u64, source: &str| asap_precompute_rs::SketchEnvelope {
         schema_version: 1,
         sketch_type: SketchType::DDSketch,
-        agg_id: 1,
         labels: vec![KeyValue::new("k", "a")],
         window_start_ms: end - 10_000,
         window_end_ms: end,
@@ -859,6 +828,7 @@ mod real_sketch {
             metric: metric.into(),
             resource_labels: vec![KeyValue::new("service.name", "test")],
             labels: vec![KeyValue::new("k", label_v)],
+            source: Default::default(),
             value: ObservationValue::float(val),
         }
     }
@@ -869,6 +839,7 @@ mod real_sketch {
             metric: metric.into(),
             resource_labels: vec![KeyValue::new("service.name", "test")],
             labels: vec![KeyValue::new("k", label_v)],
+            source: Default::default(),
             value: ObservationValue::bytes(key.to_vec()),
         }
     }
@@ -1126,6 +1097,7 @@ mod real_sketch {
                 metric: "events".into(),
                 resource_labels: vec![KeyValue::new("service.name", "test")],
                 labels: vec![KeyValue::new("k", "tag")],
+                source: Default::default(),
                 value: ObservationValue {
                     kind: asap_precompute_rs::ObservationValueKind::Float,
                     float: 1.0,

@@ -1,8 +1,8 @@
 //! `urn:asap:processor:window_merge`: merges sketches from many sources by
 //! the window they describe, not by when they arrive.
 //!
-//! Each input envelope names its series (labels, sketch type, agg id) and its
-//! window. Envelopes with the same series and window are merged. A window is
+//! Each input envelope names its series (labels, sketch type, and the
+//! collector view it is a state of, if any) and its window. Envelopes with the same series and window are merged. A window is
 //! emitted once: as soon as each of `sources` sources has sent it, or `grace`
 //! after its end on this host's clock if a source is missing. Each source
 //! (`asap_sketches`) sends all of a window's sketches in one message, in window
@@ -95,10 +95,10 @@ fn series_key(e: &SketchEnvelope) -> String {
         .collect();
     resource.sort();
     format!(
-        "{}|{}|{}|{}|{:?}|{:?}",
+        "{}|{}|{:?}|{}|{:?}|{:?}",
         e.metric_name,
         e.sketch_type.name(),
-        e.agg_id,
+        e.view,
         e.window_start_ms,
         resource,
         labels
@@ -407,5 +407,32 @@ mod tests {
         assert!(get("asap.stage.emitted")
             .labels
             .contains(&KeyValue::new("stage", "merge")));
+    }
+
+    /// Merging keeps each state's view: two sources' states of one view and
+    /// series merge into one state of that view; another view's state of the
+    /// same series and window stays apart.
+    #[test]
+    fn merges_by_view_and_keeps_the_view_identity() {
+        use crate::envelope::ViewIdentity;
+        let view = |node_id| {
+            Some(Arc::new(ViewIdentity {
+                plan_id: "p".into(),
+                node_id,
+                view_state_key: "{}".into(),
+            }))
+        };
+        let state = |values, node_id| SketchEnvelope {
+            view: view(node_id),
+            ..hll(values, 0)
+        };
+        let mut m = WindowMerger::default();
+        m.add(state(0..1000, 1)).unwrap();
+        m.add(state(500..1500, 1)).unwrap();
+        m.add(state(0..10, 2)).unwrap();
+        let mut out = m.due(65_000, Duration::from_secs(5), 0);
+        out.sort_by_key(|e| e.view.as_ref().map(|v| v.node_id));
+        let views: Vec<_> = out.iter().map(|e| (e.view.clone(), e.count)).collect();
+        assert_eq!(views, [(view(1), 2000), (view(2), 1000)]);
     }
 }

@@ -39,7 +39,7 @@ Field reference:
 | `sketch_type` | yes | One of `ddsketch` / `kll` / `hll` / `countsketch` / `countminsketch` / `countminsketch_heap`. Case-insensitive. |
 | `window_size` | yes | Duration string (e.g. `"10s"`). Tumbling window length; windows are `(start, end]` aligned to Unix time, as Prometheus range selectors, so a point at exactly `end` belongs to the window ending there. |
 | `output_metric_name` | yes | Metric name stamped onto every emitted envelope. |
-| `agg_id` | optional | Controller-plan join key. Defaults to `0`. |
+| `agg_id` | optional | Processor-side config key (series keys and config pushes); not written to the output. Defaults to `0`. |
 | `sketch_params.relative_accuracy` | ddsketch | DDSketch alpha (`0 < α < 1`). Default `0.01`. |
 | `sketch_params.k` | kll | KLL buffer size, `8 ≤ k ≤ 26602`. Default `200`. |
 | `sketch_params.seed` | kll | Optional deterministic compaction seed. Default unseeded. |

@@ -34,6 +34,7 @@ deltas.
 | `otap::schema` | `sketch.*` carrier attribute keys. |
 | `otap::codec` | `SketchEnvelope` ↔ `OtapPdata` (`otap-engine`). |
 | `otap::processor` | The `urn:asap:processor:asap_sketches` processor (`otap-engine`). |
+| `otap::planner_views` | Loads and checks `collector-views.json`, the collector views of an installed ASAPPlanner plan (`otap-engine`). |
 
 ## Dependency
 

@@ -1,10 +1,11 @@
 //! Per-[`crate::precompute::Precompute`] window manager.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use crate::config::{OnOverflow, PrecomputeConfig};
 use crate::envelope::SketchEnvelope;
-use crate::observation::{KeyValue, Observation};
+use crate::observation::{KeyValue, Observation, SourceDescriptor};
 use crate::precompute::{BoxedObserver, PrecomputeError, Sketch, SketchFactory, StatsSnapshot};
 
 /// Per-series state held inside a window.
@@ -25,6 +26,8 @@ pub struct SeriesEntry {
     /// Host-neutral data-point attribute set used by series-key
     /// construction and by the encode path at the adapter boundary.
     pub labels: Vec<KeyValue>,
+    /// The scope and metric descriptor of the series' first point.
+    pub source: Arc<SourceDescriptor>,
     /// Most recent observation timestamp; used for
     /// [`crate::config::OnOverflow::EvictOldest`].
     pub last_seen_ms: u64,
@@ -250,6 +253,7 @@ impl WindowState {
             sketch,
             resource_labels: resource_copy,
             labels: labels_copy,
+            source: Arc::clone(&obs.source),
             last_seen_ms: obs.timestamp_ms,
             count: 0,
         };
@@ -302,6 +306,7 @@ impl WindowState {
                 sketch,
                 resource_labels: env.resource_labels.clone(),
                 labels: env.labels.clone(),
+                source: Arc::clone(&env.source),
                 last_seen_ms: ref_ms,
                 count: 0,
             };

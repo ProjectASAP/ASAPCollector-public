@@ -10,7 +10,7 @@ license = "MIT"
 # The rev ASAPPlanner's workspace pins (see `asap-types` below), so Cargo
 # builds one asap_sketchlib for both.
 asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "d050037bb127d425cb4160ea9b5960856ef3188c" }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "1"
 
 # Apache Arrow is only pulled in by the OTAP codec. Consumers on the

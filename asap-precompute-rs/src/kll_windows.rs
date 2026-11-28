@@ -186,12 +186,6 @@ impl KllWindowStore {
                 "inbound pane must contain a full ASAPv1 KLL sketch",
             ));
         }
-        if self.config.agg_id != 0 && envelope.agg_id != self.config.agg_id {
-            return Err(PrecomputeError::AggIdMismatch {
-                envelope: envelope.agg_id,
-                config: self.config.agg_id,
-            });
-        }
         if !envelope.window_start_ms.is_multiple_of(self.pane_ms)
             || envelope.window_start_ms.checked_add(self.pane_ms) != Some(envelope.window_end_ms)
         {
@@ -291,9 +285,10 @@ impl KllWindowStore {
                 Ok(SketchEnvelope {
                     schema_version: 1,
                     sketch_type: SketchType::KLLSketch,
-                    agg_id: self.config.agg_id,
+                    view: None,
                     resource_labels: entry.resource_labels,
                     labels: entry.labels,
+                    source: Default::default(),
                     window_start_ms: start_ms,
                     window_end_ms: end_ms,
                     payload: entry.sketch.snapshot()?,

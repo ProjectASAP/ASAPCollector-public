@@ -58,6 +58,7 @@ a property of the data itself; a scheme that closed each series' window on
 an independent schedule would still have this field behave the same way,
 one value per sketch instance.
 
+(`agg_id` no longer travels on the wire; see "Collector views" below.)
 `agg_id` sits at the boundary between Schema and Dictionary: it's really a
 join key back to a Schema-tier config (which sketch parameters apply), so
 conceptually it belongs with `sketch_type` — but because in principle
@@ -337,6 +338,31 @@ Same `series_id`, same window bounds each flush — only `envelope` (or
 `value`) actually changes row to row; `series_id` itself is just a
 lookup key, never re-derived from `metric`/`labels`.
 
+## Collector views: ASAPPlanner's identity on the raw samples' structure
+
+The control plane describes the views of an installed ASAPPlanner plan that
+it assigns to the collector in `collector-views.json` (loaded and checked by
+`otap::planner_views`; `asap_sketches` will read it once building the views'
+states is wired). A view's
+state uses the received samples' OTAP structure, not the `sketch.*` carrier
+above:
+
+| Tier | Raw sample | Collector view state |
+|---|---|---|
+| Schema (Metric) | name, type, unit, description | name `<metric>.asap_view.<node_id>`, type Summary, the source metric's unit and description, `Metric.metadata`: `asap.plan_id` (string), `asap.node_id` (int), `asap.view_state_key` (the planner's `ViewStateKey`, JSON) |
+| Dictionary | Resource, Scope and point attributes | the same, as received (no `sketch.*` Resource attributes, no `sketch.series_id`) |
+| Record | `time_unix_nano` + value | Summary point: window `(start_time_unix_nano, time_unix_nano]`, `count`, point attribute `sketch.envelope` (ASAPv1) |
+
+The sketch type of a view state is read from θ in its view state key. OTAP
+Arrow keeps the metadata in its metric attribute table, and the OTAP to OTLP
+conversion writes it back as `Metric.metadata`. `tests/fixtures/collector-views/q01`
+holds the q01 plan, its `collector-views.json` and the OTLP request body of one
+state (`otlp-body.pb`).
+
+A hand-configured sketch's processor key `agg_id` no longer travels: its
+SCHEMA is the Resource's `sketch.type`, `sketch.schema_version` and
+`sketch.size`, and the `agg_id` columns above are the processor-side config key.
+
 ## Open design questions
 
 ### Control plane vs. data plane: where does SCHEMA come from?
@@ -356,7 +382,8 @@ emits a `RECORD` tagged with that `agg_id` — not something a receiver
 learns from the stream itself.
 
 That leaves the data plane (`SKETCH_STREAM → DICTIONARY → RECORD`)
-responsible only for carrying `agg_id` as a join key back to a `SCHEMA`
+responsible only for carrying a key back to a `SCHEMA` (today the
+Resource's `sketch.*` attributes; a collector view's `Metric.metadata`)
 the receiver is assumed to already have. Open question: should the data
 plane ever be able to carry `SCHEMA` inline (self-describing, no
 external config channel required), or is it acceptable to require the
@@ -373,8 +400,8 @@ it. The real OTAP metrics mapping implemented by `otap/codec.rs` is:
 
 | Sketch entity | Native OTAP representation |
 |---|---|
-| `SCHEMA` | Attributes of the aggregation plan's Resource |
-| `DICTIONARY` / `LABELS` | Metric name plus attributes of the series' instrumentation Scope |
+| `SCHEMA` | Attributes of the aggregation plan's Resource (a collector view: `Metric.metadata`) |
+| `DICTIONARY` / `LABELS` | Metric name plus attributes of the series' instrumentation Scope `asap.series` (a collector view: the received Resource, Scope and point attributes) |
 | `RECORD` | SummaryDataPoint + SummaryDpAttrs for sketch envelopes; NumberDataPoint for scalar estimates |
 
 For a sketch `RECORD`, `SummaryDpAttrs["sketch.envelope"]` contains the
