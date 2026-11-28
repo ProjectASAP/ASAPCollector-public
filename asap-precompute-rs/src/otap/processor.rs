@@ -685,6 +685,63 @@ mod tests {
     }
 
     #[test]
+    fn matchers_reach_the_runtime_config_and_bad_ones_are_rejected() {
+        use crate::matchers::{LabelMatcher, MatchOp};
+        let parse = |extra: serde_json::Value| {
+            let mut config = serde_json::json!({
+                "sketch_type": "ddsketch", "window_size": "10s",
+                "output_metric_name": "out"
+            });
+            config
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<super::AsapSketchesUserConfig>(config)
+                .map_err(|e| e.to_string())?
+                .into_plugin_config()
+                .map_err(|e| e.to_string())
+        };
+        let config = parse(serde_json::json!({"matchers": [
+            {"name": "__name__", "op": "=", "value": "http.server.request.duration"},
+            {"name": "http.route", "op": "!=", "value": "/health"}
+        ]}))
+        .unwrap();
+        let (runtime, _) = super::resolve_plugin_config(&config).unwrap();
+        assert_eq!(
+            runtime.matchers,
+            vec![
+                LabelMatcher::equal("__name__", "http.server.request.duration"),
+                LabelMatcher {
+                    name: "http.route".into(),
+                    op: MatchOp::NotEqual,
+                    value: "/health".into(),
+                },
+            ]
+        );
+        for bad in [
+            serde_json::json!([{"name": "", "op": "=", "value": "x"}]),
+            serde_json::json!([{"name": "a", "op": "=~", "value": "x"}]),
+            serde_json::json!([{"name": "a", "value": "x"}]),
+            serde_json::json!([{"name": "a", "op": "=", "value": "x", "regex": true}]),
+        ] {
+            assert!(
+                parse(serde_json::json!({"matchers": bad.clone()})).is_err(),
+                "{bad}"
+            );
+        }
+        // per_attribute replaces a point's labels before the runtime sees
+        // it, so only the metric name can be matched there.
+        let per_attribute = |name: &str| {
+            parse(serde_json::json!({
+                "per_attribute": ["http.route"],
+                "matchers": [{"name": name, "op": "=", "value": "v"}]
+            }))
+        };
+        assert!(per_attribute("http.route").is_err());
+        assert!(per_attribute("__name__").is_ok());
+    }
+
+    #[test]
     fn sliding_config_selects_pane_timer_and_validates_alignment() {
         let parse = |size: &str, slide: &str, transmit: bool| {
             serde_json::from_value::<super::AsapSketchesUserConfig>(serde_json::json!({"sketch_type":"kll","window_size":size,"window_slide":slide,"output_metric_name":"rolling","transmit_sketch":transmit,"quantiles":[0.5,0.99]})).unwrap().into_plugin_config()

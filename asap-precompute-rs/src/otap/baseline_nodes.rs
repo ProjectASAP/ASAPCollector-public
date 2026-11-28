@@ -1035,6 +1035,7 @@ static RAW_SINK: ProcessorFactory<OtapPdata> = ProcessorFactory {
 mod tests {
     use super::*;
     use crate::observation::ObservationValue;
+    use std::collections::BTreeSet;
 
     fn point(ts: u64, route: &str, user: &str, v: f64) -> Observation {
         Observation {
@@ -1239,6 +1240,48 @@ mod tests {
         // The next window waits for its own message.
         raw.answered(next, 60_200, true);
         assert!(raw.due(60_210).is_empty());
+    }
+
+    #[test]
+    fn exact_branch_puts_a_boundary_point_in_the_window_ending_there() {
+        // Windows are `(start, end]`, as Prometheus range selectors.
+        let mut b = branch();
+        b.observe(&point(60_000, "/a", "u0", 1.0));
+        b.observe(&point(60_001, "/a", "u0", 2.0));
+        let windows: BTreeSet<(u64, u64, u64)> = b
+            .close(u64::MAX)
+            .iter()
+            .map(|e| (e.window_start_ms, e.window_end_ms, e.count))
+            .collect();
+        assert_eq!(
+            windows,
+            BTreeSet::from([(0, 60_000, 1), (60_000, 120_000, 1)])
+        );
+    }
+
+    #[test]
+    fn raw_sink_counts_a_boundary_point_in_the_window_ending_there() {
+        let mut raw = RawSink {
+            config: serde_json::from_value(serde_json::json!({})).unwrap(),
+            windows: BTreeMap::new(),
+            in_flight: HashMap::new(),
+            next_id: 0,
+            emitted_until: 0,
+            sent_until_ms: 0,
+            slots: BTreeMap::new(),
+            sent_bytes: 0,
+            timer_started: false,
+        };
+        let at_end = raw.send(&[point(60_000, "/a", "u1", 1.0)]);
+        raw.answered(at_end, 60_050, true);
+        assert!(
+            raw.due(60_060).is_empty(),
+            "the source may still send another point at 60 s"
+        );
+        let _next = raw.send(&[point(60_001, "/a", "u1", 1.0)]);
+        let out = raw.due(60_070);
+        assert_eq!(get(&out, "asap.points", ("method", "raw")), Some(1.0));
+        assert!(out.iter().all(|e| e.window_end_ms == 60_000));
     }
 
     fn branch_window(ts: u64) -> SketchEnvelope {

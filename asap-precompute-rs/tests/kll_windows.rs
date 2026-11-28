@@ -288,3 +288,30 @@ fn small_high_value_pane_cannot_outweigh_a_large_compacted_low_value_pane() {
     let result = s.quantile_over_time(0, 20, &[0.5, 0.99]).unwrap();
     assert!(result.iter().all(|e| e.value == 1. && e.count == 20_010));
 }
+
+#[test]
+fn pane_boundary_sample_belongs_to_the_pane_ending_there() {
+    // Panes are `(start, end]`, as Prometheus range selectors.
+    let mut s = store();
+    for (time, value) in [(10, 1.), (20, 2.)] {
+        s.observe(&observation(time, value, "checkout")).unwrap();
+    }
+    s.advance(21);
+    assert_eq!(s.query(0, 10).unwrap()[0].count, 1);
+    assert_eq!(s.query(10, 20).unwrap()[0].count, 1);
+}
+
+#[test]
+fn pane_stays_open_at_its_end_and_closes_just_after() {
+    let mut s = store();
+    s.observe(&observation(5, 1., "checkout")).unwrap();
+    s.advance(10);
+    assert!(s.query(0, 10).is_err(), "a sample at 10 may still arrive");
+    s.observe(&observation(10, 2., "checkout")).unwrap();
+    s.advance(11);
+    assert_eq!(s.query(0, 10).unwrap()[0].count, 2);
+    assert!(matches!(
+        s.observe(&observation(10, 3., "checkout")),
+        Err(PrecomputeError::LateData)
+    ));
+}

@@ -538,6 +538,162 @@ fn late_data_returns_late_error() {
     assert_eq!(s.dropped_late, 1);
 }
 
+// ----------------------------------------------------------------
+// Window boundaries follow Prometheus: a window is `(start, end]`, a
+// sample at `t` belongs to the window ending at ⌈t / w⌉ · w, and the
+// window closes once a sample later than its end arrives.
+
+fn ten_second_windows() -> PrecomputeImpl {
+    let cfg = PrecomputeConfig {
+        agg_id: 1,
+        sketch_type: SketchType::DDSketch,
+        mode: AggregationMode::Tumbling,
+        window: WindowSpec {
+            size: Duration::from_secs(10),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    PrecomputeImpl::new(
+        Some(cfg),
+        Some(make_factory()),
+        Some(Box::new(FakeObserver)),
+    )
+}
+
+fn sample_at(ts: u64) -> Observation {
+    Observation {
+        timestamp_ms: ts,
+        metric: "m".into(),
+        labels: vec![KeyValue::new("k", "a")],
+        value: ObservationValue::float(1.0),
+        ..Default::default()
+    }
+}
+
+/// `(window_start_ms, window_end_ms, count)` of each emitted envelope.
+fn windows(envs: &[asap_precompute_rs::SketchEnvelope]) -> Vec<(u64, u64, u64)> {
+    let mut out: Vec<_> = envs
+        .iter()
+        .map(|e| (e.window_start_ms, e.window_end_ms, e.count))
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn sample_on_a_boundary_belongs_to_the_window_ending_there() {
+    let p = ten_second_windows();
+    p.observe(&sample_at(10_000)).expect("boundary sample");
+    p.observe(&sample_at(10_001)).expect("next window");
+    assert_eq!(windows(&p.tick(10_001)), vec![(0, 10_000, 1)]);
+    assert_eq!(windows(&p.drain()), vec![(10_000, 20_000, 1)]);
+}
+
+#[test]
+fn window_stays_open_at_its_end_and_closes_just_after() {
+    let p = ten_second_windows();
+    p.observe(&sample_at(5_000)).expect("observe");
+    assert!(p.tick(10_000).is_empty(), "a sample at 10 s may still arrive");
+    // That sample lands in the open window.
+    p.observe(&sample_at(10_000)).expect("end sample");
+    assert_eq!(windows(&p.tick(10_001)), vec![(0, 10_000, 2)]);
+}
+
+#[test]
+fn later_samples_close_each_window_they_pass() {
+    let p = ten_second_windows();
+    for ts in [5_000, 15_000, 25_000] {
+        p.observe(&sample_at(ts)).expect("observe");
+    }
+    // Both closed windows are returned by the next tick, whatever its time.
+    assert_eq!(
+        windows(&p.tick(25_000)),
+        vec![(0, 10_000, 1), (10_000, 20_000, 1)]
+    );
+    assert_eq!(windows(&p.drain()), vec![(20_000, 30_000, 1)]);
+}
+
+#[test]
+fn out_of_order_sample_goes_to_its_own_open_window_and_is_dropped_once_closed() {
+    let p = ten_second_windows();
+    p.observe(&sample_at(12_000)).expect("observe");
+    // Older, but its window (10 s, 20 s] is still open.
+    p.observe(&sample_at(11_000)).expect("out of order, open window");
+    // 21 s closes (10 s, 20 s].
+    p.observe(&sample_at(21_000)).expect("observe");
+    for late in [15_000, 20_000, 9_000] {
+        assert!(matches!(
+            p.observe(&sample_at(late)),
+            Err(PrecomputeError::LateData)
+        ));
+    }
+    assert_eq!(p.stats().dropped_late, 3);
+    assert_eq!(windows(&p.tick(21_000)), vec![(10_000, 20_000, 2)]);
+    assert_eq!(windows(&p.drain()), vec![(20_000, 30_000, 1)]);
+}
+
+#[test]
+fn sample_after_an_idle_close_is_dropped_and_the_next_window_opens_on_demand() {
+    let p = ten_second_windows();
+    p.observe(&sample_at(5_000)).expect("observe");
+    // The idle timer closes (0 s, 10 s] long after its end.
+    assert_eq!(windows(&p.tick(42_000)), vec![(0, 10_000, 1)]);
+    assert!(matches!(
+        p.observe(&sample_at(10_000)),
+        Err(PrecomputeError::LateData)
+    ));
+    // The window after the closed one still accepts samples.
+    p.observe(&sample_at(10_001)).expect("next window");
+    assert_eq!(windows(&p.drain()), vec![(10_000, 20_000, 1)]);
+}
+
+#[test]
+fn metric_name_matcher_admits_only_that_metric() {
+    use asap_precompute_rs::{LabelMatcher, MatchOp};
+    let cfg = PrecomputeConfig {
+        agg_id: 1,
+        sketch_type: SketchType::DDSketch,
+        mode: AggregationMode::Tumbling,
+        window: WindowSpec {
+            size: Duration::from_secs(10),
+            ..Default::default()
+        },
+        matchers: vec![
+            LabelMatcher::equal("__name__", "http.requests"),
+            LabelMatcher {
+                name: "method".into(),
+                op: MatchOp::NotEqual,
+                value: "POST".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    let p = PrecomputeImpl::new(
+        Some(cfg),
+        Some(make_factory()),
+        Some(Box::new(FakeObserver)),
+    );
+    let obs = |metric: &str, method: &str| Observation {
+        timestamp_ms: 1_000,
+        metric: metric.into(),
+        labels: vec![KeyValue::new("method", method)],
+        value: ObservationValue::float(1.0),
+        ..Default::default()
+    };
+    for o in [
+        obs("http.requests", "GET"),
+        obs("http.requests", "POST"),
+        obs("other", "GET"),
+    ] {
+        p.observe(&o).expect("observe");
+    }
+    let envs = p.drain();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0].count, 1);
+    assert_eq!(envs[0].labels, vec![KeyValue::new("method", "GET")]);
+}
+
 #[test]
 fn max_series_drop_returns_overflow() {
     let cfg = PrecomputeConfig {
