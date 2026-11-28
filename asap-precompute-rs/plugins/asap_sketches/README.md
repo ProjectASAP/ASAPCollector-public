@@ -37,25 +37,34 @@ Field reference:
 | Field | Required | Description |
 |---|---|---|
 | `sketch_type` | yes | One of `ddsketch` / `kll` / `hll` / `countsketch` / `countminsketch` / `countminsketch_heap`. Case-insensitive. |
-| `window_size` | yes | Duration string (e.g. `"10s"`). Tumbling window rotation period. |
+| `window_size` | yes | Duration string (e.g. `"10s"`). Tumbling window length; windows are `(start, end]` aligned to Unix time, as Prometheus range selectors, so a point at exactly `end` belongs to the window ending there. |
 | `output_metric_name` | yes | Metric name stamped onto every emitted envelope. |
-| `agg_id` | optional | Controller-plan join key. Defaults to `0`. |
+| `agg_id` | optional | Processor-side config key (series keys and config pushes); not written to the output. Defaults to `0`. |
 | `sketch_params.relative_accuracy` | ddsketch | DDSketch alpha (`0 < α < 1`). Default `0.01`. |
-| `sketch_params.k` | kll | KLL buffer size. Default `200`. |
+| `sketch_params.k` | kll | KLL buffer size, `8 ≤ k ≤ 26602`. Default `200`. |
 | `sketch_params.seed` | kll | Optional deterministic compaction seed. Default unseeded. |
-| `sketch_params.width` | countsketch, cms | Sketch column count. Default `2048`. |
-| `sketch_params.depth` | countsketch, cms | Sketch row count. Default `4`. |
-| `sketch_params.rows` / `columns` | countminsketch_heap | CMS dimensions. Default `4` / `2048`. |
-| `sketch_params.k` | countminsketch_heap | Heavy-hitter heap size. Default `10`. |
+| `sketch_params.width` | countsketch, cms | Sketch column count, `≥ 1`. Default `2048`. |
+| `sketch_params.depth` | countsketch, cms | Sketch row count, `≥ 1`. Default `4`. |
+| `sketch_params.rows` / `columns` | countminsketch_heap | CMS dimensions, `≥ 1`. Default `4` / `2048`. |
+| `sketch_params.k` | countminsketch_heap | Heavy-hitter heap size, `≥ 1`. Default `10`. |
 | `default_key` | optional | CountSketch fallback key when an observation has neither bytes nor labels. Defaults to `output_metric_name`. |
 | `omit_resource_attrs` | optional | Exclude resource attributes from series identity. Default `false`. |
 | `global_aggregation` | optional | Collapse all observations into one series. Default `false`. |
 | `emit_window_stats` | optional | Add `sample_count` and `window_duration_seconds` labels. Default `false`. |
 | `transmit_sketch` | optional | `true` emits each window's full sketch as the self-describing ASAPv1 envelope from `asap_sketchlib` (every sketch type; there are no deltas). `false` emits scalar estimates: quantiles (DDSketch/KLL), a cardinality (HLL), or the top-k keys with `key` and `rank` labels (`countminsketch_heap`). Default `true`. |
 | `quantiles` | estimate mode | DDSketch/KLL quantiles to emit, such as `[0.5, 0.99]`. |
+| `matchers` | optional | List of `{name, op, value}` (all three required), `op` one of `"="` / `"!="`, as PromQL label matchers; a point is admitted only when all hold. `name = "__name__"` matches the metric name, any other name a data-point attribute. With `per_attribute`, only `__name__`. Inbound sketches are not filtered. Default empty. |
 
 HLL uses sketchlib's fixed precision-14 HyperLogLog, so it has no
-`sketch_params`.
+`sketch_params`. A `sketch_params` value outside its range is replaced by
+the default.
+
+`asap-collector --print-capabilities` prints these sketches, with their
+parameter ranges under ASAPPlanner's `SketchParams` names (`alpha`, `k`,
+`precision`, `width`, `depth`, `heap_size`), and the operators the collector
+runs, as JSON in ASAPPlanner's vocabulary
+(`src/otap/capabilities.rs`; golden copy in
+`tests/golden/capabilities.json`).
 
 ## Lifecycle
 
@@ -67,9 +76,13 @@ calls — no separate Tokio-task lifecycle needed:
    turns the real `OtapPdata` directly into `Vec<Observation>`
    (content-routed: a data point carrying `sketch.envelope` merges as a
    pre-aggregated sketch via `Precompute::observe_envelope`; everything
-   else is a plain scalar sample).
-2. **`NodeControlMsg::TimerTick`** (regular flush) / **`Shutdown`**
-   (final drain) — `Precompute::tick`/`drain` produce
+   else is a plain scalar sample). Each point goes to the window
+   holding its timestamp; a point past a window's end closes it, and a
+   point whose window has closed is dropped and counted
+   (`dropped_late`). After the batch, `Precompute::take_closed` returns
+   the windows its points closed.
+2. **`NodeControlMsg::TimerTick`** (idle close, 5 s after a window's
+   end) / **`Shutdown`** (final drain) — `Precompute::tick`/`drain` produce
    `SketchEnvelope`s, and `codec::encode_envelopes_to_pdata()` builds
    the real `OtapPdata` directly from them (no intermediate
    `RecordBatch` or two-batch family) before sending via

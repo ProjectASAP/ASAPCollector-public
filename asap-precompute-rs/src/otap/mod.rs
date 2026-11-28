@@ -15,9 +15,13 @@ pub mod answer_nodes;
 #[cfg(feature = "otap-engine")]
 pub mod baseline_nodes;
 #[cfg(feature = "otap-engine")]
+pub mod capabilities;
+#[cfg(feature = "otap-engine")]
 pub mod codec;
 #[cfg(feature = "otap-engine")]
 pub mod hh_accuracy;
+#[cfg(feature = "otap-engine")]
+pub mod planner_views;
 #[cfg(feature = "otap-engine")]
 pub mod processor;
 #[cfg(feature = "otap-engine")]
@@ -27,6 +31,7 @@ pub mod window_merge;
 
 pub use config::{ConfigError, PluginConfig, SketchDispatch};
 pub use schema::{
-    ATTR_AGG_ID, ATTR_ENVELOPE, ATTR_SCHEMA_VERSION, ATTR_SERIES_ID, ATTR_SKETCH_SIZE,
-    ATTR_SKETCH_TYPE, ATTR_WINDOW_END_MS, ATTR_WINDOW_START_MS,
+    ATTR_ENVELOPE, ATTR_SCHEMA_VERSION, ATTR_SERIES_ID, ATTR_SKETCH_SIZE, ATTR_SKETCH_TYPE,
+    ATTR_WINDOW_END_MS, ATTR_WINDOW_START_MS, META_NODE_ID, META_PLAN_ID, META_VIEW_STATE_KEY,
+    SERIES_SCOPE_NAME, VIEW_NAME_INFIX,
 };

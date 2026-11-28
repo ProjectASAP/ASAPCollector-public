@@ -1,0 +1,351 @@
+{
+  "planner_wire_version": 16,
+  "plan_id": "e7bbf087afd4b3737f490655fb98893e",
+  "commit_grace_ms": 8000,
+  "backend_reads_raw": {
+    "data": false
+  },
+  "outputs": [
+    1
+  ],
+  "dag": {
+    "nodes": [
+      {
+        "id": 0,
+        "payload": {
+          "NonASAP": {
+            "Scan": {
+              "source": {
+                "TimeSeries": {
+                  "metric": "data"
+                }
+              },
+              "predicates": [
+                {
+                  "Compare": {
+                    "left": {
+                      "Column": 2
+                    },
+                    "op": "Eq",
+                    "right": {
+                      "Literal": {
+                        "Utf8": "r0"
+                      }
+                    },
+                    "semantics": "promql"
+                  }
+                },
+                {
+                  "Compare": {
+                    "left": {
+                      "Column": 3
+                    },
+                    "op": "Ne",
+                    "right": {
+                      "Literal": {
+                        "Utf8": "s1"
+                      }
+                    },
+                    "semantics": "promql"
+                  }
+                }
+              ],
+              "schema": {
+                "fields": [
+                  {
+                    "name": "ts",
+                    "dtype": {
+                      "Plain": "timestamp"
+                    },
+                    "nullable": false
+                  },
+                  {
+                    "name": "value",
+                    "dtype": {
+                      "Plain": "float64"
+                    },
+                    "nullable": false
+                  },
+                  {
+                    "name": "region",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true
+                  },
+                  {
+                    "name": "service",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": true
+                  },
+                  {
+                    "name": "$promql_series_identity",
+                    "dtype": {
+                      "Plain": "utf8"
+                    },
+                    "nullable": false
+                  }
+                ],
+                "time_index": 0,
+                "unique_keys": [
+                  [
+                    4,
+                    0
+                  ]
+                ],
+                "closed": true
+              }
+            }
+          }
+        },
+        "output_state": {
+          "timing": "ingestion_time",
+          "primitive": "Raw"
+        },
+        "lifetime": "None",
+        "output_schema": {
+          "fields": [
+            {
+              "name": "ts",
+              "dtype": {
+                "Plain": "timestamp"
+              },
+              "nullable": false
+            },
+            {
+              "name": "value",
+              "dtype": {
+                "Plain": "float64"
+              },
+              "nullable": false
+            },
+            {
+              "name": "region",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": true
+            },
+            {
+              "name": "service",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": true
+            },
+            {
+              "name": "$promql_series_identity",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": false
+            }
+          ],
+          "time_index": 0,
+          "unique_keys": [
+            [
+              4,
+              0
+            ]
+          ],
+          "closed": true
+        }
+      },
+      {
+        "id": 1,
+        "payload": {
+          "ASAP": {
+            "SummaryTumblingWindowChain": {
+              "child": 0,
+              "summary_type": {
+                "Sketch": "DDSketch"
+              },
+              "input": {
+                "item": null,
+                "weight": {
+                  "Column": "SampleValue"
+                }
+              },
+              "reduction": "PerEntity",
+              "filter": null,
+              "tumbling_window_width_ms": 5000
+            }
+          }
+        },
+        "output_state": {
+          "timing": "ingestion_time",
+          "primitive": "SummaryState"
+        },
+        "lifetime": {
+          "AcrossEvaluations": "Memory"
+        },
+        "parameters": {
+          "DDSketch": {
+            "alpha": 0.05
+          }
+        },
+        "output_schema": {
+          "fields": [
+            {
+              "name": "window_end",
+              "dtype": {
+                "Plain": "timestamp"
+              },
+              "nullable": false
+            },
+            {
+              "name": "state",
+              "dtype": {
+                "Sketch": "DDSketch"
+              },
+              "nullable": false
+            },
+            {
+              "name": "region",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": true
+            },
+            {
+              "name": "service",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": true
+            },
+            {
+              "name": "$promql_series_identity",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": false
+            }
+          ],
+          "time_index": 0,
+          "unique_keys": [
+            [
+              0,
+              2,
+              3,
+              4
+            ]
+          ],
+          "closed": true
+        },
+        "retention_ms": 60000,
+        "view_coverage": {
+          "definition_id": "4a8950f4b8cc7e2b9e43236af28f1819",
+          "selection": [
+            {
+              "columns": [
+                {
+                  "column": {
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "data"
+                      }
+                    },
+                    "scan_ordinal": 0,
+                    "column": "region"
+                  },
+                  "constraint": {
+                    "in": [
+                      {
+                        "Utf8": "r0"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "column": {
+                    "source": {
+                      "TimeSeries": {
+                        "metric": "data"
+                      }
+                    },
+                    "scan_ordinal": 0,
+                    "column": "service"
+                  },
+                  "constraint": {
+                    "not_in": [
+                      {
+                        "Utf8": "s1"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "edges": [
+      {
+        "producer": 0,
+        "consumer": 1,
+        "role": "Input",
+        "intermediate_schema": {
+          "fields": [
+            {
+              "name": "ts",
+              "dtype": {
+                "Plain": "timestamp"
+              },
+              "nullable": false
+            },
+            {
+              "name": "value",
+              "dtype": {
+                "Plain": "float64"
+              },
+              "nullable": false
+            },
+            {
+              "name": "region",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": true
+            },
+            {
+              "name": "service",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": true
+            },
+            {
+              "name": "$promql_series_identity",
+              "dtype": {
+                "Plain": "utf8"
+              },
+              "nullable": false
+            }
+          ],
+          "time_index": 0,
+          "unique_keys": [
+            [
+              4,
+              0
+            ]
+          ],
+          "closed": true
+        },
+        "data_state": {
+          "timing": "ingestion_time",
+          "primitive": "Raw"
+        },
+        "grouping": "NotApplicable",
+        "window": "NotApplicable"
+      }
+    ],
+    "roots": [
+      1
+    ],
+    "scalar_roots": []
+  }
+}

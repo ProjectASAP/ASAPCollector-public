@@ -31,8 +31,8 @@ plugin = "asap_sketches"
   ## Output metric name stamped onto every emitted envelope.
   output_metric_name = "http_request_duration_ms"
 
-  ## Aggregation-plan join key. Creation, merge, and estimate processors in
-  ## one logical dataflow must use the same value.
+  ## Processor-side config key (series keys, config pushes); not written to
+  ## the output.
   agg_id = 7
 
   ## Output and series controls. Creation and merge processors keep
@@ -45,6 +45,9 @@ plugin = "asap_sketches"
   # omit_resource_attrs = false
   # global_aggregation = false
   # emit_window_stats = false
+  ## Admit only points matching every matcher (PromQL `=` / `!=`;
+  ## `__name__` is the metric name, any other name a point attribute).
+  # matchers = [{ name = "__name__", op = "=", value = "http.server.request.duration" }, { name = "http.route", op = "!=", value = "/health" }]
 
   ## Sketch-specific tuning knobs. Only the keys relevant to
   ## `sketch_type` are read; others are ignored.

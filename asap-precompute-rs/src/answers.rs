@@ -52,9 +52,11 @@ pub fn gauge(
     SketchEnvelope {
         schema_version: 1,
         sketch_type: SketchType::Unspecified,
-        agg_id: template.agg_id,
+        // An answer is not a state of the view it was read from.
+        view: None,
         resource_labels: template.resource_labels.clone(),
         labels,
+        source: template.source.clone(),
         window_start_ms: template.window_start_ms,
         window_end_ms: template.window_end_ms,
         payload: Vec::new(),

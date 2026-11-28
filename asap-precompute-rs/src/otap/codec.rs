@@ -45,6 +45,9 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
+
+use asap_types::plan::materialized_view::ViewStateKey;
 
 use thiserror::Error;
 
@@ -66,12 +69,13 @@ use otel_arrow_dfe_pdata_views::views::metrics::{
 use otel_arrow_dfe_pdata_views::views::resource::ResourceView;
 
 use crate::config::{sketch_size_string, SketchParams};
-use crate::envelope::{SketchEnvelope, SketchType};
-use crate::observation::{KeyValue, Observation, ObservationValue};
+use crate::envelope::{SketchEnvelope, SketchType, ViewIdentity};
+use crate::observation::{KeyValue, Observation, ObservationValue, SourceDescriptor};
 
 use super::schema::{
-    ATTR_AGG_ID, ATTR_ENVELOPE, ATTR_SCHEMA_VERSION, ATTR_SERIES_ID, ATTR_SKETCH_SIZE,
-    ATTR_SKETCH_TYPE, ATTR_WINDOW_END_MS, ATTR_WINDOW_START_MS,
+    ATTR_ENVELOPE, ATTR_SCHEMA_VERSION, ATTR_SERIES_ID, ATTR_SKETCH_SIZE, ATTR_SKETCH_TYPE,
+    ATTR_WINDOW_END_MS, ATTR_WINDOW_START_MS, META_NODE_ID, META_PLAN_ID, META_VIEW_STATE_KEY,
+    SERIES_SCOPE_NAME,
 };
 
 /// Failure modes for [`encode_envelopes_to_pdata`] / [`decode_pdata_to_observations`].
@@ -108,7 +112,9 @@ pub fn encode_envelopes_to_pdata(envelopes: &[SketchEnvelope]) -> Result<OtapPda
 }
 
 /// Stream-scoped encoder that assigns one stable `series_id` to each
-/// `(agg_id, metric, labels)` identity for the lifetime of an OTAP output.
+/// `(metric, labels)` identity of a hand-configured sketch for the lifetime
+/// of an OTAP output. A collector view's states carry no series id: they keep
+/// the Resource, Scope and point attributes they arrived with.
 pub struct OtapSketchEncoder {
     next_series_id: u32,
     series_ids: HashMap<String, u32>,
@@ -144,7 +150,10 @@ impl OtapSketchEncoder {
         }
         let series_ids = envelopes
             .iter()
-            .map(|env| self.series_id_for(env))
+            .map(|env| match env.view {
+                Some(_) => 0,
+                None => self.series_id_for(env),
+            })
             .collect::<Vec<_>>();
         let view =
             AsapMetricsView::from_envelopes(envelopes, &series_ids, self.sketch_params.as_ref());
@@ -155,12 +164,7 @@ impl OtapSketchEncoder {
     }
 
     fn series_id_for(&mut self, env: &SketchEnvelope) -> u32 {
-        let mut key = format!(
-            "{}:{}:{}:",
-            env.agg_id,
-            env.metric_name.len(),
-            env.metric_name
-        );
+        let mut key = format!("{}:{}:", env.metric_name.len(), env.metric_name);
         append_labels_to_key(&mut key, &env.resource_labels);
         append_labels_to_key(&mut key, &env.labels);
         if let Some(series_id) = self.series_ids.get(&key) {
@@ -205,10 +209,15 @@ fn append_labels_to_key(key: &mut String, labels: &[KeyValue]) {
     }
 }
 
+/// Whether two envelopes go under one Resource: a collector view's states
+/// share a Resource with equal attributes; a hand-configured sketch's also
+/// need equal SCHEMA attributes.
 fn same_resource(left: &SketchEnvelope, right: &SketchEnvelope) -> bool {
-    if left.agg_id != right.agg_id
-        || left.sketch_type != right.sketch_type
-        || left.schema_version != right.schema_version
+    if left.view.is_some() != right.view.is_some() {
+        return false;
+    }
+    if left.view.is_none()
+        && (left.sketch_type != right.sketch_type || left.schema_version != right.schema_version)
     {
         return false;
     }
@@ -219,10 +228,33 @@ fn same_resource(left: &SketchEnvelope, right: &SketchEnvelope) -> bool {
     left_key == right_key
 }
 
+/// Whether two collector-view states go under one Scope and one Metric: the
+/// same received scope, and the same view and metric descriptor.
+fn same_view_scope(left: &SketchEnvelope, right: &SketchEnvelope) -> bool {
+    let (l, r) = (&left.source, &right.source);
+    l.scope_name == r.scope_name
+        && l.scope_version == r.scope_version
+        && l.scope_attributes == r.scope_attributes
+}
+
+fn same_view_metric(left: &SketchEnvelope, right: &SketchEnvelope) -> bool {
+    left.view == right.view
+        && left.metric_name == right.metric_name
+        && left.source.unit == right.source.unit
+        && left.source.description == right.source.description
+}
+
 /// Zero-copy adapter presenting a `&[SketchEnvelope]` as a
-/// `MetricsView` directly — one Resource (empty), one Scope (unnamed),
-/// one Metric per series, using SummaryDataPoints for sketch envelopes and
+/// `MetricsView` directly, using SummaryDataPoints for sketch envelopes and
 /// Gauge NumberDataPoints for scalar estimates.
+///
+/// - A hand-configured sketch: one Resource per SCHEMA (the received
+///   resource attributes plus `sketch.*`), one Scope `asap.series` per series
+///   (its id and labels), one Metric.
+/// - A collector view's state: the series' received Resource and Scope, one
+///   Metric per view (`<metric>.asap_view.<node_id>`, with the view identity
+///   as metadata) and the received point attributes plus `sketch.envelope`,
+///   exactly as the raw forward sends the samples.
 struct AsapMetricsView<'a> {
     envelopes: &'a [SketchEnvelope],
     resources: Vec<AsapResourceGroup>,
@@ -235,8 +267,10 @@ struct AsapResourceGroup {
 }
 
 struct AsapScopeGroup {
+    /// A hand-configured sketch's series id; 0 for a collector view.
     series_id: u32,
-    rows: Vec<usize>,
+    /// The rows of each Metric under the scope.
+    metrics: Vec<Vec<usize>>,
 }
 
 impl<'a> AsapMetricsView<'a> {
@@ -260,17 +294,32 @@ impl<'a> AsapMetricsView<'a> {
                     resources.len() - 1
                 });
             let scopes = &mut resources[resource_pos].scopes;
+            let first_row = |group: &AsapScopeGroup| &envelopes[group.metrics[0][0]];
             let scope_pos = scopes
                 .iter()
-                .position(|group| group.series_id == series_ids[row])
+                .position(|group| match env.view {
+                    Some(_) => same_view_scope(first_row(group), env),
+                    None => group.series_id == series_ids[row],
+                })
                 .unwrap_or_else(|| {
                     scopes.push(AsapScopeGroup {
                         series_id: series_ids[row],
-                        rows: Vec::new(),
+                        metrics: Vec::new(),
                     });
                     scopes.len() - 1
                 });
-            scopes[scope_pos].rows.push(row);
+            let metrics = &mut scopes[scope_pos].metrics;
+            let metric_pos = metrics
+                .iter()
+                .position(|rows| match env.view {
+                    Some(_) => same_view_metric(&envelopes[rows[0]], env),
+                    None => true,
+                })
+                .unwrap_or_else(|| {
+                    metrics.push(Vec::new());
+                    metrics.len() - 1
+                });
+            metrics[metric_pos].push(row);
         }
         Self {
             envelopes,
@@ -283,6 +332,17 @@ impl<'a> AsapMetricsView<'a> {
     /// row actually carries a sketch payload.
     fn attributes_for_row(&self, row: usize) -> Vec<AsapAttribute<'a>> {
         let env = &self.envelopes[row];
+        if env.view.is_some() {
+            // The received point attributes, then the state.
+            let mut attrs = string_attributes(&env.labels);
+            if !env.payload.is_empty() {
+                attrs.push(AsapAttribute {
+                    key: ATTR_ENVELOPE,
+                    value: AsapAnyValue::Bytes(&env.payload),
+                });
+            }
+            return attrs;
+        }
         let mut attrs = Vec::with_capacity(3);
         if !env.payload.is_empty() {
             attrs.push(AsapAttribute {
@@ -391,11 +451,15 @@ impl<'v, 'a> ScopeMetricsView for AsapScopeMetricsView<'v, 'a> {
     }
 
     fn metrics(&self) -> Self::MetricIter<'_> {
-        vec![AsapMetricView {
-            view: self.view,
-            rows: &self.group.rows,
-        }]
-        .into_iter()
+        self.group
+            .metrics
+            .iter()
+            .map(|rows| AsapMetricView {
+                view: self.view,
+                rows,
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     fn schema_url(&self) -> Str<'_> {
@@ -427,11 +491,14 @@ impl<'v, 'a> MetricView for AsapMetricView<'v, 'a> {
     }
 
     fn description(&self) -> Str<'_> {
-        b""
+        self.view.envelopes[self.rows[0]]
+            .source
+            .description
+            .as_bytes()
     }
 
     fn unit(&self) -> Str<'_> {
-        b""
+        self.view.envelopes[self.rows[0]].source.unit.as_bytes()
     }
 
     fn data(&self) -> Option<Self::Data<'_>> {
@@ -441,8 +508,27 @@ impl<'v, 'a> MetricView for AsapMetricView<'v, 'a> {
         })
     }
 
+    /// A collector view's identity (`asap.plan_id`, `asap.node_id`,
+    /// `asap.view_state_key`); none for a hand-configured sketch.
     fn metadata(&self) -> Self::AttributeIter<'_> {
-        Vec::new().into_iter()
+        let Some(view) = &self.view.envelopes[self.rows[0]].view else {
+            return Vec::new().into_iter();
+        };
+        vec![
+            AsapAttribute {
+                key: META_PLAN_ID,
+                value: AsapAnyValue::Str(&view.plan_id),
+            },
+            AsapAttribute {
+                key: META_NODE_ID,
+                value: AsapAnyValue::Int(view.node_id),
+            },
+            AsapAttribute {
+                key: META_VIEW_STATE_KEY,
+                value: AsapAnyValue::Str(&view.view_state_key),
+            },
+        ]
+        .into_iter()
     }
 }
 
@@ -797,19 +883,12 @@ impl<'v, 'a> ResourceView for AsapResourceView<'v, 'a> {
             .iter()
             .find(|group| group.representative == self.row)
             .expect("resource group exists");
-        let mut attrs = env
-            .resource_labels
-            .iter()
-            .map(|label| AsapAttribute {
-                key: label.key.as_str(),
-                value: AsapAnyValue::Str(label.value.as_str()),
-            })
-            .collect::<Vec<_>>();
+        let mut attrs = string_attributes(&env.resource_labels);
+        if env.view.is_some() {
+            // A collector view's Resource is the received one.
+            return attrs.into_iter();
+        }
         attrs.extend([
-            AsapAttribute {
-                key: ATTR_AGG_ID,
-                value: AsapAnyValue::Int(env.agg_id),
-            },
             AsapAttribute {
                 key: ATTR_SKETCH_TYPE,
                 value: AsapAnyValue::Str(env.sketch_type.name()),
@@ -833,6 +912,17 @@ impl<'v, 'a> ResourceView for AsapResourceView<'v, 'a> {
     }
 }
 
+/// `key = value` attributes with string values.
+fn string_attributes(labels: &[KeyValue]) -> Vec<AsapAttribute<'_>> {
+    labels
+        .iter()
+        .map(|label| AsapAttribute {
+            key: label.key.as_str(),
+            value: AsapAnyValue::Str(label.value.as_str()),
+        })
+        .collect()
+}
+
 struct AsapScopeView<'v, 'a> {
     view: &'v AsapMetricsView<'a>,
     group: &'v AsapScopeGroup,
@@ -849,15 +939,25 @@ impl<'v, 'a> InstrumentationScopeView for AsapScopeView<'v, 'a> {
         Self: 'att;
 
     fn name(&self) -> Option<Str<'_>> {
-        Some(b"asap.series")
+        let env = &self.view.envelopes[self.group.metrics[0][0]];
+        match env.view {
+            Some(_) => Some(env.source.scope_name.as_bytes()),
+            None => Some(SERIES_SCOPE_NAME.as_bytes()),
+        }
     }
 
     fn version(&self) -> Option<Str<'_>> {
-        None
+        let env = &self.view.envelopes[self.group.metrics[0][0]];
+        env.view
+            .as_ref()
+            .map(|_| env.source.scope_version.as_bytes())
     }
 
     fn attributes(&self) -> Self::AttributeIter<'_> {
-        let env = &self.view.envelopes[self.group.rows[0]];
+        let env = &self.view.envelopes[self.group.metrics[0][0]];
+        if env.view.is_some() {
+            return string_attributes(&env.source.scope_attributes).into_iter();
+        }
         let mut attrs = Vec::with_capacity(env.labels.len() + 1);
         attrs.push(AsapAttribute {
             key: ATTR_SERIES_ID,
@@ -1245,10 +1345,15 @@ pub fn describe_pdata_protocol(pdata: &OtapPdata) -> Result<String, CodecError> 
             .collect::<Vec<_>>()
             .join(",");
         if let Some(envelope) = observation.value.envelope {
+            let view = envelope
+                .view
+                .as_ref()
+                .map(|v| format!("view={}/{}", v.plan_id, v.node_id))
+                .unwrap_or_default();
             writeln!(
                 output,
-                "    +-- Metric  {}\n        |-- labels     {{{}}}\n        |-- value      self-describing sketch envelope ({} bytes)\n        |-- schema     agg_id={}  {}  v{}\n        +-- window     [{}, {})",
-                observation.metric, labels, envelope.payload.len(), envelope.agg_id,
+                "    +-- Metric  {}\n        |-- labels     {{{}}}\n        |-- value      self-describing sketch envelope ({} bytes)\n        |-- schema     {}  {}  v{}\n        +-- window     ({}, {}]",
+                observation.metric, labels, envelope.payload.len(), view,
                 envelope.sketch_type.name(), envelope.schema_version,
                 envelope.window_start_ms, envelope.window_end_ms
             )
@@ -1354,9 +1459,6 @@ pub fn decode_each(pdata: OtapPdata, f: impl FnMut(&Observation)) -> Result<usiz
                             .as_string()
                             .map(|s| String::from_utf8_lossy(s).into_owned())
                     }
-                    ATTR_AGG_ID => {
-                        schema.agg_id = val.as_int64().filter(|v| *v >= 0).map(|v| v as u64)
-                    }
                     ATTR_SCHEMA_VERSION => {
                         schema.schema_version = val.as_int64().filter(|v| *v >= 0).map(|v| v as u32)
                     }
@@ -1371,8 +1473,22 @@ pub fn decode_each(pdata: OtapPdata, f: impl FnMut(&Observation)) -> Result<usiz
             }
         }
         for scope in resource.scopes() {
+            // A hand-configured sketch's series scope holds its labels; any
+            // other scope is the instrumentation scope the points arrived
+            // under, which is not a label (as in Prometheus).
             let mut series_labels = Vec::new();
+            let mut source = SourceDescriptor::default();
             if let Some(scope_view) = scope.scope() {
+                let text =
+                    |s: Option<Str<'_>>| String::from_utf8_lossy(s.unwrap_or(b"")).into_owned();
+                let name = text(scope_view.name());
+                let attributes = if name == SERIES_SCOPE_NAME {
+                    &mut series_labels
+                } else {
+                    source.scope_name = name;
+                    source.scope_version = text(scope_view.version());
+                    &mut source.scope_attributes
+                };
                 for attr in scope_view.attributes() {
                     let Some(val) = attr.value() else { continue };
                     let key = String::from_utf8_lossy(attr.key()).into_owned();
@@ -1380,7 +1496,7 @@ pub fn decode_each(pdata: OtapPdata, f: impl FnMut(&Observation)) -> Result<usiz
                         continue;
                     }
                     if let Some(s) = val.as_string() {
-                        series_labels
+                        attributes
                             .push(KeyValue::new(key, String::from_utf8_lossy(s).into_owned()));
                     }
                 }
@@ -1389,6 +1505,15 @@ pub fn decode_each(pdata: OtapPdata, f: impl FnMut(&Observation)) -> Result<usiz
                 let name = String::from_utf8_lossy(metric.name()).into_owned();
                 let Some(data) = metric.data() else {
                     continue;
+                };
+                let name = DecodeMetric {
+                    view: view_identity(&metric, &name)?,
+                    source: Arc::new(SourceDescriptor {
+                        unit: String::from_utf8_lossy(metric.unit()).into_owned(),
+                        description: String::from_utf8_lossy(metric.description()).into_owned(),
+                        ..source.clone()
+                    }),
+                    name,
                 };
                 // Gauge/Sum each expose their own concrete
                 // `NumberDataPointView` implementation (different
@@ -1477,15 +1602,92 @@ fn parse_sketch_type(raw: Option<&str>) -> Result<SketchType, CodecError> {
 #[derive(Default)]
 struct DecodeSchema {
     sketch_type: Option<String>,
-    agg_id: Option<u64>,
     schema_version: Option<u32>,
+}
+
+/// The Metric a data point belongs to: its name, the collector view it is a
+/// state of (from its metadata) and its scope and descriptor.
+struct DecodeMetric {
+    name: String,
+    view: Option<Arc<ViewIdentity>>,
+    source: Arc<SourceDescriptor>,
+}
+
+impl DecodeMetric {
+    /// The sketch type of the metric's states: a collector view's, from θ
+    /// in its view state key; a hand-configured sketch's, from the
+    /// Resource's `sketch.type`.
+    fn sketch_type(&self, schema: &DecodeSchema) -> Result<SketchType, CodecError> {
+        let Some(view) = &self.view else {
+            return parse_sketch_type(schema.sketch_type.as_deref());
+        };
+        let key: ViewStateKey = serde_json::from_str(&view.view_state_key).map_err(|e| {
+            CodecError::Decode(format!("metric {}: {META_VIEW_STATE_KEY}: {e}", self.name))
+        })?;
+        key.logical_properties
+            .parameters()
+            .and_then(super::planner_views::sketch_type_spec_of)
+            .map(|spec| spec.sketch_type)
+            .ok_or_else(|| {
+                CodecError::Decode(format!(
+                    "metric {}: the view state key names no sketch the collector builds",
+                    self.name
+                ))
+            })
+    }
+}
+
+/// The collector view a Metric's points are states of, from its metadata:
+/// `None` when it has no `asap.*` metadata; an error when it has some but
+/// not all three, or one of the wrong type.
+fn view_identity<M: MetricView>(
+    metric: &M,
+    name: &str,
+) -> Result<Option<Arc<ViewIdentity>>, CodecError> {
+    let (mut plan_id, mut node_id, mut view_state_key) = (None, None, None);
+    let mut any = false;
+    for attr in metric.metadata() {
+        let key = attr.key();
+        let value = attr.value();
+        let text = || {
+            value
+                .as_ref()
+                .and_then(|v| v.as_string())
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+        };
+        if key == META_PLAN_ID.as_bytes() {
+            plan_id = text();
+        } else if key == META_NODE_ID.as_bytes() {
+            node_id = value
+                .as_ref()
+                .and_then(|v| v.as_int64())
+                .and_then(|v| u64::try_from(v).ok());
+        } else if key == META_VIEW_STATE_KEY.as_bytes() {
+            view_state_key = text();
+        } else {
+            continue;
+        }
+        any = true;
+    }
+    match (plan_id, node_id, view_state_key) {
+        (Some(plan_id), Some(node_id), Some(view_state_key)) => Ok(Some(Arc::new(ViewIdentity {
+            plan_id,
+            node_id,
+            view_state_key,
+        }))),
+        _ if !any => Ok(None),
+        _ => Err(CodecError::Decode(format!(
+            "metric {name}: view identity needs {META_PLAN_ID} (string), {META_NODE_ID} (int) \
+             and {META_VIEW_STATE_KEY} (string) metadata"
+        ))),
+    }
 }
 
 impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
     fn push_summary_data_point<D: SummaryDataPointView>(
         &mut self,
         dp: D,
-        metric_name: &str,
+        metric: &DecodeMetric,
         inherited_schema: &DecodeSchema,
         resource_labels: &[KeyValue],
         series_labels: &[KeyValue],
@@ -1522,15 +1724,17 @@ impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
             .ok_or_else(|| {
                 CodecError::Decode("summary sketch is missing sketch.envelope".into())
             })?;
-        let sketch_type = parse_sketch_type(inherited_schema.sketch_type.as_deref())?;
+        let sketch_type = metric.sketch_type(inherited_schema)?;
         validate_self_describing_payload(sketch_type, &payload).map_err(CodecError::Decode)?;
         let timestamp_ms = dp.time_unix_nano() / 1_000_000;
+        let metric_name = metric.name.as_str();
         let envelope = SketchEnvelope {
             schema_version: inherited_schema.schema_version.unwrap_or(0),
             sketch_type,
-            agg_id: inherited_schema.agg_id.unwrap_or(0),
+            view: metric.view.clone(),
             resource_labels: resource_labels.to_vec(),
             labels: labels.clone(),
+            source: Arc::clone(&metric.source),
             window_start_ms: window_start_ms.unwrap_or(dp.start_time_unix_nano() / 1_000_000),
             window_end_ms: window_end_ms.unwrap_or(timestamp_ms),
             payload,
@@ -1539,13 +1743,15 @@ impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
             aggregation_temporality: 0,
             value: dp.sum(),
         };
-        (self.sink)(&Observation::new(
+        let mut observation = Observation::new(
             timestamp_ms,
             metric_name.to_string(),
             resource_labels.to_vec(),
             labels,
             ObservationValue::envelope(envelope),
-        ));
+        );
+        observation.source = Arc::clone(&metric.source);
+        (self.sink)(&observation);
         Ok(())
     }
 
@@ -1556,7 +1762,7 @@ impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
     fn push_data_point<D: NumberDataPointView>(
         &mut self,
         dp: D,
-        metric_name: &str,
+        metric: &DecodeMetric,
         inherited_schema: &DecodeSchema,
         resource_labels: &[KeyValue],
         series_labels: &[KeyValue],
@@ -1572,7 +1778,6 @@ impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
 
         let mut envelope_bytes: Option<Vec<u8>> = None;
         let mut sketch_type_raw = inherited_schema.sketch_type.clone();
-        let mut agg_id = inherited_schema.agg_id;
         let mut schema_version = inherited_schema.schema_version;
         let mut window_start_ms: Option<u64> = None;
         let mut window_end_ms: Option<u64> = None;
@@ -1597,7 +1802,6 @@ impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
                         .as_string()
                         .map(|s| String::from_utf8_lossy(s).into_owned());
                 }
-                ATTR_AGG_ID => agg_id = val.as_int64().filter(|v| *v >= 0).map(|v| v as u64),
                 ATTR_SCHEMA_VERSION => {
                     schema_version = val.as_int64().filter(|v| *v >= 0).map(|v| v as u32);
                 }
@@ -1624,19 +1828,23 @@ impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
         // the scalar path rather than an empty-payload envelope.
         obs.value = match envelope_bytes.filter(|b| !b.is_empty()) {
             Some(payload) => {
-                let sketch_type = parse_sketch_type(sketch_type_raw.as_deref())?;
+                let sketch_type = match &metric.view {
+                    Some(_) => metric.sketch_type(inherited_schema)?,
+                    None => parse_sketch_type(sketch_type_raw.as_deref())?,
+                };
                 validate_self_describing_payload(sketch_type, &payload)
                     .map_err(CodecError::Decode)?;
                 ObservationValue::envelope(SketchEnvelope {
                     schema_version: schema_version.unwrap_or(0),
                     sketch_type,
-                    agg_id: agg_id.unwrap_or(0),
+                    view: metric.view.clone(),
                     resource_labels: Vec::new(),
                     labels: obs.labels.clone(),
+                    source: Arc::clone(&metric.source),
                     window_start_ms: window_start_ms.unwrap_or(0),
                     window_end_ms: window_end_ms.unwrap_or(0),
                     payload,
-                    metric_name: metric_name.to_string(),
+                    metric_name: metric.name.clone(),
                     count: 0,
                     aggregation_temporality: 0,
                     value,
@@ -1645,9 +1853,12 @@ impl<F: FnMut(&Observation)> DecodeAccumulator<F> {
             None => ObservationValue::float(value),
         };
         obs.timestamp_ms = timestamp_ms;
-        if obs.metric != metric_name {
+        if obs.metric != metric.name {
             obs.metric.clear();
-            obs.metric.push_str(metric_name);
+            obs.metric.push_str(&metric.name);
+        }
+        if !Arc::ptr_eq(&obs.source, &metric.source) {
+            obs.source = Arc::clone(&metric.source);
         }
         if obs.resource_labels.as_slice() != resource_labels {
             obs.resource_labels.clear();
@@ -1674,9 +1885,10 @@ mod tests {
         SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::Unspecified,
-            agg_id: 0,
+            view: None,
             resource_labels: vec![],
             labels: vec![Kv::new(attr_key, attr_value)],
+            source: Default::default(),
             window_start_ms: 1_000,
             window_end_ms: 2_000,
             payload: Vec::new(),
@@ -1780,7 +1992,6 @@ mod tests {
     fn summary_carrier_round_trips_a_self_describing_sketch_envelope() {
         let mut env = one_envelope("sketch_stream", 0.0, "region", "us-east");
         env.sketch_type = SketchType::KLLSketch;
-        env.agg_id = 7;
         let mut sketch = KLLWrapper::new(200, Some(42));
         sketch.update(42.0);
         env.payload = sketch
@@ -1798,7 +2009,7 @@ mod tests {
         let decoded_env = obs.value.envelope.as_ref().expect("envelope");
         assert_eq!(decoded_env.payload, expected_payload);
         assert_eq!(decoded_env.sketch_type, SketchType::KLLSketch);
-        assert_eq!(decoded_env.agg_id, 7);
+        assert_eq!(decoded_env.view, None);
         assert_eq!(decoded_env.window_start_ms, 1_000);
         assert_eq!(decoded_env.window_end_ms, 2_000);
     }
@@ -1950,7 +2161,8 @@ mod tests {
         let resource_attrs = arrow_records
             .get(ArrowPayloadType::ResourceAttrs)
             .expect("SCHEMA uses ResourceAttrs");
-        assert_eq!(resource_attrs.num_rows(), 3);
+        // `sketch.type` and `sketch.schema_version`.
+        assert_eq!(resource_attrs.num_rows(), 2);
 
         let scope_attrs = arrow_records
             .get(ArrowPayloadType::ScopeAttrs)
@@ -1976,5 +2188,257 @@ mod tests {
             2,
             "only the two window bounds recur"
         );
+    }
+
+    // ---- collector views ---------------------------------------------------
+
+    /// n1's view state key in the q01 fixture
+    /// (`tests/fixtures/collector-views/q01`).
+    const Q01_KEY: &str = r#"{"definition_id":"5597d603bdf9f1a148d7c7e5344c1a97","window":{"tumbling":{"width_ms":5000}},"logical_properties":{"parameters":{"DDSketch":{"alpha":0.05}}}}"#;
+
+    /// The q01 view's identity, as the loader reads it from the fixture.
+    fn q01_view() -> Arc<ViewIdentity> {
+        let views = super::super::planner_views::parse(include_str!(
+            "../../tests/fixtures/collector-views/q01/collector-views.json"
+        ))
+        .expect("q01 loads");
+        Arc::clone(&views.views[0].identity)
+    }
+
+    /// q01's state for one series, as the design's worked example: Resource
+    /// `service.name = j0`, point attributes `region`, `service`, `label_0`,
+    /// 50 samples (1..=50) in the window `(T - 5 s, T]`, DDSketch α 0.05.
+    fn q01_state(end_ms: u64) -> SketchEnvelope {
+        let mut sketch = crate::sketches::DDSketchWrapper::new(0.05);
+        for value in 1..=50 {
+            sketch.update(f64::from(value));
+        }
+        SketchEnvelope {
+            schema_version: 1,
+            sketch_type: SketchType::DDSketch,
+            view: Some(q01_view()),
+            resource_labels: vec![Kv::new("service.name", "j0")],
+            labels: vec![
+                Kv::new("region", "r0"),
+                Kv::new("service", "s0"),
+                Kv::new("label_0", "l0"),
+            ],
+            source: Arc::new(SourceDescriptor {
+                scope_name: "app.meter".into(),
+                scope_version: "1.0".into(),
+                scope_attributes: vec![Kv::new("scope.attr", "a")],
+                unit: "s".into(),
+                description: "request latency".into(),
+            }),
+            window_start_ms: end_ms - 5_000,
+            window_end_ms: end_ms,
+            payload: sketch.snapshot().expect("ASAPv1"),
+            metric_name: "data.asap_view.1".into(),
+            count: 50,
+            aggregation_temporality: 1,
+            value: 0.0,
+        }
+    }
+
+    /// `pdata` as the OTLP `ExportMetricsServiceRequest` an OTLP exporter sends.
+    fn otlp_request(
+        pdata: OtapPdata,
+    ) -> (
+        Vec<u8>,
+        otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::MetricsData,
+    ) {
+        use otel_arrow_dfe_pdata::otlp::OtlpProtoBytes;
+        use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
+        let (_context, payload) = pdata.into_parts();
+        let bytes: OtlpProtoBytes = payload.try_into_with_default().expect("to OTLP");
+        let body = bytes.as_bytes().to_vec();
+        let OtlpProtoMessage::Metrics(data) = OtlpProtoMessage::try_from(bytes).expect("decodes")
+        else {
+            panic!("metrics");
+        };
+        (body, data)
+    }
+
+    /// Encode (OTAP Arrow) → decode: the view identity, name, Resource,
+    /// Scope, metric descriptor, point attributes, window and count survive.
+    #[test]
+    fn view_state_round_trips_through_otap_arrow() {
+        let state = q01_state(1_767_225_600_000);
+        let pdata = encode_envelopes_to_pdata(std::slice::from_ref(&state)).expect("encode");
+        let decoded = decode_pdata_to_observations(pdata).expect("decode");
+        let [obs] = decoded.observations.as_slice() else {
+            panic!("one state");
+        };
+        let env = obs.value.envelope.as_ref().expect("a state");
+        assert_eq!(env.view, state.view);
+        assert_eq!(env.sketch_type, SketchType::DDSketch, "from θ in the key");
+        assert_eq!(env.metric_name, "data.asap_view.1");
+        assert_eq!(env.resource_labels, state.resource_labels);
+        assert_eq!(env.labels, state.labels, "scope attributes are not labels");
+        assert_eq!(env.source, state.source);
+        assert_eq!(obs.source, state.source);
+        assert_eq!(
+            (env.window_start_ms, env.window_end_ms),
+            (state.window_start_ms, state.window_end_ms)
+        );
+        assert_eq!(env.count, 50);
+        assert_eq!(env.payload, state.payload);
+    }
+
+    /// Through OTAP Arrow and the OTAP → OTLP conversion, the state is an
+    /// OTLP Summary point with the raw sample's structure, and the view
+    /// identity is `Metric.metadata`; decoding the OTLP request again gives
+    /// the same identity.
+    #[test]
+    fn view_identity_is_otlp_metric_metadata() {
+        use otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::any_value::Value;
+        use otel_arrow_dfe_pdata::proto::opentelemetry::metrics::v1::metric::Data;
+        use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
+
+        let state = q01_state(1_767_225_600_000);
+        let pdata = encode_envelopes_to_pdata(std::slice::from_ref(&state)).expect("encode");
+        let (_, data) = otlp_request(pdata);
+        let [resource] = data.resource_metrics.as_slice() else {
+            panic!("one resource");
+        };
+        let attrs = |kvs: &[otel_arrow_dfe_pdata::proto::opentelemetry::common::v1::KeyValue]| {
+            kvs.iter()
+                .map(|kv| {
+                    let value = match kv.value.as_ref().and_then(|v| v.value.as_ref()) {
+                        Some(Value::StringValue(s)) => s.clone(),
+                        Some(Value::IntValue(i)) => i.to_string(),
+                        Some(Value::BytesValue(b)) => format!("<{} bytes>", b.len()),
+                        other => format!("{other:?}"),
+                    };
+                    (kv.key.clone(), value)
+                })
+                .collect::<Vec<_>>()
+        };
+        let owned = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            attrs(&resource.resource.as_ref().unwrap().attributes),
+            owned(&[("service.name", "j0")]),
+            "the received Resource, no sketch.* attributes"
+        );
+        let [scope] = resource.scope_metrics.as_slice() else {
+            panic!("one scope");
+        };
+        let scope_id = scope.scope.as_ref().unwrap();
+        assert_eq!(
+            (scope_id.name.as_str(), scope_id.version.as_str()),
+            ("app.meter", "1.0")
+        );
+        assert_eq!(attrs(&scope_id.attributes), owned(&[("scope.attr", "a")]));
+        let [metric] = scope.metrics.as_slice() else {
+            panic!("one metric");
+        };
+        assert_eq!(metric.name, "data.asap_view.1");
+        assert_eq!(
+            (metric.unit.as_str(), metric.description.as_str()),
+            ("s", "request latency")
+        );
+        let view = state.view.as_ref().unwrap();
+        assert_eq!(
+            attrs(&metric.metadata),
+            owned(&[
+                ("asap.plan_id", view.plan_id.as_str()),
+                ("asap.node_id", "1"),
+                ("asap.view_state_key", Q01_KEY),
+            ])
+        );
+        let Some(Data::Summary(summary)) = &metric.data else {
+            panic!("a Summary");
+        };
+        let [point] = summary.data_points.as_slice() else {
+            panic!("one point");
+        };
+        assert_eq!(
+            attrs(&point.attributes),
+            owned(&[
+                ("region", "r0"),
+                ("service", "s0"),
+                ("label_0", "l0"),
+                (
+                    "sketch.envelope",
+                    &format!("<{} bytes>", state.payload.len())
+                ),
+            ])
+        );
+        assert_eq!(point.start_time_unix_nano, 1_767_225_595_000_000_000);
+        assert_eq!(point.time_unix_nano, 1_767_225_600_000_000_000);
+        assert_eq!(point.count, 50);
+
+        // Back from OTLP: the same identity.
+        let pdata = OtapPdata::new_todo_context(
+            OtapPayload::try_from(OtlpProtoMessage::Metrics(data)).expect("from OTLP"),
+        );
+        let decoded = decode_pdata_to_observations(pdata).expect("decode");
+        let env = decoded.observations[0].value.envelope.as_ref().unwrap();
+        assert_eq!(env.view, state.view);
+        assert_eq!(env.payload, state.payload);
+    }
+
+    /// Two views over one source metric are two Metric entries, each with its
+    /// own identity.
+    #[test]
+    fn two_views_of_one_series_are_two_metrics() {
+        let first = q01_state(1_767_225_600_000);
+        let mut second = first.clone();
+        second.view = Some(Arc::new(ViewIdentity {
+            node_id: 7,
+            ..(**first.view.as_ref().unwrap()).clone()
+        }));
+        second.metric_name = "data.asap_view.7".into();
+        let pdata = encode_envelopes_to_pdata(&[first, second]).expect("encode");
+        let (_, data) = otlp_request(pdata);
+        let metrics: Vec<_> = data.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(metrics, ["data.asap_view.1", "data.asap_view.7"]);
+    }
+
+    /// Metadata naming only part of a view identity is refused.
+    #[test]
+    fn partial_view_identity_is_refused_on_decode() {
+        use otel_arrow_dfe_pdata::proto::OtlpProtoMessage;
+        let pdata = encode_envelopes_to_pdata(&[q01_state(1_767_225_600_000)]).expect("encode");
+        let (_, mut data) = otlp_request(pdata);
+        data.resource_metrics[0].scope_metrics[0].metrics[0]
+            .metadata
+            .retain(|kv| kv.key != "asap.node_id");
+        let pdata = OtapPdata::new_todo_context(
+            OtapPayload::try_from(OtlpProtoMessage::Metrics(data)).expect("from OTLP"),
+        );
+        let error = decode_pdata_to_observations(pdata).expect_err("refused");
+        assert!(error.to_string().contains("asap.node_id"), "{error}");
+    }
+
+    /// The golden OTLP request body for q01 (the backend's test fixture):
+    /// one series' DDSketch state of the window ending at
+    /// 2026-01-01T00:00:00Z, as `tests/fixtures/collector-views/q01/otlp-body.pb`
+    /// holds it. `ASAP_UPDATE_GOLDEN=1` rewrites the file.
+    #[test]
+    fn q01_otlp_body_matches_golden() {
+        const GOLDEN: &str = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/collector-views/q01/otlp-body.pb"
+        );
+        let mut state = q01_state(1_767_225_600_000);
+        // As an application's OTel SDK leaves them: no scope, unit or
+        // description.
+        state.source = Arc::default();
+        let pdata = encode_envelopes_to_pdata(&[state]).expect("encode");
+        let (body, _) = otlp_request(pdata);
+        if std::env::var_os("ASAP_UPDATE_GOLDEN").is_some() {
+            std::fs::write(GOLDEN, &body).expect("write golden");
+        }
+        assert_eq!(body, std::fs::read(GOLDEN).expect("golden exists"));
     }
 }

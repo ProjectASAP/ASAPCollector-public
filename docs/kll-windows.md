@@ -131,10 +131,11 @@ that can be merged downstream. Overlapping sliding windows only emit scalar
 estimates, preventing their overlapping sketches from being counted twice.
 Omitting `window_slide` retains the original tumbling runtime behavior.
 
-Pane boundaries align to Unix time and are half-open `[start, end)`. The
-lookback must be an integer multiple of the pane width, and both durations
-must be whole milliseconds. Sliding is currently KLL-only, with no late
-scalar updates to closed panes.
+Pane boundaries align to Unix time and are `(start, end]`, as Prometheus
+range selectors: a sample at exactly a pane's end belongs to that pane, and a
+pane is complete once time passes its end. The lookback must be an integer
+multiple of the pane width, and both durations must be whole milliseconds.
+Sliding is currently KLL-only, with no late scalar updates to closed panes.
 The first results use the observations available during warmup; a complete
 lookback becomes available after the process has run for that duration.
 
@@ -166,7 +167,8 @@ let mut panes = KllWindowStore::new(
 )?;
 // panes.observe(&observation)?;
 // panes.merge_pane(&upstream_full_pane)?;
-panes.advance(300_000);
+// Every pane ending before this time is complete: (0, 300 s] here.
+panes.advance(300_001);
 let merged_sketches = panes.query(0, 300_000)?;
 let quantile_gauges = panes.quantile_over_time(0, 300_000, &[0.5, 0.95, 0.99])?;
 ```

@@ -57,7 +57,8 @@ impl Meta {
         SketchEnvelope {
             schema_version: 1,
             sketch_type: SketchType::Unspecified,
-            agg_id: 7,
+            view: None,
+            source: Default::default(),
             resource_labels: vec![KeyValue::new("service.name", "checkout")],
             labels: vec![
                 KeyValue::new("http.request.method", "GET"),

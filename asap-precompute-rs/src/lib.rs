@@ -29,9 +29,11 @@ pub use config::{
     AggId, AggregationMode, OnOverflow, PrecomputeConfig, PrecomputeConfigSet, SketchParams,
     WindowSpec,
 };
-pub use envelope::{SketchEnvelope, SketchType};
+pub use envelope::{SketchEnvelope, SketchType, ViewIdentity};
 pub use matchers::{LabelMatcher, MatchOp};
-pub use observation::{KeyValue, Observation, ObservationValue, ObservationValueKind};
+pub use observation::{
+    KeyValue, Observation, ObservationValue, ObservationValueKind, SourceDescriptor,
+};
 pub use precompute::{
     CardinalitySketch, FrequencyEntry, FrequencySketch, Precompute, QuantileSketch, Sketch,
     SketchObserver,

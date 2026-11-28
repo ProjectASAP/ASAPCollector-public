@@ -7,8 +7,10 @@ license = "MIT"
 
 # asap_sketchlib is a public dependency.
 [dependencies]
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "01f3333cbdc7c55a36642e0938aa7f0040f2cfa8" }
-serde = { version = "1", features = ["derive"] }
+# The rev ASAPPlanner's workspace pins (see `asap-types` below), so Cargo
+# builds one asap_sketchlib for both.
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "d050037bb127d425cb4160ea9b5960856ef3188c" }
+serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "1"
 
 # Apache Arrow is only pulled in by the OTAP codec. Consumers on the
@@ -50,6 +52,10 @@ humantime-serde = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 libc = { version = "0.2", optional = true }
 tokio = { version = "1", features = ["sync", "rt", "time", "net"], optional = true }
+# ASAPPlanner's shared types only (no planner, executor or solver), for the
+# capabilities the collector prints in the planner's vocabulary
+# (`otap::capabilities`). Its asap_sketchlib is the rev pinned above.
+asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "a569a23a5a303c0fb1c165a863e3dc4dd92a15e3", package = "asap-types", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
@@ -84,6 +90,7 @@ otap-engine = [
     "dep:serde_json",
     "dep:libc",
     "dep:tokio",
+    "dep:asap-types",
 ]
 
 # The deployable collector: the official OTAP engine controller with the

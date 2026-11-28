@@ -353,6 +353,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "asap-types",
  "asap_sketchlib",
  "async-trait",
  "humantime-serde",
@@ -374,9 +375,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-types"
+version = "0.1.0"
+source = "git+https://github.com/ProjectASAP/ASAPPlanner?rev=a569a23a5a303c0fb1c165a863e3dc4dd92a15e3#a569a23a5a303c0fb1c165a863e3dc4dd92a15e3"
+dependencies = [
+ "asap_sketchlib",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "asap_sketchlib"
 version = "0.4.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=01f3333cbdc7c55a36642e0938aa7f0040f2cfa8#01f3333cbdc7c55a36642e0938aa7f0040f2cfa8"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=d050037bb127d425cb4160ea9b5960856ef3188c#d050037bb127d425cb4160ea9b5960856ef3188c"
 dependencies = [
  "rand 0.9.4",
  "rmp-serde",

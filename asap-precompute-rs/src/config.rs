@@ -14,8 +14,9 @@ use crate::envelope::SketchType;
 use crate::matchers::LabelMatcher;
 use crate::observation::{KeyValue, Observation};
 
-/// Controller-plan join key. One [`PrecomputeConfig`] per `AggId`; the
-/// controller's plan emits a flat list keyed by `AggId`.
+/// Processor-side config key: one [`PrecomputeConfig`] per `AggId` in a
+/// [`PrecomputeConfigSet`], and the prefix of its series keys. Not written
+/// to the output.
 pub type AggId = u64;
 
 /// Picks the windowing strategy.
@@ -32,7 +33,7 @@ pub enum AggregationMode {
     #[default]
     Tumbling,
     /// Rotates every [`WindowSpec::slide`]; observations land in
-    /// every window whose `[start, end)` range covers their
+    /// every window whose `(start, end]` range covers their
     /// timestamp. KLL implements this by merging disjoint retained panes.
     Sliding,
     /// Processes one batch end-to-end with no windowing (`mode: batch`).
@@ -95,11 +96,6 @@ pub struct WindowSpec {
     /// (`slide == size` implicitly).
     #[serde(with = "duration_millis")]
     pub slide: Duration,
-    /// Grace period for late-arriving samples; observations whose
-    /// `timestamp_ms` is older than `active_start - allowed_lateness`
-    /// are dropped as late.
-    #[serde(with = "duration_millis")]
-    pub allowed_lateness: Duration,
 }
 
 mod duration_millis {
@@ -128,7 +124,7 @@ mod duration_millis {
 ///
 /// Expected keys per sketch type:
 /// - DDSketch: `relative_accuracy` (float, 0 < v < 1)
-/// - KLL: `k` (uint, ≥ 8), optional `seed`
+/// - KLL: `k` (uint, 8 ≤ k ≤ 26602), optional `seed`
 /// - HLL: none (sketchlib's precision-14 HyperLogLog)
 /// - CountSketch / CountMin: `depth`, `width` (uints)
 /// - CountMin with heap: `rows`, `columns`, `k` (uints)
@@ -197,17 +193,18 @@ fn as_wire_u64(v: f64) -> Option<u64> {
 /// plus `max_series` / `on_overflow`.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PrecomputeConfig {
-    /// Controller-plan join key. One config per `AggId`.
+    /// Processor-side config key. One config per `AggId`.
     pub agg_id: AggId,
     /// Determines which Sketch implementation handles observations
     /// for this `AggId`.
     pub sketch_type: SketchType,
     /// Picks the windowing strategy.
     pub mode: AggregationMode,
-    /// Configures size / slide / lateness.
+    /// Configures size / slide.
     pub window: WindowSpec,
-    /// Selects observations by metric name and label values. All
-    /// matchers must hold for the observation to be admitted.
+    /// Selects observations by metric name (`__name__`) and data-point
+    /// label values. All matchers must hold for the observation to be
+    /// admitted; a filtered-out observation does not touch any window.
     pub matchers: Vec<LabelMatcher>,
     /// Lists label keys to aggregate over. When non-empty, the
     /// series key is built only from these keys (cross-series

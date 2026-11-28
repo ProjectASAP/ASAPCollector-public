@@ -90,8 +90,8 @@ flowchart TD
 
 ```
 process(msg):
-  PData(batch)          -> ingest(batch)          # raw metrics OR inbound sketches
-  Control(Wakeup)       -> flush()                # window close = the only emit
+  PData(batch)          -> ingest(batch); emit closed  # a point past a window's end closes it
+  Control(Wakeup)       -> flush()                # idle close, 5 s after the end
   Control(Config(plan)) -> update_config; ack
   Control(Shutdown)     -> flush()                # final drain
 

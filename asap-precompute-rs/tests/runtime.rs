@@ -6,7 +6,7 @@
 //! Coverage:
 //!   - `series_key` byte-equivalence (golden literal strings).
 //!   - End-to-end observe → tick cycle.
-//!   - `Drain` rotates partial-window state.
+//!   - `Drain` closes partial-window state.
 
 use std::time::Duration;
 
@@ -188,6 +188,7 @@ fn observe_then_tick_emits_one_envelope_per_series() {
         metric: "http.requests".into(),
         resource_labels: vec![KeyValue::new("service.name", "web")],
         labels: vec![KeyValue::new("method", label)],
+        source: Default::default(),
         value: ObservationValue::float(1.0),
     };
 
@@ -195,10 +196,10 @@ fn observe_then_tick_emits_one_envelope_per_series() {
     p.observe(&obs("GET", 2_000)).expect("o2");
     p.observe(&obs("POST", 3_000)).expect("o3");
 
-    let envelopes = p.tick(10_000);
+    let envelopes = p.tick(10_001);
     assert_eq!(envelopes.len(), 2);
     for env in &envelopes {
-        assert_eq!(env.agg_id, 42);
+        assert_eq!(env.view, None, "a hand-configured sketch");
         assert_eq!(env.sketch_type, SketchType::DDSketch);
         assert_eq!(env.window_start_ms, 0);
         assert_eq!(env.window_end_ms, 10_000);
@@ -256,7 +257,7 @@ fn stats_account_observations() {
 }
 
 // ----------------------------------------------------------------
-// 3. Drain rotates partial-window state.
+// 3. Drain closes partial-window state.
 
 #[test]
 fn drain_flushes_mid_window_observations() {
@@ -287,7 +288,7 @@ fn drain_flushes_mid_window_observations() {
         .expect("observe");
     }
 
-    // Mid-window Tick is a no-op: now_ms < active_end_ms.
+    // Mid-window Tick is a no-op: the window (0 s, 10 s] is still open.
     let no_envs = p.tick(2_000);
     assert!(no_envs.is_empty());
 
@@ -295,7 +296,7 @@ fn drain_flushes_mid_window_observations() {
     let envs = p.drain();
     assert_eq!(envs.len(), 1);
     let env = &envs[0];
-    assert_eq!(env.agg_id, 7);
+    assert_eq!(env.view, None);
     assert_eq!(env.window_start_ms, 0);
     assert_eq!(env.window_end_ms, 10_000);
     assert_eq!(env.count, 3);
@@ -305,9 +306,8 @@ fn drain_flushes_mid_window_observations() {
     let again = p.drain();
     assert!(again.is_empty());
 
-    // After Drain, next active window starts where natural rotation
-    // would have used (10_000), so mid-window Tick at 15_000 still
-    // no-ops...
+    // After Drain, the next sample opens its own window (10 s, 20 s],
+    // so mid-window Tick at 15_000 still no-ops...
     p.observe(&Observation {
         timestamp_ms: 11_000,
         metric: "m".into(),
@@ -319,8 +319,8 @@ fn drain_flushes_mid_window_observations() {
     let mid = p.tick(15_000);
     assert!(mid.is_empty());
 
-    // ...but Tick at 20_000 (>= new active_end_ms) flushes window 1.
-    let envs = p.tick(20_000);
+    // ...but Tick past 20_000 flushes it.
+    let envs = p.tick(20_001);
     assert_eq!(envs.len(), 1);
     assert_eq!(envs[0].window_start_ms, 10_000);
     assert_eq!(envs[0].window_end_ms, 20_000);
@@ -328,8 +328,8 @@ fn drain_flushes_mid_window_observations() {
 
 #[test]
 fn drain_equals_tick_at_boundary() {
-    // Drain emits the same shape Tick would emit if called precisely
-    // at active_end_ms. Pins "Drain is the shutdown twin of Tick".
+    // Drain emits the same shape Tick would emit if called just past
+    // the window's end. Pins "Drain is the shutdown twin of Tick".
     let mk = || {
         let cfg = PrecomputeConfig {
             agg_id: 1,
@@ -361,7 +361,7 @@ fn drain_equals_tick_at_boundary() {
 
     let p_tick = mk();
     feed(&p_tick);
-    let tick_envs = p_tick.tick(10_000);
+    let tick_envs = p_tick.tick(10_001);
 
     let p_drain = mk();
     feed(&p_drain);
@@ -380,7 +380,7 @@ fn drain_equals_tick_at_boundary() {
 // Envelope-merge inbound path.
 
 #[test]
-fn observe_envelope_merges_into_active_window() {
+fn observe_envelope_merges_into_the_window_holding_its_end() {
     let cfg = PrecomputeConfig {
         agg_id: 5,
         sketch_type: SketchType::DDSketch,
@@ -400,7 +400,6 @@ fn observe_envelope_merges_into_active_window() {
     let env = asap_precompute_rs::SketchEnvelope {
         schema_version: 1,
         sketch_type: SketchType::DDSketch,
-        agg_id: 5,
         resource_labels: vec![KeyValue::new("service.name", "checkout")],
         labels: vec![KeyValue::new("k", "a")],
         window_start_ms: 0,
@@ -411,45 +410,15 @@ fn observe_envelope_merges_into_active_window() {
     };
     p.observe_envelope(&env).expect("merge");
 
-    // The envelope's window_end_ms=10_000 is the ref ts that
-    // initializes the local active window to [10_000, 20_000), so
-    // tick(20_000) is the boundary that flushes it.
-    let out = p.tick(20_000);
+    // The envelope covers (0 s, 10 s], so it lands in the local window
+    // ending at its end, which closes just after 10 s.
+    let out = p.tick(10_001);
+    assert_eq!((out[0].window_start_ms, out[0].window_end_ms), (0, 10_000));
     assert_eq!(out.len(), 1);
     let got = &out[0];
-    assert_eq!(got.agg_id, 5);
     assert_eq!(got.resource_labels, env.resource_labels);
     // entry.count carries the upstream envelope count.
     assert_eq!(got.count, 17);
-}
-
-#[test]
-fn observe_envelope_rejects_agg_id_mismatch() {
-    let cfg = PrecomputeConfig {
-        agg_id: 5,
-        sketch_type: SketchType::DDSketch,
-        mode: AggregationMode::Tumbling,
-        window: WindowSpec {
-            size: Duration::from_secs(10),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let p = PrecomputeImpl::new(
-        Some(cfg),
-        Some(make_factory()),
-        Some(Box::new(FakeObserver)),
-    );
-
-    let env = asap_precompute_rs::SketchEnvelope {
-        schema_version: 1,
-        sketch_type: SketchType::DDSketch,
-        agg_id: 99,
-        payload: b"x".to_vec(),
-        ..Default::default()
-    };
-    let err = p.observe_envelope(&env).unwrap_err();
-    assert!(matches!(err, PrecomputeError::AggIdMismatch { .. }));
 }
 
 // ----------------------------------------------------------------
@@ -484,7 +453,7 @@ fn emit_window_stats_adds_sample_count_and_window_duration() {
         })
         .expect("observe");
     }
-    let envs = p.tick(30_000);
+    let envs = p.tick(30_001);
     assert_eq!(envs.len(), 1);
     let labels = &envs[0].labels;
     let has = |k: &str, v: &str| labels.iter().any(|kv| kv.key == k && kv.value == v);
@@ -504,7 +473,6 @@ fn late_data_returns_late_error() {
         mode: AggregationMode::Tumbling,
         window: WindowSpec {
             size: Duration::from_secs(10),
-            allowed_lateness: Duration::from_secs(1),
             ..Default::default()
         },
         ..Default::default()
@@ -515,7 +483,7 @@ fn late_data_returns_late_error() {
         Some(Box::new(FakeObserver)),
     );
 
-    // Initialize at t=10500ms (active_start=10000).
+    // t=10500ms opens (10 s, 20 s], closing every earlier window.
     p.observe(&Observation {
         timestamp_ms: 10_500,
         metric: "m".into(),
@@ -524,7 +492,7 @@ fn late_data_returns_late_error() {
     })
     .expect("first");
 
-    // Observation at t=8000ms is >1s before active_start=10000.
+    // t=8000ms belongs to the closed (0 s, 10 s].
     let err = p
         .observe(&Observation {
             timestamp_ms: 8_000,
@@ -536,6 +504,200 @@ fn late_data_returns_late_error() {
     assert!(matches!(err, PrecomputeError::LateData));
     let s = p.stats();
     assert_eq!(s.dropped_late, 1);
+}
+
+// ----------------------------------------------------------------
+// Window boundaries follow Prometheus: a window is `(start, end]`, a
+// sample at `t` belongs to the window ending at ⌈t / w⌉ · w, and the
+// window closes once a sample later than its end arrives.
+
+fn ten_second_windows() -> PrecomputeImpl {
+    let cfg = PrecomputeConfig {
+        agg_id: 1,
+        sketch_type: SketchType::DDSketch,
+        mode: AggregationMode::Tumbling,
+        window: WindowSpec {
+            size: Duration::from_secs(10),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    PrecomputeImpl::new(
+        Some(cfg),
+        Some(make_factory()),
+        Some(Box::new(FakeObserver)),
+    )
+}
+
+fn sample_at(ts: u64) -> Observation {
+    Observation {
+        timestamp_ms: ts,
+        metric: "m".into(),
+        labels: vec![KeyValue::new("k", "a")],
+        value: ObservationValue::float(1.0),
+        ..Default::default()
+    }
+}
+
+/// `(window_start_ms, window_end_ms, count)` of each emitted envelope.
+fn windows(envs: &[asap_precompute_rs::SketchEnvelope]) -> Vec<(u64, u64, u64)> {
+    let mut out: Vec<_> = envs
+        .iter()
+        .map(|e| (e.window_start_ms, e.window_end_ms, e.count))
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn sample_on_a_boundary_belongs_to_the_window_ending_there() {
+    let p = ten_second_windows();
+    p.observe(&sample_at(10_000)).expect("boundary sample");
+    p.observe(&sample_at(10_001)).expect("next window");
+    assert_eq!(windows(&p.tick(10_001)), vec![(0, 10_000, 1)]);
+    assert_eq!(windows(&p.drain()), vec![(10_000, 20_000, 1)]);
+}
+
+#[test]
+fn window_stays_open_at_its_end_and_closes_just_after() {
+    let p = ten_second_windows();
+    p.observe(&sample_at(5_000)).expect("observe");
+    assert!(
+        p.tick(10_000).is_empty(),
+        "a sample at 10 s may still arrive"
+    );
+    // That sample lands in the open window.
+    p.observe(&sample_at(10_000)).expect("end sample");
+    assert_eq!(windows(&p.tick(10_001)), vec![(0, 10_000, 2)]);
+}
+
+#[test]
+fn later_samples_close_each_window_they_pass() {
+    let p = ten_second_windows();
+    for ts in [5_000, 15_000, 25_000] {
+        p.observe(&sample_at(ts)).expect("observe");
+    }
+    // Both closed windows are returned without closing anything by time.
+    assert_eq!(
+        windows(&p.take_closed()),
+        vec![(0, 10_000, 1), (10_000, 20_000, 1)]
+    );
+    assert_eq!(windows(&p.drain()), vec![(20_000, 30_000, 1)]);
+}
+
+#[test]
+fn out_of_order_sample_goes_to_its_own_open_window_and_is_dropped_once_closed() {
+    let p = ten_second_windows();
+    p.observe(&sample_at(12_000)).expect("observe");
+    // Older, but its window (10 s, 20 s] is still open.
+    p.observe(&sample_at(11_000))
+        .expect("out of order, open window");
+    // 21 s closes (10 s, 20 s].
+    p.observe(&sample_at(21_000)).expect("observe");
+    for late in [15_000, 20_000, 9_000] {
+        assert!(matches!(
+            p.observe(&sample_at(late)),
+            Err(PrecomputeError::LateData)
+        ));
+    }
+    assert_eq!(p.stats().dropped_late, 3);
+    assert_eq!(windows(&p.tick(21_000)), vec![(10_000, 20_000, 2)]);
+    assert_eq!(windows(&p.drain()), vec![(20_000, 30_000, 1)]);
+}
+
+#[test]
+fn sample_after_an_idle_close_is_dropped_and_the_next_window_opens_on_demand() {
+    let p = ten_second_windows();
+    p.observe(&sample_at(5_000)).expect("observe");
+    // The idle timer at 42 s closes (0 s, 10 s] and every window ending
+    // before 42 s, even those that never opened.
+    assert_eq!(windows(&p.tick(42_000)), vec![(0, 10_000, 1)]);
+    for late in [10_000, 10_001, 40_000] {
+        assert!(matches!(
+            p.observe(&sample_at(late)),
+            Err(PrecomputeError::LateData)
+        ));
+    }
+    // (40 s, 50 s] is still open.
+    p.observe(&sample_at(40_001)).expect("open window");
+    assert_eq!(windows(&p.drain()), vec![(40_000, 50_000, 1)]);
+}
+
+#[test]
+fn envelopes_of_one_window_from_several_sources_merge_in_any_order() {
+    // A merge stage: a source's next window must not close the window
+    // another source has not sent yet.
+    let p = ten_second_windows();
+    let env = |end: u64, source: &str| asap_precompute_rs::SketchEnvelope {
+        schema_version: 1,
+        sketch_type: SketchType::DDSketch,
+        labels: vec![KeyValue::new("k", "a")],
+        window_start_ms: end - 10_000,
+        window_end_ms: end,
+        payload: source.as_bytes().to_vec(),
+        count: 1,
+        ..Default::default()
+    };
+    p.observe_envelope(&env(10_000, "a"))
+        .expect("a, first window");
+    p.observe_envelope(&env(20_000, "a"))
+        .expect("a, second window");
+    p.observe_envelope(&env(10_000, "b"))
+        .expect("b, first window");
+    assert_eq!(windows(&p.tick(10_001)), vec![(0, 10_000, 2)]);
+    // Once the idle timer closed it, the window is late.
+    assert!(matches!(
+        p.observe_envelope(&env(10_000, "c")),
+        Err(PrecomputeError::LateData)
+    ));
+    assert_eq!(p.stats().dropped_late, 1);
+    assert_eq!(windows(&p.drain()), vec![(10_000, 20_000, 1)]);
+}
+
+#[test]
+fn metric_name_matcher_admits_only_that_metric() {
+    use asap_precompute_rs::{LabelMatcher, MatchOp};
+    let cfg = PrecomputeConfig {
+        agg_id: 1,
+        sketch_type: SketchType::DDSketch,
+        mode: AggregationMode::Tumbling,
+        window: WindowSpec {
+            size: Duration::from_secs(10),
+            ..Default::default()
+        },
+        matchers: vec![
+            LabelMatcher::equal("__name__", "http.requests"),
+            LabelMatcher {
+                name: "method".into(),
+                op: MatchOp::NotEqual,
+                value: "POST".into(),
+            },
+        ],
+        ..Default::default()
+    };
+    let p = PrecomputeImpl::new(
+        Some(cfg),
+        Some(make_factory()),
+        Some(Box::new(FakeObserver)),
+    );
+    let obs = |metric: &str, method: &str| Observation {
+        timestamp_ms: 1_000,
+        metric: metric.into(),
+        labels: vec![KeyValue::new("method", method)],
+        value: ObservationValue::float(1.0),
+        ..Default::default()
+    };
+    for o in [
+        obs("http.requests", "GET"),
+        obs("http.requests", "POST"),
+        obs("other", "GET"),
+    ] {
+        p.observe(&o).expect("observe");
+    }
+    let envs = p.drain();
+    assert_eq!(envs.len(), 1);
+    assert_eq!(envs[0].count, 1);
+    assert_eq!(envs[0].labels, vec![KeyValue::new("method", "GET")]);
 }
 
 #[test]
@@ -580,7 +742,7 @@ fn max_series_drop_returns_overflow() {
 }
 
 // ----------------------------------------------------------------
-// update_config swap preserves in-flight window.
+// update_config swap preserves open windows.
 
 #[test]
 fn update_config_swaps_active() {
@@ -666,6 +828,7 @@ mod real_sketch {
             metric: metric.into(),
             resource_labels: vec![KeyValue::new("service.name", "test")],
             labels: vec![KeyValue::new("k", label_v)],
+            source: Default::default(),
             value: ObservationValue::float(val),
         }
     }
@@ -676,6 +839,7 @@ mod real_sketch {
             metric: metric.into(),
             resource_labels: vec![KeyValue::new("service.name", "test")],
             labels: vec![KeyValue::new("k", label_v)],
+            source: Default::default(),
             value: ObservationValue::bytes(key.to_vec()),
         }
     }
@@ -701,7 +865,7 @@ mod real_sketch {
             p.observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
                 .expect("observe");
         }
-        let envs = p.tick(10_000);
+        let envs = p.tick(10_001);
         assert_eq!(envs.len(), 1);
         let env = &envs[0];
         assert_eq!(env.sketch_type, SketchType::DDSketch);
@@ -734,7 +898,7 @@ mod real_sketch {
             p.observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
                 .expect("observe");
         }
-        let envs = p.tick(10_000);
+        let envs = p.tick(10_001);
         assert_eq!(envs.len(), 2, "one gauge per quantile");
         let find = |q: &str| {
             envs.iter()
@@ -775,7 +939,7 @@ mod real_sketch {
             p.observe(&bytes_obs("unique_users", 1_000, "ip", &i.to_le_bytes()))
                 .expect("observe");
         }
-        let envs = p.tick(10_000);
+        let envs = p.tick(10_001);
         assert_eq!(envs.len(), 1, "one cardinality gauge");
         assert!(envs[0].payload.is_empty());
         assert!(
@@ -809,14 +973,14 @@ mod real_sketch {
                 .observe(&bytes_obs("events", 1_000, "hot", b"hot"))
                 .expect("observe");
         }
-        let envs = producer.tick(10_000);
+        let envs = producer.tick(10_001);
         assert_eq!(envs.len(), 1);
 
         let merger =
             PrecomputeImpl::new(Some(cfg), Some(cms_factory()), Some(Box::new(CMSObserver)));
         merger.observe_envelope(&envs[0]).expect("observe_envelope");
         merger.observe_envelope(&envs[0]).expect("observe_envelope");
-        let out = merger.tick(20_000);
+        let out = merger.tick(10_001);
         assert_eq!(out.len(), 1);
         let merged = CMSWrapper::from_snapshot(&out[0].payload).expect("decode merged");
         assert_eq!(merged.estimate_count(b"hot"), 200.0);
@@ -844,14 +1008,14 @@ mod real_sketch {
                 .observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
                 .expect("observe");
         }
-        let envs = producer.tick(10_000);
+        let envs = producer.tick(10_001);
         assert_eq!(envs.len(), 1);
         assert!(envs[0].payload.starts_with(b"ASAPv1"));
 
         let merger =
             PrecomputeImpl::new(Some(cfg), Some(kll_factory()), Some(Box::new(KLLObserver)));
         merger.observe_envelope(&envs[0]).expect("observe_envelope");
-        let out = merger.tick(20_000);
+        let out = merger.tick(10_001);
         assert_eq!(out.len(), 1);
         let merged = KLLWrapper::from_snapshot(&out[0].payload).expect("decode merged");
         let p50 = merged.quantile(0.5);
@@ -875,7 +1039,7 @@ mod real_sketch {
             p.observe(&float_obs("latency_ms", 1_000, "GET", i as f64))
                 .expect("observe");
         }
-        let envs = p.tick(10_000);
+        let envs = p.tick(10_001);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].sketch_type, SketchType::KLLSketch);
         assert!(!envs[0].payload.is_empty());
@@ -898,7 +1062,7 @@ mod real_sketch {
             p.observe(&bytes_obs("unique_users", 1_000, "ip", &i.to_le_bytes()))
                 .expect("observe");
         }
-        let envs = p.tick(10_000);
+        let envs = p.tick(10_001);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].sketch_type, SketchType::HLLSketch);
         assert!(!envs[0].payload.is_empty());
@@ -933,6 +1097,7 @@ mod real_sketch {
                 metric: "events".into(),
                 resource_labels: vec![KeyValue::new("service.name", "test")],
                 labels: vec![KeyValue::new("k", "tag")],
+                source: Default::default(),
                 value: ObservationValue {
                     kind: asap_precompute_rs::ObservationValueKind::Float,
                     float: 1.0,
@@ -942,7 +1107,7 @@ mod real_sketch {
             })
             .expect("observe");
         }
-        let envs = p.tick(10_000);
+        let envs = p.tick(10_001);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].sketch_type, SketchType::CountSketch);
         assert!(!envs[0].payload.is_empty());
@@ -966,7 +1131,7 @@ mod real_sketch {
             p.observe(&bytes_obs("flows", 1_000, "tag", key.as_bytes()))
                 .expect("observe");
         }
-        let envs = p.tick(10_000);
+        let envs = p.tick(10_001);
         assert_eq!(envs.len(), 1);
         assert_eq!(envs[0].sketch_type, SketchType::CountMinSketch);
         assert!(!envs[0].payload.is_empty());
