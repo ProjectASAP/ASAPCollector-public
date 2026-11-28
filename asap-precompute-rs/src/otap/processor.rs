@@ -384,11 +384,10 @@ impl AsapSketchesProcessor {
     /// of idle streams, so it waits a grace for points still queued upstream
     /// (e.g. on a contended host).
     fn idle_close_now_ms(&self) -> u64 {
-        let now_ms = asap_wall_clock_ms();
         if self.plugin_config.window_slide.is_zero() {
-            now_ms.saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64)
+            tumbling_idle_close_now_ms()
         } else {
-            now_ms
+            asap_wall_clock_ms()
         }
     }
 
@@ -582,6 +581,12 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
             _ => Ok(()),
         }
     }
+}
+
+/// The `now_ms` an idle timer closes tumbling windows at: the wall clock
+/// less [`IDLE_CLOSE_GRACE`], for points still queued upstream.
+pub(crate) fn tumbling_idle_close_now_ms() -> u64 {
+    asap_wall_clock_ms().saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64)
 }
 
 /// Current wall-clock timestamp in milliseconds.

@@ -35,6 +35,8 @@ deltas.
 | `otap::codec` | `SketchEnvelope` ↔ `OtapPdata` (`otap-engine`). |
 | `otap::processor` | The `urn:asap:processor:asap_sketches` processor (`otap-engine`). |
 | `otap::planner_views` | Loads and checks `collector-views.json`, the collector views of an installed ASAPPlanner plan (`otap-engine`). |
+| `otap::view_executor` | Builds the collector views' states on ASAPPlanner's executor (`asap-executor`), one ingestion run per open window (`otap-engine`). |
+| `otap::collector_views` | The `urn:asap:processor:collector_views` processor: a `collector-views.json`'s view states, as OTLP (`otap-engine`). |
 | `otap::raw_forward` | The `urn:asap:processor:raw_forward` processor: the raw path minus metrics only collector views read (`otap-engine`). |
 
 ## Dependency

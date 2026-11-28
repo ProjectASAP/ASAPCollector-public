@@ -1,7 +1,6 @@
 //! The collector views of an installed ASAPPlanner plan, loaded from the
 //! control plane's `collector-views.json` (`planner_views: <path>` in the
-//! `raw_forward` config; `asap_sketches` takes it once
-//! [`window_state_config`] is built).
+//! `collector_views` and `raw_forward` configs).
 //!
 //! The file holds the plan's collector sub-DAG in the planner's own serde:
 //!
@@ -19,12 +18,10 @@
 //! v1 accepts each output as a leaf view: a `SummaryTumblingWindowChain`
 //! over a `Scan` of `TimeSeries { metric }`, with only label `Filter`s
 //! between them, and reads it into a [`CollectorView`] in the planner's
-//! terms: the sketch and its θ (an out-of-range size is an error, never a
-//! default), the tumbling width, and the label predicates on the way.
-//!
-//! Which engine builds a view's states is not decided here:
-//! [`window_state_config`] is the seam where a view becomes the
-//! `asap_sketches` processor's window state.
+//! terms: the sketch, its `Scan`, the tumbling width and where its states
+//! go. θ (an out-of-range size is an error, never a default) and the label
+//! predicates on the way are checked, not kept: ASAPPlanner's executor
+//! builds the states from the sub-DAG itself ([`super::view_executor`]).
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -46,7 +43,7 @@ use serde::Deserialize;
 use super::capabilities::{
     collector_capabilities, variant_name, CollectorCapabilities, OperatorCapability,
 };
-use super::config::{PluginConfig, SketchInput, SketchTypeSpec, SKETCH_TYPES};
+use super::config::{SketchInput, SketchTypeSpec, SKETCH_TYPES};
 use super::schema::VIEW_NAME_INFIX;
 use crate::envelope::ViewIdentity;
 
@@ -82,50 +79,23 @@ pub struct CollectorViewsFile {
 /// One checked collector view, in the planner's terms: what a window state
 /// of the collector must build, one state per series.
 ///
-/// Example (q01): `source_metric: "data"`, `sketch: DDSketch`, `parameters:
-/// DDSketch { alpha: 0.05 }`, `tumbling_window_width_ms: 5000`,
-/// `label_predicates: []`, `output_metric_name: "data.asap_view.1"`.
+/// Example (q01): `source_metric: "data"`, `scan_node: 0`, `sketch:
+/// DDSketch`, `tumbling_window_width_ms: 5000`, `output_metric_name:
+/// "data.asap_view.1"`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CollectorView {
     /// The identity stamped on each of its states.
     pub identity: Arc<ViewIdentity>,
     /// The `Scan`'s `TimeSeries` metric.
     pub source_metric: String,
+    /// The `Scan` node below the chain.
+    pub scan_node: PhysicalASAPNodeId,
     /// The name its states are emitted under: `<metric>.asap_view.<node_id>`.
     pub output_metric_name: String,
     /// The chain's sketch.
     pub sketch: SketchAlgorithm,
-    /// θ, within the collector's ranges for `sketch`.
-    pub parameters: SketchParams,
     /// The chain's tumbling window width, positive.
     pub tumbling_window_width_ms: u64,
-    /// Every `Scan`, `Filter` and chain-filter predicate on the way, each a
-    /// label compared with a non-empty string by an op in `predicate_ops`.
-    pub label_predicates: Vec<LabelPredicate>,
-}
-
-/// `label <op> "value"`, one conjunct of a view's selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LabelPredicate {
-    /// The label (a point attribute).
-    pub label: String,
-    /// `Eq` or `Ne`.
-    pub op: CompareOpKind,
-    /// The non-empty literal.
-    pub value: String,
-}
-
-/// The seam where a checked view becomes the `asap_sketches` processor's
-/// window state: its `PluginConfig` (sketch type and sizes from θ, window =
-/// the tumbling width, matchers `__name__ = metric` plus the label
-/// predicates, output name [`CollectorView::output_metric_name`]). Not built until
-/// the engine that runs collector views is chosen (the processor's window
-/// state, or ASAPPlanner's executor).
-pub fn window_state_config(view: &CollectorView) -> PluginConfig {
-    todo!(
-        "map collector view {} onto the asap_sketches window state",
-        view.output_metric_name
-    )
 }
 
 /// A loaded and checked `collector-views.json`.
@@ -133,6 +103,8 @@ pub fn window_state_config(view: &CollectorView) -> PluginConfig {
 pub struct PlannerViews {
     /// One per output, in `outputs` order.
     pub views: Vec<CollectorView>,
+    /// The file's collector sub-DAG, which the executor compiles.
+    pub dag: PhysicalASAPDAG,
     /// The file's `backend_reads_raw`.
     pub backend_reads_raw: BTreeMap<String, bool>,
 }
@@ -252,6 +224,7 @@ pub fn parse(text: &str) -> Result<PlannerViews, PlannerViewsError> {
         .collect::<Result<_, _>>()?;
     Ok(PlannerViews {
         views,
+        dag: file.dag,
         backend_reads_raw: file.backend_reads_raw,
     })
 }
@@ -301,33 +274,24 @@ fn leaf_view(
             "must be positive",
         ));
     }
-    let (sketch, parameters) = sketch(chain, summary_type, input, capabilities)?;
+    let sketch = sketch(chain, summary_type, input, capabilities)?;
 
-    let mut label_predicates = Vec::new();
     if let Some(filter) = filter {
-        label_predicates_of(
+        check_label_predicates(
             id,
             "filter",
             filter,
             &nodes[child].output_schema,
             capabilities,
-            &mut label_predicates,
         )?;
     }
     let mut node = nodes[child];
-    let metric = loop {
+    let (scan_node, metric) = loop {
         let operator = operator_capability(node, capabilities)?;
         match &node.payload {
             Operator::NonASAP(NonASAPOp::Filter { pred, child }) => {
                 let input_schema = &nodes[child].output_schema;
-                label_predicates_of(
-                    node.id,
-                    "pred",
-                    pred,
-                    input_schema,
-                    capabilities,
-                    &mut label_predicates,
-                )?;
+                check_label_predicates(node.id, "pred", pred, input_schema, capabilities)?;
                 node = nodes[child];
             }
             Operator::NonASAP(NonASAPOp::Scan {
@@ -353,16 +317,9 @@ fn leaf_view(
                     ));
                 };
                 for pred in predicates {
-                    label_predicates_of(
-                        node.id,
-                        "predicates",
-                        pred,
-                        schema,
-                        capabilities,
-                        &mut label_predicates,
-                    )?;
+                    check_label_predicates(node.id, "predicates", pred, schema, capabilities)?;
                 }
-                break metric.clone();
+                break (node.id, metric.clone());
             }
             other => {
                 return Err(not_executable(
@@ -380,10 +337,9 @@ fn leaf_view(
         identity: Arc::new(identity),
         output_metric_name: format!("{metric}{VIEW_NAME_INFIX}{id}"),
         source_metric: metric,
+        scan_node,
         sketch,
-        parameters,
         tumbling_window_width_ms: *tumbling_window_width_ms,
-        label_predicates,
     })
 }
 
@@ -406,14 +362,14 @@ fn operator_capability<'c>(
         })
 }
 
-/// The chain's sketch and θ, from its summary type, input and parameters,
-/// each checked against the capabilities' `supported_summaries` entry.
+/// The chain's sketch, from its summary type, with its input and θ checked
+/// against the capabilities' `supported_summaries` entry.
 fn sketch(
     chain: &PhysicalASAPDAGNode,
     summary_type: &FieldDataType,
     input: &SummaryUpdate,
     capabilities: &CollectorCapabilities,
-) -> Result<(SketchAlgorithm, SketchParams), PlannerViewsError> {
+) -> Result<SketchAlgorithm, PlannerViewsError> {
     let id = chain.id;
     let FieldDataType::Sketch(algorithm) = summary_type else {
         return Err(not_executable(
@@ -448,9 +404,9 @@ fn sketch(
                 ));
             }
         }
-        // The processor builds a label-keyed sketch over every point of a
-        // series; a per-series chain keyed by one of the series' own labels
-        // is not built.
+        // A per-series chain keyed by one of the series' own labels: the
+        // collector builds no such view in v1 (it encodes DDSketch and KLL
+        // states only).
         SketchInput::Label => {
             return Err(not_executable(
                 id,
@@ -511,7 +467,7 @@ fn sketch(
             "missing",
         ));
     }
-    Ok((*algorithm, parameters.clone()))
+    Ok(*algorithm)
 }
 
 /// The `SKETCH_TYPES` row θ `parameters` size: the one whose algorithm's
@@ -526,16 +482,15 @@ pub(crate) fn sketch_type_spec_of(parameters: &SketchParams) -> Option<&'static 
     })
 }
 
-/// Appends the label predicates `pred` (field `field` of node `node`, over
-/// `schema`) is: a conjunction of `label <op> "literal"` with `op` in the
-/// capabilities' `predicate_ops`.
-fn label_predicates_of(
+/// Checks that `pred` (field `field` of node `node`, over `schema`) is a
+/// conjunction of `label <op> "literal"` with `op` in the capabilities'
+/// `predicate_ops`.
+fn check_label_predicates(
     node: PhysicalASAPNodeId,
     field: &str,
     pred: &Predicate<PhysicalASAPNodeId>,
     schema: &Schema,
     capabilities: &CollectorCapabilities,
-    out: &mut Vec<LabelPredicate>,
 ) -> Result<(), PlannerViewsError> {
     let unsupported = |what: String| not_executable(node, field, what);
     let mut pending = vec![&pred.0];
@@ -549,7 +504,8 @@ fn label_predicates_of(
                 semantics,
             } => {
                 // SQL's `l != 'v'` excludes rows without `l` (NULL); PromQL's
-                // `!=`, like the collector's, keeps them.
+                // `!=` keeps them. The collector's label columns read a
+                // missing label as "", never NULL, so only PromQL's is built.
                 if *op == CompareOpKind::Ne && *semantics != ExprSemantics::Promql {
                     return Err(unsupported(format!(
                         "{op:?} with {semantics:?} semantics is not supported"
@@ -572,19 +528,16 @@ fn label_predicates_of(
                     .get(*column)
                     .filter(|f| f.dtype == FieldDataType::Plain(DataType::Utf8))
                     .ok_or_else(|| unsupported(format!("column {column} is not a label")))?;
-                // PromQL's `l=""` also matches series without `l`, which the
-                // processor's matchers do not.
+                // PromQL's `l=""` also matches series without `l`; the
+                // collector's label columns read a missing label as "", so
+                // the executor would match them too, but v1 has no test of
+                // it and keeps refusing it.
                 if value.is_empty() {
                     return Err(unsupported(format!(
                         "a matcher on {:?} with an empty value is not supported",
                         label.name
                     )));
                 }
-                out.push(LabelPredicate {
-                    label: label.name.clone(),
-                    op: op.clone(),
-                    value: value.clone(),
-                });
             }
             other => {
                 return Err(unsupported(format!(
@@ -660,31 +613,19 @@ mod tests {
             .view_state_key
             .ends_with(r#""window":{"tumbling":{"width_ms":5000}},"logical_properties":{"parameters":{"DDSketch":{"alpha":0.05}}}}"#));
         assert_eq!(view.source_metric, "data");
+        assert_eq!(view.scan_node, 0);
         assert_eq!(view.output_metric_name, "data.asap_view.1");
         assert_eq!(view.sketch, SketchAlgorithm::DDSketch);
-        assert_eq!(view.parameters, SketchParams::DDSketch { alpha: 0.05 });
         assert_eq!(view.tumbling_window_width_ms, 5000);
-        assert!(view.label_predicates.is_empty());
         assert!(loaded.drops_raw("data"));
         assert!(!loaded.drops_raw("not_in_the_plan"));
     }
 
-    /// `data{region="r0", service!="s1"}`: the `Scan`'s predicates, by label.
+    /// `data{region="r0", service!="s1"}`: the `Scan`'s predicates are
+    /// label matchers the collector accepts (the executor applies them).
     #[test]
-    fn scan_predicates_become_label_predicates() {
-        let loaded = parse(Q01_LABELS).expect("loads");
-        let predicate = |label: &str, op, value: &str| LabelPredicate {
-            label: label.into(),
-            op,
-            value: value.into(),
-        };
-        assert_eq!(
-            loaded.views[0].label_predicates,
-            [
-                predicate("region", CompareOpKind::Eq, "r0"),
-                predicate("service", CompareOpKind::Ne, "s1"),
-            ]
-        );
+    fn scan_label_matchers_are_accepted() {
+        assert_eq!(parse(Q01_LABELS).expect("loads").views.len(), 1);
     }
 
     #[test]
@@ -768,18 +709,5 @@ mod tests {
     fn unknown_fields_are_refused() {
         let text = q01_with(|f| f["extra"] = 1.into());
         assert!(matches!(parse(&text), Err(PlannerViewsError::Parse(_))));
-    }
-
-    /// The seam: a checked view becomes the processor's window state. Not
-    /// built until the engine for collector views is chosen.
-    #[test]
-    #[ignore = "collector views are not mapped onto a window state yet"]
-    fn q01_view_becomes_a_ddsketch_window_state() {
-        let view = &parse(Q01).unwrap().views[0];
-        let config = window_state_config(view);
-        assert_eq!(config.sketch_type, "ddsketch");
-        assert_eq!(config.sketch_params["relative_accuracy"], 0.05);
-        assert_eq!(config.window_size, std::time::Duration::from_secs(5));
-        assert_eq!(config.output_metric_name, "data.asap_view.1");
     }
 }
