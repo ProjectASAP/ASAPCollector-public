@@ -7,15 +7,18 @@
 use crate::config::AggId;
 use crate::observation::{KeyValue, Observation};
 
-/// Picks the comparison operator for a [`LabelMatcher`].
+/// Picks the comparison operator for a [`LabelMatcher`]; written `=` and
+/// `!=` in configs, as in PromQL.
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub enum MatchOp {
     /// Requires `v == matcher.value`.
     #[default]
+    #[serde(rename = "=")]
     Equal,
     /// Requires `v != matcher.value`.
+    #[serde(rename = "!=")]
     NotEqual,
 }
 
@@ -29,15 +32,17 @@ impl MatchOp {
     }
 }
 
-/// Selects observations by metric name (`name == ""`) or label key
-/// (`name != ""`).
-///
-/// Today's per-processor `LabelMatchers` config uses `(key, value)`
-/// equality only; the `op` field is forward-compat for regex / glob.
+/// The matcher name that selects by metric name, as in PromQL.
+pub const METRIC_NAME_LABEL: &str = "__name__";
+
+/// Selects observations by metric name (`name == "__name__"`) or by a
+/// data-point label (any other `name`), as a PromQL `name="value"` or
+/// `name!="value"` matcher.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LabelMatcher {
-    /// Label key to match against, or the empty string to match the
-    /// metric-name field.
+    /// Data-point label key to match against, or [`METRIC_NAME_LABEL`]
+    /// to match the metric name. Never empty.
     pub name: String,
     /// Exact target value.
     pub value: String,
@@ -56,13 +61,14 @@ impl LabelMatcher {
         }
     }
 
-    /// Returns [`MatchOp::Equal`] — the default operator.
-    ///
-    /// Spelled out as a function (rather than only relying on
-    /// `<MatchOp as Default>::default()`) so callers and tests can
-    /// reference the canonical default explicitly.
-    pub fn default_op() -> MatchOp {
-        MatchOp::Equal
+    /// Rejects a matcher with an empty name.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.is_empty() {
+            return Err(format!(
+                "matcher name must be a label key or {METRIC_NAME_LABEL:?}, got \"\""
+            ));
+        }
+        Ok(())
     }
 
     /// Returns whether the observation satisfies all matchers.
@@ -79,7 +85,7 @@ impl LabelMatcher {
             return true;
         }
         for m in matchers {
-            let (val, present) = if m.name.is_empty() {
+            let (val, present) = if m.name == METRIC_NAME_LABEL {
                 (obs.metric.as_str(), !obs.metric.is_empty())
             } else {
                 lookup_label(&obs.labels, &m.name)
@@ -275,12 +281,6 @@ mod tests {
     use crate::observation::ObservationValue;
 
     #[test]
-    fn default_op_returns_equal() {
-        assert_eq!(LabelMatcher::default_op(), MatchOp::Equal);
-        assert_eq!(MatchOp::default(), MatchOp::Equal);
-    }
-
-    #[test]
     fn empty_matchers_admit_everything() {
         let obs = Observation::new(0, "m", vec![], vec![], ObservationValue::float(0.0));
         assert!(LabelMatcher::matches_all(&[], &obs));
@@ -291,6 +291,20 @@ mod tests {
         let obs = Observation::new(0, "m", vec![], vec![], ObservationValue::float(0.0));
         let matchers = vec![LabelMatcher::equal("region", "us-east")];
         assert!(!LabelMatcher::matches_all(&matchers, &obs));
+    }
+
+    #[test]
+    fn name_matcher_selects_the_metric_and_ops_parse_as_promql() {
+        let obs = Observation::new(0, "m", vec![], vec![], ObservationValue::float(0.0));
+        let m: Vec<LabelMatcher> = serde_json::from_str(
+            r#"[{"name": "__name__", "op": "=", "value": "m"},
+                {"name": "__name__", "op": "!=", "value": "other"}]"#,
+        )
+        .unwrap();
+        assert!(LabelMatcher::matches_all(&m, &obs));
+        let other = Observation::new(0, "other", vec![], vec![], ObservationValue::float(0.0));
+        assert!(!LabelMatcher::matches_all(&m, &other));
+        assert!(LabelMatcher::equal("", "m").validate().is_err());
     }
 
     #[test]

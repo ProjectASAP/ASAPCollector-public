@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use crate::config::{PrecomputeConfig, SketchParams, WindowSpec};
 use crate::envelope::SketchType;
+use crate::matchers::{LabelMatcher, METRIC_NAME_LABEL};
 use crate::precompute::{BoxedObserver, SketchFactory, SketchObserver};
 use crate::sketches::{
     CMSHeapObserver, CMSHeapWrapper, CMSObserver, CMSWrapper, CountSketchObserver,
@@ -60,6 +61,13 @@ pub enum ConfigError {
         value: String,
         /// Valid spellings (joined for the error message).
         valid: String,
+    },
+
+    /// A `matchers` entry is malformed or cannot apply.
+    #[error("asap_sketches: invalid matcher: {reason}")]
+    InvalidMatcher {
+        /// Specific validation failure.
+        reason: String,
     },
 
     /// `window_size` was zero or unparsable. Surface as a config-time
@@ -119,6 +127,9 @@ pub struct PluginConfig {
     pub aggregate_by: Vec<String>,
     /// Attribute keys sketched as their own series; `"*"` = every attribute.
     pub per_attribute: Vec<String>,
+    /// Admits only points matching every matcher; `name: "__name__"`
+    /// matches the metric name.
+    pub matchers: Vec<LabelMatcher>,
 }
 
 impl Default for PluginConfig {
@@ -138,6 +149,7 @@ impl Default for PluginConfig {
             quantiles: Vec::new(),
             aggregate_by: Vec::new(),
             per_attribute: Vec::new(),
+            matchers: Vec::new(),
         }
     }
 }
@@ -175,6 +187,21 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
             value: config.window_size.as_millis(),
         });
     }
+    for matcher in &config.matchers {
+        matcher
+            .validate()
+            .map_err(|reason| ConfigError::InvalidMatcher { reason })?;
+        // per_attribute replaces a point's labels with `attribute.key`
+        // before the runtime evaluates matchers.
+        if !config.per_attribute.is_empty() && matcher.name != METRIC_NAME_LABEL {
+            return Err(ConfigError::InvalidMatcher {
+                reason: format!(
+                    "with per_attribute only {METRIC_NAME_LABEL:?} can be matched, got {:?}",
+                    matcher.name
+                ),
+            });
+        }
+    }
     let dispatch = build_dispatch(config)?;
     let sliding = !config.window_slide.is_zero();
     let pcfg = PrecomputeConfig {
@@ -188,9 +215,8 @@ pub fn resolve(config: &PluginConfig) -> Result<(PrecomputeConfig, SketchDispatc
         window: WindowSpec {
             size: config.window_size,
             slide: config.window_slide,
-            ..Default::default()
         },
-        matchers: Vec::new(),
+        matchers: config.matchers.clone(),
         aggregate_by: config.aggregate_by.clone(),
         transmit_sketch: config.transmit_sketch,
         quantiles: config.quantiles.clone(),

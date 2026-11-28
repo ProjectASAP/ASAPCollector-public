@@ -96,7 +96,7 @@ use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 use crate::config::PrecomputeConfigSet;
 use crate::envelope::SketchEnvelope;
 use crate::matchers::per_attribute;
-use crate::observation::{Observation, ObservationValueKind};
+use crate::observation::Observation;
 use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::PluginConfig;
 use crate::precompute::{Precompute, PrecomputeError, PrecomputeImpl};
@@ -162,6 +162,14 @@ pub struct AsapSketchesUserConfig {
     /// (`attribute.key=<key>`); `"*"` = every attribute.
     #[serde(default)]
     pub per_attribute: Vec<String>,
+    /// Admit only points matching every entry, each
+    /// `{name, op: "=" | "!=", value}` (all three required) as a PromQL
+    /// label matcher: `name: "__name__"` matches the metric name, any
+    /// other name a data-point attribute (resource attributes cannot be
+    /// matched). With `per_attribute`, only `__name__`. Inbound sketch
+    /// envelopes are not filtered.
+    #[serde(default)]
+    pub matchers: Vec<crate::matchers::LabelMatcher>,
 }
 
 impl AsapSketchesUserConfig {
@@ -201,6 +209,7 @@ impl AsapSketchesUserConfig {
             quantiles: self.quantiles,
             aggregate_by: self.aggregate_by,
             per_attribute: self.per_attribute,
+            matchers: self.matchers,
         };
         // Bounce the config through the resolver so config mistakes
         // (unsupported sketch_type, zero window) surface here rather
@@ -219,8 +228,8 @@ const fn default_transmit_sketch() -> bool {
 /// How long after a tumbling window's end the idle timer waits before closing it.
 pub(crate) const IDLE_CLOSE_GRACE: Duration = Duration::from_secs(5);
 
-/// Tumbling windows close within a second of their end even when idle;
-/// sliding windows emit once per slide.
+/// Idle tumbling windows close within `IDLE_CLOSE_GRACE` plus a second of
+/// their end; sliding windows emit once per slide.
 pub(crate) fn timer_period(config: &PluginConfig) -> Duration {
     if config.window_slide.is_zero() {
         config.window_size.min(Duration::from_secs(1))
@@ -370,9 +379,22 @@ impl AsapSketchesProcessor {
         }
     }
 
+    /// The `now_ms` handed to `Precompute::tick`. Data crossing a boundary
+    /// closes a tumbling window on time; the wall clock only closes windows
+    /// of idle streams, so it waits a grace for points still queued upstream
+    /// (e.g. on a contended host).
+    fn idle_close_now_ms(&self) -> u64 {
+        let now_ms = asap_wall_clock_ms();
+        if self.plugin_config.window_slide.is_zero() {
+            now_ms.saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64)
+        } else {
+            now_ms
+        }
+    }
+
     /// Encodes and emits one window's worth of envelopes, if any —
-    /// shared by the `TimerTick` (regular flush) and `Shutdown`
-    /// (final drain) paths. `envs` empty is a no-op, matching
+    /// shared by the PData (windows the batch closed), `TimerTick` (idle
+    /// close) and `Shutdown` (final drain) paths. `envs` empty is a no-op, matching
     /// `Precompute::tick`/`drain`'s own "nothing to flush" contract.
     ///
     /// [`OtapSketchEncoder`] builds the real `OtapPdata` directly from
@@ -429,11 +451,9 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 effect_handler
                     .notify_ack(AckMsg::new(pdata.clone()))
                     .await?;
-                let tumbling = self.plugin_config.window_slide.is_zero();
                 let precompute = &self.precompute;
                 let keys = &self.plugin_config.per_attribute;
                 let split = &mut self.split;
-                let mut closed = None;
                 let mut failure = None;
                 // Note: `observe` handles both "genuine OTLP metric" and
                 // "sketch shipped as binary inside an OTAP metric" (an
@@ -442,6 +462,9 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 // and `Precompute::observe` merges those as pre-aggregated
                 // sketches instead of expanding them to scalar samples. See
                 // `codec.rs`'s module doc ("Scope").
+                //
+                // Each point goes to the window holding its timestamp; a point
+                // past the open window's end closes it.
                 //
                 // LateData / SeriesCapExceeded are expected outcomes already
                 // tallied in stats, so silent by design. Anything else (e.g.
@@ -459,23 +482,12 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                     Ok::<(), std::convert::Infallible>(())
                 };
                 let decoded = decode_each(pdata, |obs| {
-                    // A tumbling window closes as soon as a point's event time
-                    // passes its end, so no point lands in an earlier window.
-                    if tumbling
-                        && closed.is_none()
-                        && obs.value.kind != ObservationValueKind::Envelope
-                    {
-                        closed = Some(precompute.tick(obs.timestamp_ms));
-                    }
                     let _ = if keys.is_empty() {
                         observe(obs)
                     } else {
                         per_attribute(obs, keys, split, &mut observe)
                     };
                 });
-                if let Some(envs) = closed {
-                    self.emit_envelopes(&envs, effect_handler).await?;
-                }
                 match decoded {
                     Ok(0) => {}
                     Ok(skipped) => {
@@ -499,25 +511,18 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                         .info(&format!("asap_sketches: observe failed: {e}"))
                         .await;
                 }
-                if !self.plugin_config.window_slide.is_zero() {
-                    // Completed upstream panes already have a boundary. Emit
-                    // promptly instead of waiting another whole slide interval.
-                    let envs = self.precompute.tick(asap_wall_clock_ms());
-                    self.emit_envelopes(&envs, effect_handler).await?;
-                }
-                Ok(())
+                // Emit the tumbling windows this batch's points closed (idle
+                // windows wait for the timer), and completed upstream panes
+                // promptly instead of a whole slide later.
+                let envs = if self.plugin_config.window_slide.is_zero() {
+                    self.precompute.take_closed()
+                } else {
+                    self.precompute.tick(self.idle_close_now_ms())
+                };
+                self.emit_envelopes(&envs, effect_handler).await
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
-                // Data crossing a boundary closes a tumbling window on time; the
-                // timer only closes windows of idle streams, so it waits a grace
-                // for points still queued upstream (e.g. on a contended host).
-                let now_ms = asap_wall_clock_ms();
-                let now_ms = if self.plugin_config.window_slide.is_zero() {
-                    now_ms.saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64)
-                } else {
-                    now_ms
-                };
-                let envs = self.precompute.tick(now_ms);
+                let envs = self.precompute.tick(self.idle_close_now_ms());
                 self.emit_envelopes(&envs, effect_handler).await
             }
             Message::Control(NodeControlMsg::Shutdown { .. }) => {
@@ -682,6 +687,63 @@ mod tests {
         );
         println!("total                        {:6.2} us/point", us(all));
         println!("  of which CMS+heap update   {:6.2} us/point", us(cms_only));
+    }
+
+    #[test]
+    fn matchers_reach_the_runtime_config_and_bad_ones_are_rejected() {
+        use crate::matchers::{LabelMatcher, MatchOp};
+        let parse = |extra: serde_json::Value| {
+            let mut config = serde_json::json!({
+                "sketch_type": "ddsketch", "window_size": "10s",
+                "output_metric_name": "out"
+            });
+            config
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<super::AsapSketchesUserConfig>(config)
+                .map_err(|e| e.to_string())?
+                .into_plugin_config()
+                .map_err(|e| e.to_string())
+        };
+        let config = parse(serde_json::json!({"matchers": [
+            {"name": "__name__", "op": "=", "value": "http.server.request.duration"},
+            {"name": "http.route", "op": "!=", "value": "/health"}
+        ]}))
+        .unwrap();
+        let (runtime, _) = super::resolve_plugin_config(&config).unwrap();
+        assert_eq!(
+            runtime.matchers,
+            vec![
+                LabelMatcher::equal("__name__", "http.server.request.duration"),
+                LabelMatcher {
+                    name: "http.route".into(),
+                    op: MatchOp::NotEqual,
+                    value: "/health".into(),
+                },
+            ]
+        );
+        for bad in [
+            serde_json::json!([{"name": "", "op": "=", "value": "x"}]),
+            serde_json::json!([{"name": "a", "op": "=~", "value": "x"}]),
+            serde_json::json!([{"name": "a", "value": "x"}]),
+            serde_json::json!([{"name": "a", "op": "=", "value": "x", "regex": true}]),
+        ] {
+            assert!(
+                parse(serde_json::json!({"matchers": bad.clone()})).is_err(),
+                "{bad}"
+            );
+        }
+        // per_attribute replaces a point's labels before the runtime sees
+        // it, so only the metric name can be matched there.
+        let per_attribute = |name: &str| {
+            parse(serde_json::json!({
+                "per_attribute": ["http.route"],
+                "matchers": [{"name": name, "op": "=", "value": "v"}]
+            }))
+        };
+        assert!(per_attribute("http.route").is_err());
+        assert!(per_attribute("__name__").is_ok());
     }
 
     #[test]
