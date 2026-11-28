@@ -2,9 +2,10 @@
 //! no processor with the sketch pipeline; only the generated input is the same.
 //!
 //! * `urn:asap:processor:exact_branch` (one per source) keeps every raw point
-//!   of each event-time window as an [`ExactWindow`]: the values of each
+//!   of each event-time window `(start, end]` (as the sketch pipeline and
+//!   Prometheus range selectors) as an [`ExactWindow`]: the values of each
 //!   quantile series and a value -> count map per attribute key. It emits a
-//!   window when data crosses its end, or 5 s after its end if the stream idles.
+//!   window when data passes its end, or 5 s after its end if the stream idles.
 //! * `urn:asap:processor:exact_merge` adds up the sources' windows and emits
 //!   each as soon as all `sources` have sent it (each sends a window in one
 //!   message, in window order), or `grace` after its end if one is missing.
@@ -90,6 +91,7 @@ use crate::answers::{
 use crate::envelope::{SketchEnvelope, SketchType};
 use crate::matchers::ATTRIBUTE_KEY_LABEL;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
+use crate::window::window_end_ms;
 
 /// Registered URN of the exact branch.
 pub const EXACT_BRANCH_URN: &str = "urn:asap:processor:exact_branch";
@@ -237,8 +239,8 @@ impl ExactBranch {
             return;
         }
         let size = self.config.window.as_millis().max(1) as u64;
-        let start = obs.timestamp_ms / size * size;
-        let end = start + size;
+        let end = window_end_ms(obs.timestamp_ms, size);
+        let start = end - size;
         if end <= self.emitted_until {
             return;
         }
@@ -313,9 +315,10 @@ impl local::Processor<OtapPdata> for ExactBranch {
                 effects.notify_ack(AckMsg::new(pdata.clone())).await?;
                 let mut out = None;
                 let decoded = decode_each(pdata, |obs| {
-                    // A window closes as soon as a point's event time passes its end.
+                    // A window `(start, end]` closes as soon as a point's
+                    // event time passes its end.
                     if out.is_none() {
-                        out = Some(self.close(obs.timestamp_ms));
+                        out = Some(self.close(obs.timestamp_ms.saturating_sub(1)));
                     }
                     self.observe(obs);
                 });
@@ -724,7 +727,7 @@ impl RawSink {
         let mut by_window: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         for p in points {
             self.sent_until_ms = self.sent_until_ms.max(p.timestamp_ms);
-            let end = p.timestamp_ms / size * size + size;
+            let end = window_end_ms(p.timestamp_ms, size);
             if end > self.emitted_until {
                 by_window.entry(end).or_default().push(p.timestamp_ms);
             }
@@ -767,7 +770,7 @@ impl RawSink {
             .windows
             .iter()
             .filter(|(end, w)| {
-                (**end <= self.sent_until_ms || **end + grace <= now)
+                (**end < self.sent_until_ms || **end + grace <= now)
                     && (w.in_flight == 0 || **end + 10 * grace <= now)
             })
             .map(|(end, _)| *end)

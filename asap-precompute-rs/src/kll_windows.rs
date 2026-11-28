@@ -1,6 +1,9 @@
 //! Retained, mergeable KLL panes and aligned sliding-window estimates.
 //!
-//! A pane is a half-open tumbling interval. Range queries merge complete
+//! A pane is a tumbling interval `(start, end]`, as a Prometheus range
+//! selector: a sample at `t` belongs to the pane ending at
+//! [`window_end_ms`], and a pane is complete once time passes its end.
+//! Range queries merge complete
 //! sketches rather than quantiles or raw observations. Exact time selection
 //! requires pane-aligned bounds; the quantile itself has KLL rank error.
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -13,6 +16,7 @@ use crate::matchers::series_attrs;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
 use crate::precompute::{Precompute, PrecomputeError, Sketch, StatsSnapshot};
 use crate::sketches::KLLWrapper;
+use crate::window::window_end_ms;
 
 fn invalid(message: &str) -> PrecomputeError {
     PrecomputeError::Other(format!("KLL windows: {message}"))
@@ -95,10 +99,20 @@ impl KllWindowStore {
         })
     }
 
-    /// Mark complete panes through `now_ms` and expire panes older than retention.
+    /// Mark complete every pane ending before `now_ms` (a sample at a pane's
+    /// end still belongs to it) and expire panes older than retention.
     /// The watermark never moves backward, including after a clock adjustment.
     pub fn advance(&mut self, now_ms: u64) {
-        let boundary = now_ms / self.pane_ms * self.pane_ms;
+        self.close_through(self.last_end_before(now_ms));
+    }
+
+    /// End of the last pane that ends before `now_ms`.
+    fn last_end_before(&self, now_ms: u64) -> u64 {
+        window_end_ms(now_ms, self.pane_ms).saturating_sub(self.pane_ms)
+    }
+
+    /// Mark complete every pane ending at or before `boundary`.
+    fn close_through(&mut self, boundary: u64) {
         if boundary <= self.closed_until {
             return;
         }
@@ -132,13 +146,15 @@ impl KllWindowStore {
         {
             return Err(invalid("expected a finite scalar observation"));
         }
-        if observation.timestamp_ms < self.closed_until {
+        // Its pane ends at or before `closed_until` (a multiple of the pane).
+        if observation.timestamp_ms <= self.closed_until {
             return Err(PrecomputeError::LateData);
         }
-        let start = observation.timestamp_ms / self.pane_ms * self.pane_ms;
-        start
-            .checked_add(self.pane_ms)
-            .ok_or_else(|| invalid("pane end overflow"))?;
+        let start = observation
+            .timestamp_ms
+            .checked_next_multiple_of(self.pane_ms)
+            .ok_or_else(|| invalid("pane end overflow"))?
+            - self.pane_ms;
         self.advance(observation.timestamp_ms);
         let (resource, labels) = self.labels(&observation.resource_labels, &observation.labels);
         let key = self.config.series_key_for_entry(&resource, &labels);
@@ -191,7 +207,7 @@ impl KllWindowStore {
         }
         let (resource, labels) = self.labels(&envelope.resource_labels, &envelope.labels);
         let key = self.config.series_key_for_entry(&resource, &labels);
-        self.advance(envelope.window_end_ms);
+        self.close_through(envelope.window_end_ms);
         self.admit(&key)?;
         let entry = self
             .panes
@@ -234,7 +250,7 @@ impl KllWindowStore {
         Ok(())
     }
 
-    /// Merge all complete panes in `[start_ms, end_ms)` into one full KLL per
+    /// Merge all complete panes in `(start_ms, end_ms]` into one full KLL per
     /// series. Queries never consume or mutate stored sketches. Bounds must
     /// align to panes, lie within retention, and exclude the active pane.
     /// Missing panes mean no observations, not interpolated samples.
@@ -353,11 +369,8 @@ impl KllRollingPrecompute {
     pub fn new(config: PrecomputeConfig) -> Result<Self, PrecomputeError> {
         if config.mode != AggregationMode::Sliding
             || (config.transmit_sketch && config.window.size != config.window.slide)
-            || !config.window.allowed_lateness.is_zero()
         {
-            return Err(invalid(
-                "overlapping sliding requires scalar output and zero allowed_lateness",
-            ));
+            return Err(invalid("overlapping sliding requires scalar output"));
         }
         if !config.transmit_sketch && config.quantiles.is_empty() {
             return Err(invalid(
@@ -429,7 +442,7 @@ impl Precompute for KllRollingPrecompute {
         if state.closed {
             return vec![];
         }
-        let wall_boundary = now_ms / state.store.pane_ms * state.store.pane_ms;
+        let wall_boundary = state.store.last_end_before(now_ms);
         let end = state
             .upstream_complete_until
             .map_or(wall_boundary, |complete| complete.min(wall_boundary));

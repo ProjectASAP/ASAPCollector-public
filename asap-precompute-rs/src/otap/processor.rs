@@ -96,7 +96,7 @@ use otel_arrow_dfe_otap::OTAP_PROCESSOR_FACTORIES;
 use crate::config::PrecomputeConfigSet;
 use crate::envelope::SketchEnvelope;
 use crate::matchers::per_attribute;
-use crate::observation::{Observation, ObservationValueKind};
+use crate::observation::Observation;
 use crate::otap::config::resolve as resolve_plugin_config;
 use crate::otap::PluginConfig;
 use crate::precompute::{Precompute, PrecomputeError, PrecomputeImpl};
@@ -162,6 +162,12 @@ pub struct AsapSketchesUserConfig {
     /// (`attribute.key=<key>`); `"*"` = every attribute.
     #[serde(default)]
     pub per_attribute: Vec<String>,
+    /// Admit only points matching every entry, each
+    /// `{name, op: "=" | "!=", value}` as a PromQL label matcher, with
+    /// `name: "__name__"` for the metric name and any other name a
+    /// data-point attribute. With `per_attribute`, only `__name__`.
+    #[serde(default)]
+    pub matchers: Vec<crate::matchers::LabelMatcher>,
 }
 
 impl AsapSketchesUserConfig {
@@ -201,6 +207,7 @@ impl AsapSketchesUserConfig {
             quantiles: self.quantiles,
             aggregate_by: self.aggregate_by,
             per_attribute: self.per_attribute,
+            matchers: self.matchers,
         };
         // Bounce the config through the resolver so config mistakes
         // (unsupported sketch_type, zero window) surface here rather
@@ -370,6 +377,19 @@ impl AsapSketchesProcessor {
         }
     }
 
+    /// The `now_ms` handed to `Precompute::tick`. Data crossing a boundary
+    /// closes a tumbling window on time; the wall clock only closes windows
+    /// of idle streams, so it waits a grace for points still queued upstream
+    /// (e.g. on a contended host).
+    fn tick_now_ms(&self) -> u64 {
+        let now_ms = asap_wall_clock_ms();
+        if self.plugin_config.window_slide.is_zero() {
+            now_ms.saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64)
+        } else {
+            now_ms
+        }
+    }
+
     /// Encodes and emits one window's worth of envelopes, if any —
     /// shared by the `TimerTick` (regular flush) and `Shutdown`
     /// (final drain) paths. `envs` empty is a no-op, matching
@@ -429,11 +449,9 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 effect_handler
                     .notify_ack(AckMsg::new(pdata.clone()))
                     .await?;
-                let tumbling = self.plugin_config.window_slide.is_zero();
                 let precompute = &self.precompute;
                 let keys = &self.plugin_config.per_attribute;
                 let split = &mut self.split;
-                let mut closed = None;
                 let mut failure = None;
                 // Note: `observe` handles both "genuine OTLP metric" and
                 // "sketch shipped as binary inside an OTAP metric" (an
@@ -442,6 +460,9 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                 // and `Precompute::observe` merges those as pre-aggregated
                 // sketches instead of expanding them to scalar samples. See
                 // `codec.rs`'s module doc ("Scope").
+                //
+                // Each point goes to the window holding its timestamp; a point
+                // past the open window's end closes it.
                 //
                 // LateData / SeriesCapExceeded are expected outcomes already
                 // tallied in stats, so silent by design. Anything else (e.g.
@@ -459,23 +480,12 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                     Ok::<(), std::convert::Infallible>(())
                 };
                 let decoded = decode_each(pdata, |obs| {
-                    // A tumbling window closes as soon as a point's event time
-                    // passes its end, so no point lands in an earlier window.
-                    if tumbling
-                        && closed.is_none()
-                        && obs.value.kind != ObservationValueKind::Envelope
-                    {
-                        closed = Some(precompute.tick(obs.timestamp_ms));
-                    }
                     let _ = if keys.is_empty() {
                         observe(obs)
                     } else {
                         per_attribute(obs, keys, split, &mut observe)
                     };
                 });
-                if let Some(envs) = closed {
-                    self.emit_envelopes(&envs, effect_handler).await?;
-                }
                 match decoded {
                     Ok(0) => {}
                     Ok(skipped) => {
@@ -499,25 +509,13 @@ impl local::Processor<OtapPdata> for AsapSketchesProcessor {
                         .info(&format!("asap_sketches: observe failed: {e}"))
                         .await;
                 }
-                if !self.plugin_config.window_slide.is_zero() {
-                    // Completed upstream panes already have a boundary. Emit
-                    // promptly instead of waiting another whole slide interval.
-                    let envs = self.precompute.tick(asap_wall_clock_ms());
-                    self.emit_envelopes(&envs, effect_handler).await?;
-                }
-                Ok(())
+                // Emit the tumbling windows this batch closed, and completed
+                // upstream panes promptly instead of a whole slide later.
+                let envs = self.precompute.tick(self.tick_now_ms());
+                self.emit_envelopes(&envs, effect_handler).await
             }
             Message::Control(NodeControlMsg::TimerTick { .. }) => {
-                // Data crossing a boundary closes a tumbling window on time; the
-                // timer only closes windows of idle streams, so it waits a grace
-                // for points still queued upstream (e.g. on a contended host).
-                let now_ms = asap_wall_clock_ms();
-                let now_ms = if self.plugin_config.window_slide.is_zero() {
-                    now_ms.saturating_sub(IDLE_CLOSE_GRACE.as_millis() as u64)
-                } else {
-                    now_ms
-                };
-                let envs = self.precompute.tick(now_ms);
+                let envs = self.precompute.tick(self.tick_now_ms());
                 self.emit_envelopes(&envs, effect_handler).await
             }
             Message::Control(NodeControlMsg::Shutdown { .. }) => {

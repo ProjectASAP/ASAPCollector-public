@@ -11,7 +11,7 @@ use crate::config::{PrecomputeConfig, PrecomputeConfigSet};
 use crate::envelope::{SketchEnvelope, SketchType};
 use crate::matchers::series_attrs;
 use crate::observation::{KeyValue, Observation, ObservationValueKind};
-use crate::window::{SeriesEntry, WindowState};
+use crate::window::{ClosedWindow, SeriesEntry, WindowState};
 
 /// Narrow interface the Layer-3 runtime needs from a Layer-1 sketch
 /// implementation.
@@ -173,9 +173,9 @@ pub enum PrecomputeError {
     /// `MaxSeries` is reached and `OnOverflow` is `Drop`.
     #[error("precompute: series cap exceeded")]
     SeriesCapExceeded,
-    /// Observation timestamp is older than the active window's lower
-    /// bound minus `AllowedLateness`.
-    #[error("precompute: observation timestamp outside allowed lateness")]
+    /// The window holding the observation's timestamp has already
+    /// closed (a later sample passed its end, or the idle timer closed it).
+    #[error("precompute: observation's window has already closed")]
     LateData,
     /// Precompute has no `PrecomputeConfig`.
     #[error("precompute: no config installed")]
@@ -214,25 +214,26 @@ pub enum PrecomputeError {
 /// a deployment with multiple sketch types runs multiple instances
 /// side-by-side.
 pub trait Precompute: Send + Sync {
-    /// Routes a raw observation into the active window. May return
+    /// Routes a raw observation into the window holding its timestamp
+    /// (`(start, end]`, see [`crate::window::WindowState`]). May return
     /// [`PrecomputeError::SeriesCapExceeded`] or
     /// [`PrecomputeError::LateData`]; other errors indicate
     /// config / state problems.
     fn observe(&self, obs: &Observation) -> Result<(), PrecomputeError>;
 
-    /// Merges a pre-aggregated upstream sketch into the active
-    /// window.
+    /// Merges a pre-aggregated upstream sketch into the window holding
+    /// its end.
     ///
     /// The envelope's bytes are NEVER expanded to scalar samples
     /// (bandwidth invariant).
     fn observe_envelope(&self, env: &SketchEnvelope) -> Result<(), PrecomputeError>;
 
-    /// Rotates the active window (when due) and returns the closed
-    /// window's series as `Vec<SketchEnvelope>` ready for emit.
+    /// Returns the envelopes of every window closed since the last call,
+    /// ready for emit: windows a later sample closed, plus the open
+    /// window when `now_ms` is past its end.
     ///
-    /// `now_ms` is the wall-clock time the caller (e.g.
-    /// `Adapter::schedule_tick`) considers "now"; the runtime uses
-    /// it to decide whether the window is due for rotation.
+    /// `now_ms` is the time the caller (e.g. an idle timer) considers
+    /// "now"; a window `(start, end]` is due once `now_ms > end`.
     fn tick(&self, now_ms: u64) -> Vec<SketchEnvelope>;
 
     /// Forces rotation of the active window regardless of
@@ -240,11 +241,10 @@ pub trait Precompute: Send + Sync {
     ///
     /// Use this on shutdown paths to flush pending observations
     /// that haven't reached their natural window boundary.
-    /// Distinct from [`Self::tick`]: `tick` only rotates when
-    /// `now_ms >= active_end_ms`, which silently drops mid-window
-    /// data on early termination. After `drain` the next active
-    /// window's bounds are advanced to the same boundary `tick`
-    /// would have used at the natural rotation point.
+    /// Distinct from [`Self::tick`]: `tick` only closes the open window
+    /// when `now_ms` is past its end, which would leave mid-window data
+    /// behind on early termination. After `drain` a sample in the
+    /// drained window is late, as after any close.
     fn drain(&self) -> Vec<SketchEnvelope>;
 
     /// Atomically swaps the active config.
@@ -287,7 +287,8 @@ pub struct StatsSnapshot {
     pub active_series: i64,
     /// Observations dropped due to `MaxSeries`.
     pub dropped_overflow: u64,
-    /// Observations dropped due to `AllowedLateness`.
+    /// Observations and envelopes dropped because their window had
+    /// already closed.
     pub dropped_late: u64,
     /// Wall-clock timestamp of the last `tick` call.
     pub last_tick_ms: u64,
@@ -383,15 +384,10 @@ impl PrecomputeImpl {
         self.state.lock().expect("state lock poisoned")
     }
 
-    /// Walks the closed series, serializes each into a
+    /// Walks the closed windows' series, serializes each into a
     /// [`SketchEnvelope`], and
     /// updates the rolling stats counters.
-    fn finish_rotate(
-        &self,
-        closed: Vec<SeriesEntry>,
-        rng: [u64; 2],
-        now_ms: u64,
-    ) -> Vec<SketchEnvelope> {
+    fn finish_rotate(&self, closed: Vec<ClosedWindow>, now_ms: u64) -> Vec<SketchEnvelope> {
         if closed.is_empty() {
             return Vec::new();
         }
@@ -399,14 +395,17 @@ impl PrecomputeImpl {
             Some(c) => c,
             None => return Vec::new(),
         };
-        let mut envelopes = Vec::with_capacity(closed.len());
-        for entry in closed.into_iter() {
-            // Best-effort: skip serialization errors. Real shims log
-            // via their host logger; the Layer-3 runtime is host-
-            // neutral and has no logger. Estimate mode may yield several
-            // rows (one per quantile) per series.
-            if let Ok(envs) = self.serialize_series(&entry, &cfg, rng) {
-                envelopes.extend(envs);
+        let mut envelopes = Vec::new();
+        for window in closed {
+            let rng = [window.start_ms, window.end_ms];
+            for entry in &window.series {
+                // Best-effort: skip serialization errors. Real shims log
+                // via their host logger; the Layer-3 runtime is host-
+                // neutral and has no logger. Estimate mode may yield several
+                // rows (one per quantile) per series.
+                if let Ok(envs) = self.serialize_series(entry, &cfg, rng) {
+                    envelopes.extend(envs);
+                }
             }
         }
         let stats = &mut self.lock_state().stats;
@@ -418,7 +417,8 @@ impl PrecomputeImpl {
         envelopes
     }
 
-    /// Turns a closed series entry into [`SketchEnvelope`]s.
+    /// Turns a closed series entry of window `rng` = `(start, end]` into
+    /// [`SketchEnvelope`]s.
     fn serialize_series(
         &self,
         entry: &SeriesEntry,
@@ -590,10 +590,14 @@ impl Precompute for PrecomputeImpl {
         let State { window, stats } = &mut *state;
         stats.input_envelopes = stats.input_envelopes.saturating_add(1);
         let result = window.observe_envelope(env, &cfg, sketch_factory, stats);
-        if let Err(err) = &result {
-            if matches!(err, PrecomputeError::SeriesCapExceeded) {
+        match &result {
+            Err(PrecomputeError::SeriesCapExceeded) => {
                 stats.dropped_overflow = stats.dropped_overflow.saturating_add(1);
             }
+            Err(PrecomputeError::LateData) => {
+                stats.dropped_late = stats.dropped_late.saturating_add(1);
+            }
+            _ => {}
         }
         result
     }
@@ -603,17 +607,14 @@ impl Precompute for PrecomputeImpl {
             Some(c) => c,
             None => return Vec::new(),
         };
-        let (closed, rng) = self.lock_state().window.rotate(now_ms, &cfg);
-        self.finish_rotate(closed, rng, now_ms)
+        let closed = self.lock_state().window.tick(now_ms, &cfg);
+        self.finish_rotate(closed, now_ms)
     }
 
     fn drain(&self) -> Vec<SketchEnvelope> {
-        let cfg = match self.shared_config() {
-            Some(c) => c,
-            None => return Vec::new(),
-        };
-        let (closed, rng) = self.lock_state().window.drain(&cfg);
-        self.finish_rotate(closed, rng, rng[1])
+        let closed = self.lock_state().window.drain();
+        let now_ms = closed.last().map_or(0, |w| w.end_ms);
+        self.finish_rotate(closed, now_ms)
     }
 
     fn active_config(&self) -> Option<PrecomputeConfig> {

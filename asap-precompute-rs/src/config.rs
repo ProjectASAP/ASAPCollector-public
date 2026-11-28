@@ -32,7 +32,7 @@ pub enum AggregationMode {
     #[default]
     Tumbling,
     /// Rotates every [`WindowSpec::slide`]; observations land in
-    /// every window whose `[start, end)` range covers their
+    /// every window whose `(start, end]` range covers their
     /// timestamp. KLL implements this by merging disjoint retained panes.
     Sliding,
     /// Processes one batch end-to-end with no windowing (`mode: batch`).
@@ -95,11 +95,6 @@ pub struct WindowSpec {
     /// (`slide == size` implicitly).
     #[serde(with = "duration_millis")]
     pub slide: Duration,
-    /// Grace period for late-arriving samples; observations whose
-    /// `timestamp_ms` is older than `active_start - allowed_lateness`
-    /// are dropped as late.
-    #[serde(with = "duration_millis")]
-    pub allowed_lateness: Duration,
 }
 
 mod duration_millis {
@@ -204,10 +199,11 @@ pub struct PrecomputeConfig {
     pub sketch_type: SketchType,
     /// Picks the windowing strategy.
     pub mode: AggregationMode,
-    /// Configures size / slide / lateness.
+    /// Configures size / slide.
     pub window: WindowSpec,
-    /// Selects observations by metric name and label values. All
-    /// matchers must hold for the observation to be admitted.
+    /// Selects observations by metric name (`__name__`) and data-point
+    /// label values. All matchers must hold for the observation to be
+    /// admitted; a filtered-out observation does not touch any window.
     pub matchers: Vec<LabelMatcher>,
     /// Lists label keys to aggregate over. When non-empty, the
     /// series key is built only from these keys (cross-series

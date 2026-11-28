@@ -316,7 +316,7 @@ keys (`path`, `region`):
 | Field | Type | Role |
 |---|---|---|
 | `series_id` | u32 | Which `DICTIONARY` entry (and, transitively, which `SCHEMA`) this record belongs to. |
-| `window_start_ms` / `window_end_ms` | u64 | The time window this record summarizes. |
+| `window_start_ms` / `window_end_ms` | u64 | The time window `(start, end]` this record summarizes, as a Prometheus range selector: a sample at exactly `end` is in it. |
 | `envelope` | bytes, optional | The sketch's full state as the self-describing ASAPv1 envelope from `asap_sketchlib`. |
 | `value` | f64, optional | An estimate-mode result (a quantile or cardinality estimate), carried instead of `envelope` when the series emits estimates rather than sketch state. |
 
