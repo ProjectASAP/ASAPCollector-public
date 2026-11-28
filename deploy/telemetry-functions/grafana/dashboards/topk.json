@@ -44,7 +44,7 @@
         "type": "prometheus",
         "uid": "asap-prometheus-topk"
       },
-      "description": "Sketch against exact. Truth: exact counts >= 1% of the window's points.",
+      "description": "Sketch against exact. Truth: exact counts >= 1% of the window's points. Precision counts a reported route as wrong only if its exact count is below 1% minus the Count-Min error bound (e / columns).",
       "targets": [
         {
           "refId": "A",

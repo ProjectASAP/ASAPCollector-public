@@ -175,7 +175,8 @@ def topk():
     gauges("Sketch heavy hitters (routes with >= 1% of the points), last 5 minutes",
            [(f'last_over_time(asap_hh_{m}{{method="sketch"}}[5m])', name)
             for m, name in (("precision", "precision"), ("recall", "recall"), ("f1", "F1"))],
-           "Sketch against exact. Truth: exact counts >= 1% of the window's points.", w=16, x=0, good_high=True)
+           ("Sketch against exact. Truth: exact counts >= 1% of the window's points. Precision counts a reported route "
+            "as wrong only if its exact count is below 1% minus the Count-Min error bound (e / columns)."), w=16, x=0, good_high=True)
     gauges("Sketch average relative count error of the heavy hitters found (ARE)",
            [('last_over_time(asap_hh_are{method="sketch"}[5m])', "ARE")], "Mean |estimate - exact| / exact.",
            w=8, x=16, good_high=False)

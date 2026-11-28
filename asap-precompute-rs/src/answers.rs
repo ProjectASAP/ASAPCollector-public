@@ -403,7 +403,8 @@ pub struct HeavyHitterAccuracy {
     pub reported: usize,
     /// Reported keys that are heavy hitters.
     pub true_positives: usize,
-    /// True positives / reported (1 when nothing is reported).
+    /// Reported keys whose exact count is within the sketch's error bound of
+    /// the threshold / reported (1 when nothing is reported).
     pub precision: f64,
     /// True positives / heavy hitters (1 when there are none).
     pub recall: f64,
@@ -419,9 +420,17 @@ pub struct HeavyHitterAccuracy {
 /// long. Returns `None` when either list is full and its smallest count still
 /// reaches the threshold: the window may have more heavy hitters (exact) or
 /// more reported keys (sketch) than the list shows.
+///
+/// `overcount_bound_points` is the sketch's error bound in points (for
+/// Count-Min, e / columns * points; 0 for an exact answer). Following the
+/// standard heavy-hitter guarantee, recall counts the keys with exact count
+/// at least `phi * points`, and a reported key is a false positive only when
+/// its exact count is below `phi * points - overcount_bound_points` (or
+/// unknown: a key missing from the exact list).
 pub fn heavy_hitter_accuracy(
     phi: f64,
     points: f64,
+    overcount_bound_points: f64,
     k: usize,
     exact: &[(String, f64)],
     sketch: &[(String, f64)],
@@ -433,21 +442,30 @@ pub fn heavy_hitter_accuracy(
     if cut_short(exact) || cut_short(sketch) {
         return None;
     }
-    let truth: HashMap<&str, f64> = exact
-        .iter()
-        .filter(|e| e.1 >= threshold)
-        .map(|(key, c)| (key.as_str(), *c))
-        .collect();
+    let exact_counts: HashMap<&str, f64> = exact.iter().map(|(k, c)| (k.as_str(), *c)).collect();
+    let truth = exact.iter().filter(|e| e.1 >= threshold).count();
     let reported: Vec<&(String, f64)> = sketch.iter().filter(|e| e.1 >= threshold).collect();
+    // Relative count errors of the reported heavy hitters (the true positives).
     let errors: Vec<f64> = reported
         .iter()
-        .filter_map(|(key, estimate)| truth.get(key.as_str()).map(|c| (estimate - c).abs() / c))
+        .filter_map(|(key, estimate)| {
+            let c = *exact_counts.get(key.as_str())?;
+            (c >= threshold).then(|| (estimate - c).abs() / c)
+        })
         .collect();
     let tp = errors.len();
+    let within_bound = reported
+        .iter()
+        .filter(|(key, _)| {
+            exact_counts
+                .get(key.as_str())
+                .is_some_and(|c| *c >= threshold - overcount_bound_points)
+        })
+        .count();
     let ratio = |n: usize, d: usize| if d == 0 { 1.0 } else { n as f64 / d as f64 };
-    let (precision, recall) = (ratio(tp, reported.len()), ratio(tp, truth.len()));
+    let (precision, recall) = (ratio(within_bound, reported.len()), ratio(tp, truth));
     Some(HeavyHitterAccuracy {
-        truth: truth.len(),
+        truth,
         reported: reported.len(),
         true_positives: tp,
         precision,
@@ -905,7 +923,7 @@ mod heavy_hitter_tests {
         // d past the threshold and misses c.
         let exact = list(&[("a", 400.0), ("b", 200.0), ("c", 100.0), ("d", 90.0)]);
         let sketch = list(&[("a", 410.0), ("b", 220.0), ("d", 105.0)]);
-        let acc = heavy_hitter_accuracy(0.1, 1000.0, 20, &exact, &sketch).unwrap();
+        let acc = heavy_hitter_accuracy(0.1, 1000.0, 0.0, 20, &exact, &sketch).unwrap();
         assert_eq!((acc.truth, acc.reported, acc.true_positives), (3, 3, 2));
         assert!((acc.precision - 2.0 / 3.0).abs() < 1e-12);
         assert!((acc.recall - 2.0 / 3.0).abs() < 1e-12);
@@ -913,9 +931,48 @@ mod heavy_hitter_tests {
         // (10/400 + 20/200) / 2
         assert!((acc.average_relative_error.unwrap() - 0.0625).abs() < 1e-12);
         // A full exact list whose last count is still heavy may be cut short.
-        assert!(heavy_hitter_accuracy(0.05, 1000.0, 4, &exact, &sketch).is_none());
-        assert!(heavy_hitter_accuracy(0.1, 1000.0, 4, &exact, &sketch).is_some());
+        assert!(heavy_hitter_accuracy(0.05, 1000.0, 0.0, 4, &exact, &sketch).is_none());
+        assert!(heavy_hitter_accuracy(0.1, 1000.0, 0.0, 4, &exact, &sketch).is_some());
         // So may a full sketch list whose last estimate is still reported.
-        assert!(heavy_hitter_accuracy(0.1, 1000.0, 3, &exact[3..], &sketch).is_none());
+        assert!(heavy_hitter_accuracy(0.1, 1000.0, 0.0, 3, &exact[3..], &sketch).is_none());
+    }
+
+    #[test]
+    fn heavy_hitter_precision_allows_the_count_min_error_bound() {
+        // A measured window: 100,000 points, phi 1%, Count-Min 4 x 512, so a
+        // reported route's estimate is at most e / 512 * 100,000 = 531 points
+        // above its true count.
+        let points = 100_000.0;
+        let bound = std::f64::consts::E / 512.0 * points;
+        let heavy: Vec<(String, f64)> = (0..9).map(|i| (format!("h{i}"), 2_000.0)).collect();
+        let with = |extra: &[(&str, f64)]| {
+            let mut v = heavy.clone();
+            v.extend(extra.iter().map(|(k, c)| (k.to_string(), *c)));
+            v
+        };
+        // route-9 has 0.958% of the points and route-8 0.974%; Count-Min
+        // estimates them at 1.004% and 1.002% and so reports both.
+        let exact = with(&[("route-9", 958.0), ("route-8", 974.0), ("light", 400.0)]);
+        let sketch = with(&[("route-9", 1_004.0), ("route-8", 1_002.0)]);
+        let acc = heavy_hitter_accuracy(0.01, points, bound, 20, &exact, &sketch).unwrap();
+        assert_eq!((acc.truth, acc.reported, acc.true_positives), (9, 11, 9));
+        // Within the bound (958 >= 1,000 - 531): not false positives.
+        assert_eq!(acc.precision, 1.0);
+        assert_eq!(acc.recall, 1.0);
+        // Without a bound (an exact answer) they are, as before: 9 / 11.
+        let strict = heavy_hitter_accuracy(0.01, points, 0.0, 20, &exact, &sketch).unwrap();
+        assert!((strict.precision - 9.0 / 11.0).abs() < 1e-12);
+        // A route with 0.4% of the points reported at 1% is below
+        // 1,000 - 531 = 469: a false positive even with the bound.
+        let sketch = with(&[("route-9", 1_004.0), ("light", 1_000.0)]);
+        let acc = heavy_hitter_accuracy(0.01, points, bound, 20, &exact, &sketch).unwrap();
+        assert!((acc.precision - 10.0 / 11.0).abs() < 1e-12);
+        // So is a reported route missing from a full exact list whose last
+        // count is above 469: its true count is unknown.
+        let unknown: Vec<(String, f64)> = (0..11).map(|i| (format!("u{i}"), 958.0)).collect();
+        let full = [heavy.clone(), unknown].concat();
+        let sketch = with(&[("unlisted", 1_000.0)]);
+        let acc = heavy_hitter_accuracy(0.01, points, bound, 20, &full, &sketch).unwrap();
+        assert!((acc.precision - 9.0 / 10.0).abs() < 1e-12);
     }
 }

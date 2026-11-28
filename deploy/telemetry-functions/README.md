@@ -46,13 +46,27 @@ of scenario time, so all three pipelines receive identical points.
 **Heavy-hitter accuracy** (top-k use case). A heavy hitter is a route with at
 least 1% of the window's points by the exact counts; the sketch reports a
 route when its estimate reaches 1%. Per window, `hh-accuracy` emits
-`asap_hh_precision` (reported routes that are heavy hitters / reported),
+`asap_hh_precision` (reported routes whose exact count is within the sketch's
+error bound of the threshold / reported: the standard heavy-hitter guarantee, below),
 `asap_hh_recall` (heavy hitters reported / heavy hitters), `asap_hh_f1`,
 `asap_hh_are` (mean |estimate - exact| / exact over the heavy hitters found),
 `asap_hh_truth` and `asap_hh_reported`. Both detectors report their top 20 so
 that every heavy hitter is in the exact list (about 10 routes reach 1% here);
 a window whose exact top 20 is all above the threshold only gets
 `asap_hh_incomplete`.
+
+Precision allows the Count-Min error. A Count-Min sketch with `w` columns
+overestimates a route by at most ε·N, ε = e / w, over a window of N points
+(with probability 1 - e^-rows); the sketch reports this as its lower bound
+(estimate - ε·N). So, as in the standard heavy-hitter guarantee, a reported
+route is a false positive only when its exact count is below (φ - ε)·N; one
+between (φ - ε)·N and φ·N is within the guarantee. hh-accuracy takes ε·N from
+the sketch's lower bounds (here 4 x 512: ε = 0.53%, 531 of 100,000 points), so
+it follows the configured columns. Recall still counts every route with at
+least φ·N. Example: a window with 9 heavy hitters where Count-Min reports two
+more routes with 0.958% and 0.974% of the points (estimated 1.004% and 1.002%):
+precision 1.0, where counting them as false positives gave 9 / 11 = 0.818.
+`asap_hh_precision{method="raw"}` uses no bound (raw counts are exact).
 
 **Every raw point in Prometheus.** Prometheus keeps one sample per series and
 millisecond, and the generators stamp all points of a batch (up to 1,024) with

@@ -1,5 +1,6 @@
 """Unit tests for query_job's comparison rules: python3 -m unittest deploy/telemetry-functions/test_query_job.py"""
 import io
+import math
 import re
 import os
 import sys
@@ -43,6 +44,32 @@ class RefusalReason(unittest.TestCase):
         self.assertEqual(query_job.refusal_reason(KeyError("data")), "KeyError: 'data'")
         self.assertEqual(query_job.refusal_reason(ValueError("no result from prometheus-raw")),
                          "ValueError: no result from prometheus-raw")
+
+
+class HeavyHitterAccuracy(unittest.TestCase):
+    # A measured window: 100,000 points, phi 1%, Count-Min 4 x 512, so an
+    # estimate is at most e / 512 * 100,000 = 531 points above the true count.
+    POINTS = 100_000.0
+    BOUND = math.e / 512 * POINTS
+    HEAVY = [(f"h{i}", 2_000.0) for i in range(9)]
+
+    def test_key_just_under_phi_is_within_the_bound(self):
+        # route-9 and route-8 have 0.958% and 0.974% of the points; Count-Min
+        # estimates them at 1.004% and 1.002%.
+        exact = self.HEAVY + [("route-9", 958.0), ("route-8", 974.0), ("light", 400.0)]
+        reported = self.HEAVY + [("route-9", 1_004.0), ("route-8", 1_002.0)]
+        acc = query_job.heavy_hitter_accuracy(self.POINTS, exact, reported, self.BOUND)
+        self.assertEqual((acc["precision"], acc["recall"]), (1.0, 1.0))
+        # Without a bound (raw, exact counts) they are false positives: 9 / 11.
+        strict = query_job.heavy_hitter_accuracy(self.POINTS, exact, reported)
+        self.assertAlmostEqual(strict["precision"], 9 / 11)
+
+    def test_key_far_under_phi_is_a_false_positive(self):
+        # 0.4% of the points is below 1,000 - 531 = 469.
+        exact = self.HEAVY + [("light", 400.0)]
+        reported = self.HEAVY + [("light", 1_000.0)]
+        acc = query_job.heavy_hitter_accuracy(self.POINTS, exact, reported, self.BOUND)
+        self.assertAlmostEqual(acc["precision"], 9 / 10)
 
 
 class RawEvents(unittest.TestCase):
