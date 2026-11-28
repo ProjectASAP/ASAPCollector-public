@@ -15,6 +15,8 @@ pub mod answer_nodes;
 #[cfg(feature = "otap-engine")]
 pub mod baseline_nodes;
 #[cfg(feature = "otap-engine")]
+pub mod capabilities;
+#[cfg(feature = "otap-engine")]
 pub mod codec;
 #[cfg(feature = "otap-engine")]
 pub mod hh_accuracy;

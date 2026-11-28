@@ -128,7 +128,7 @@ mod duration_millis {
 ///
 /// Expected keys per sketch type:
 /// - DDSketch: `relative_accuracy` (float, 0 < v < 1)
-/// - KLL: `k` (uint, ≥ 8), optional `seed`
+/// - KLL: `k` (uint, 8 ≤ k ≤ 26602), optional `seed`
 /// - HLL: none (sketchlib's precision-14 HyperLogLog)
 /// - CountSketch / CountMin: `depth`, `width` (uints)
 /// - CountMin with heap: `rows`, `columns`, `k` (uints)
