@@ -58,8 +58,9 @@ a window whose exact top 20 is all above the threshold only gets
 millisecond, and the generators stamp all points of a batch (up to 1,024) with
 the batch's time, so the same route twice in a batch would be two samples of one
 series at one millisecond, and Prometheus would keep only the first. raw-sink
-therefore labels each point `point_slot`: 0 for the first point of its series at
-that millisecond, 1 for the second, and so on. Every point stays a sample, and
+therefore labels every point after the first of its series at that millisecond
+`point_slot`: 1 for the second, 2 for the third, and so on; the first keeps its
+series unchanged, without the label. Every point stays a sample, and
 queries sum over `point_slot` (for example
 `topk(20, sum by (http_route) (count_over_time(http_server_request_duration[60s])))`).
 The two sources are kept apart by their resource attribute `source`, which
