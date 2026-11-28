@@ -19,6 +19,8 @@ pub mod capabilities;
 #[cfg(feature = "otap-engine")]
 pub mod codec;
 #[cfg(feature = "otap-engine")]
+pub mod collector_views;
+#[cfg(feature = "otap-engine")]
 pub mod hh_accuracy;
 #[cfg(feature = "otap-engine")]
 pub mod planner_views;
@@ -28,6 +30,8 @@ pub mod processor;
 pub mod raw_forward;
 #[cfg(feature = "otap-engine")]
 pub mod scenario_generator;
+#[cfg(feature = "otap-engine")]
+pub mod view_executor;
 #[cfg(feature = "otap-engine")]
 pub mod window_merge;
 

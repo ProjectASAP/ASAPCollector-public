@@ -348,14 +348,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "asap-executor"
+version = "0.1.0"
+source = "git+https://github.com/ProjectASAP/ASAPPlanner?rev=a569a23a5a303c0fb1c165a863e3dc4dd92a15e3#a569a23a5a303c0fb1c165a863e3dc4dd92a15e3"
+dependencies = [
+ "ahash 0.8.12",
+ "arrow",
+ "asap-types",
+ "asap_sketchlib",
+ "chrono",
+ "futures",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "asap-precompute-rs"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "asap-executor",
  "asap-types",
  "asap_sketchlib",
  "async-trait",
+ "futures",
  "humantime-serde",
  "libc",
  "linkme",

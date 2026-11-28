@@ -56,6 +56,12 @@ tokio = { version = "1", features = ["sync", "rt", "time", "net"], optional = tr
 # capabilities the collector prints in the planner's vocabulary
 # (`otap::capabilities`). Its asap_sketchlib is the rev pinned above.
 asap-types = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "a569a23a5a303c0fb1c165a863e3dc4dd92a15e3", package = "asap-types", optional = true }
+# ASAPPlanner's executor at the same revision, which builds the collector
+# views' states (`otap::view_executor`). It adds no crate beyond those above:
+# its Arrow is the 58.x the OTAP crates resolve, its asap_sketchlib the rev
+# pinned above.
+asap-executor = { git = "https://github.com/ProjectASAP/ASAPPlanner", rev = "a569a23a5a303c0fb1c165a863e3dc4dd92a15e3", package = "asap-executor", optional = true }
+futures = { version = "0.3", optional = true }
 
 [dev-dependencies]
 serde_json = "1"
@@ -91,6 +97,8 @@ otap-engine = [
     "dep:libc",
     "dep:tokio",
     "dep:asap-types",
+    "dep:asap-executor",
+    "dep:futures",
 ]
 
 # The deployable collector: the official OTAP engine controller with the
@@ -121,3 +129,8 @@ required-features = ["stream-benchmark"]
 [[bin]]
 name = "asap-merge-bench"
 path = "src/bin/asap_merge_bench.rs"
+
+[[bin]]
+name = "asap-views-bench"
+path = "src/bin/asap_views_bench.rs"
+required-features = ["otap-engine"]
